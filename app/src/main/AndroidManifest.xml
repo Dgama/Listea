@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Sending the optional list-completion webhook. Not a runtime permission. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+      Saving a reviewed file into Listea's own gallery album, on Android 9 and below only. From
+      Android 10 an app writes its own media into the shared collections through MediaStore with
+      no permission at all, so the declaration stops at 28 rather than asking newer devices for a
+      grant they would never be consulted about. Requested at the moment of the first save, not at
+      launch: everything else in Listea works without it.
+    -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
+    <application
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Listea">
+        <!--
+          configChanges: rotation is handled in place rather than by tearing the activity down
+          and building it again. The app is Compose-only, so a size or orientation change is
+          already just a recomposition against the new configuration - what recreation adds is a
+          restart of everything that is *not* Compose state, and on a media screen that is the
+          point of the screen: the ExoPlayer instance goes with the activity, so rotating a
+          playing video used to stop it and start it again from zero, and rotating a photograph
+          threw away the decode and read it back from the provider.
+
+          Deliberately does not list uiMode: switching the system between light and dark should
+          still recreate, because enableEdgeToEdge() picks its system-bar scrims from the theme
+          in onCreate and would otherwise be left holding the old ones.
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.Listea"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          Sharing a reviewed file with another app. The file itself is a SAF document belonging to
+          somebody else's provider, and handing that URI out directly works only for receivers
+          willing to read through a foreign provider — so Listea stages a copy in its own cache and
+          hands out that instead, through this. See MediaShare.kt.
+
+          exported=false and grantUriPermissions=true is the whole security model: nothing can
+          reach a staged copy by asking, only by being given the one-off read grant that rides on
+          the share intent. The authority is the package plus ShareProviderSuffix; the two are
+          written out in full in both places because a mismatch fails at the moment of sharing.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/share_paths" />
+        </provider>
+    </application>
+
+</manifest>
