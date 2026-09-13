@@ -192,5 +192,12 @@ one is a debug build, signed with the standard Android debug key.
 
 ## Licence
 
-None yet. No licence has been chosen for this project, so no rights to use, copy or modify the code
-are granted by default. This will be settled before the project asks for outside contributions.
+[Apache License 2.0](LICENSE).
+
+You may use, modify and redistribute this code, including commercially, as long as you keep the
+copyright and licence notices and state what you changed. The licence also grants an explicit
+patent licence from contributors, and the code comes with no warranty of any kind.
+
+The same licence covers Listea's main dependencies — AndroidX, Compose, Media3, Kotlin and Coil are
+all Apache-2.0 — so a build that redistributes them has one set of notices to carry rather than
+several.
