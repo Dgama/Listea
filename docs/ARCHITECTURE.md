@@ -2,7 +2,7 @@
 
 > **Status:** Normative architectural direction  
 > **Scope:** Long-lived product and domain boundaries  
-> **Last updated:** 2026-09-15
+> **Last updated:** 2026-09-15 (revised: orthogonal boundaries; navigation, submission and lifetime semantics)
 
 Listea is a lightweight human-judgment layer between structured inputs and workflow outputs. It turns a collection of reviewable tasks into a fast, resumable feed, records what a person decided, and leaves upstream ingestion and downstream consequences to other systems.
 
@@ -41,6 +41,30 @@ List / Review Round --+                         v
 Listea Core begins after a Task has been assembled. It does not decide that several filenames, a folder, or a ZIP belong to the same real-world subject. Core ends after it has recorded a person's result. It does not send rejection email, move a hiring pipeline forward, rename a file, or decide what an external automation should do.
 
 Importers, task builders, exporters, and actions are architectural boundaries. They do not all need framework abstractions or user-facing configuration yet.
+
+## Orthogonal boundaries
+
+Three pairs of concerns are independent dimensions. A particular workflow may chain them together, and the interface may present them as one motion, but the domain must not fuse them. Collapsing any of these is the most common way a review system quietly becomes unable to represent the next workflow.
+
+### Navigation ⟂ Review / Completion
+
+> Navigation changes what the user is looking at. Review actions change judgment/state. They are independent dimensions even when a particular workflow chains them together.
+
+Moving to another Task is not a statement about the Task being left behind. A person may inspect a Task, move on, and leave it unjudged; that is a valid and expected state, not an incomplete operation. Conversely, a judgment may cause the interface to advance, but the advance is a consequence of the judgment rather than part of its meaning.
+
+### Asset structure ⟂ Task lifecycle
+
+> The resources attached to a Task describe how its content is presented. They do not determine how long the Task should exist.
+
+A Task with no Asset is not a lesser Task, a temporary Task, or a Task owned by whatever context happens to contain it. A Task whose content is entirely structured fields — a question, a vocabulary prompt, a record to adjudicate — is as durable as one carrying five documents. Nothing may infer ownership, scope, or deletion policy from how many Assets a Task has.
+
+### Task creation ⟂ Task review
+
+> Assembling Tasks and judging Tasks are separate responsibilities, even when they ship in the same application.
+
+Listea Core reviews Tasks. It is not also a generic authoring or CRUD surface for inventing them. Material becomes a Task through a deliberate creation/import boundary — a folder scan, a generator, a CSV, a database, an upstream scheduling system — and arrives already normalized. A Task Creator may eventually live inside the same app; architecturally it remains upstream of the review engine.
+
+This matters because Listea does not necessarily own the long-term business object a Task stands for. An upstream vocabulary system may keep its word database, definitions, learning curves and scheduling logic, and generate today's review Tasks from them. Listea reviews what it is given and reports what a person decided.
 
 ## Domain model
 
@@ -87,6 +111,8 @@ Task
 
 A manual, vocabulary, or questionnaire Task may have no Asset. A document-review Task may have several Assets. No implementation may assume `task_id == file_id`, that every Task has a file, or that a Task has exactly one Asset.
 
+Nor may an implementation read anything about a Task's *lifetime* from its Asset count. See [Asset structure ⟂ Task lifecycle](#asset-structure--task-lifecycle): "this Task has no Asset" must never become "this Task belongs to the List that contains it" or "this Task may be deleted with its membership." Where a legacy workflow genuinely needs list-bound Task cleanup, it is a closed compatibility case that names its own rows, not a rule derived from structure.
+
 Structured fields are content, not permission to put profession-specific columns into Core. A field may be named `candidate_name` by imported data or a user-facing template, but `Candidate` is not a Core subtype.
 
 ### Asset
@@ -115,6 +141,8 @@ Therefore:
 - List progress is derived from the current state of its member Tasks.
 - Ordering, filtering, a saved cursor, and review-round position belong to the List/session side of the model, not to the Task.
 
+How a List's Tasks were prepared is not part of what a List is. A List may be built from a scanned folder, an import, a generator, or a future Task Creator; the review context is the same object either way. If a release removes a particular way of creating Lists — as v0.2 removes hand-authored ones, by [Task creation ⟂ Task review](#task-creation--task-review) — that is a product-boundary decision about *creation*, and it must not be read back as a rule that Lists are permanently bound to any one source.
+
 For the first general architecture, a List uses one Task Review Template Version. The app may contain Lists for different kinds of work, but one List remains homogeneous. Mixed-template Lists may be considered later only when a real workflow justifies their navigation and completion complexity.
 
 The architecture does not currently introduce per-membership completion. If a future workflow genuinely requires “this Task is complete in List A but incomplete in List B,” that need may add explicit ListEntry or session state. It must not silently redefine TaskState.
@@ -129,7 +157,11 @@ TaskState may include current responses or action selections as the product grow
 
 ### ReviewEvent and ReviewResult
 
-A **ReviewEvent** records a judgment or meaningful review-state transition that happened at a point in time. It is append-oriented history, not the mutable current row.
+A **ReviewEvent** records a judgment that a person submitted at a point in time, through a Task Review interaction. It is append-oriented history, not the mutable current row.
+
+A ReviewEvent is not a change log for TaskState. Current state can move for many reasons that are not somebody rendering a verdict: an administrative correction from a list or index screen, a bulk edit, a source file going missing, an import. Those update TaskState and record nothing. What produces a ReviewEvent is a **review submission** — the person was presented with a Task through a Task Review Template and committed a response to it.
+
+This is why the two cannot be derived from one another. "Score 4, category B, comment attached", "Again / Hard / Good / Easy", and "reviewed and marked complete" are submissions carrying a response. Ticking a checkbox on an index screen to tidy up is a state edit. A design that mints an event from every state mutation cannot tell those apart, and will report work that nobody did.
 
 A review event should be able to retain:
 
@@ -146,7 +178,7 @@ The invariant is:
 
 > Current state describes what is true now. Review history describes what happened.
 
-For example, a Task may currently be unchecked and still have two prior review events. Unchecking must not erase the fact that previous judgments occurred. Likewise, `review_count` is derived from review history; it is not another name for `checked` and should not be a manually synchronized counter when the events themselves can answer the question.
+For example, a Task may currently be unchecked and still have two prior review events. Unchecking must not erase the fact that previous judgments occurred. Likewise, `review_count` is derived from review history — it counts submissions. It is not another name for `checked`, not a tally of how often `checked` became true, and not a manually synchronized counter when the events themselves can answer the question.
 
 Migration from a system that stored only current state must preserve that state without inventing historical facts that were never recorded.
 
@@ -228,11 +260,17 @@ The Task Navigator changes the current Task or returns to the containing List. I
 
 Task controls must not be hidden inside a filename or another Asset property. A filename belongs to an Asset and cannot become the conceptual owner of Task navigation.
 
+Navigation is pure. `previous Task` and `next Task` change which Task is in front of the person and nothing else. Specifically, neither may mutate TaskState, mark a Task complete, append a ReviewEvent, trigger List completion, trigger a delivery, or otherwise imply that the Task being left has been reviewed. Reaching the last Task by navigating is not completion; the forward control is simply unavailable there.
+
+A workflow may still chain a judgment to an advance — "record this decision, then show me the next one" — but that is one semantic review action whose *consequence* is navigation, not a navigation action that quietly carries a judgment. The two must remain separately invocable, so that a person can move through a queue without being taken to have judged anything.
+
 ### Asset Navigator
 
 The Asset Navigator selects among the current Task's Assets. It never changes the current Task. Its state and controls are separate from the Task Navigator even when a Task has exactly one Asset.
 
-Presentation may later compact or hide redundant controls, but that is a UI optimization; it must not collapse the two navigation concepts in the domain or state model.
+Architectural existence does not require visual existence. The Asset Navigator is always present as a boundary in the composition and state model; whether it draws anything is a presentation decision. For a Task with a single Asset it should draw nothing, because a `1 / 1` indicator is chrome that tells the person nothing and costs room on the content surface. When a Task carries several Assets, the same boundary renders a real selector without the hierarchy changing.
+
+What may never happen is the two navigation concepts collapsing in the domain or state model to match what is currently on screen.
 
 ### Gestures and semantic actions
 
@@ -250,7 +288,9 @@ state transition + ReviewEvent
 
 The same semantic action may be invoked by a swipe, button, keyboard shortcut, or accessibility action. Domain logic must not store or branch on a physical gesture such as `swipeLeft`.
 
-Asset Viewer gestures belong to the viewer unless a Task Review Template explicitly binds a non-conflicting review action. Generic Task navigation must not steal scroll, pan, zoom, playback, selection, or other gestures needed to inspect an Asset. By default, Task navigation uses explicit controls.
+Asset Viewer gestures belong to the viewer unless a Task Review Template explicitly binds a non-conflicting semantic action to one. A template may bind either a review action or a navigation action this way — what makes the binding legitimate is that a named template owns it deliberately, not which dimension the action belongs to.
+
+What may *not* happen is generic Task navigation helping itself to a gesture. Scroll, pan, zoom, playback, selection and anything else needed to inspect an Asset stay with the viewer, and the Task Navigator's own entry point is always an explicit control. A rapid-media template binding a horizontal swipe is that template's choice; it does not become the way Listea navigates Tasks, and a future PDF viewer must still be free to claim the gestures its content needs.
 
 The current rapid-media interaction may keep a left swipe bound to the semantic `checked/complete` action and advance after that action. The state transition is the meaning; advancing is review-flow behavior, not proof that swipe is the universal Task Navigator.
 
@@ -267,6 +307,8 @@ Queue membership and order are review-context concerns. Task identity and TaskSt
 An importer or task builder translates raw sources into normalized Tasks and Assets. It owns source-specific grouping rules, such as whether a folder, ZIP, manifest, or set of related filenames forms one Task.
 
 Core receives the result and must not recreate those rules. Adding a new source should be an adapter concern rather than a reason to add business-specific fields to Task.
+
+This boundary is also where Task *authoring* belongs. By [Task creation ⟂ Task review](#task-creation--task-review), the review surface does not double as a place to invent Tasks: a free-text field that mints a Task inside a review context is an upstream responsibility leaking downstream, and it is the reason a review engine slowly acquires a CRUD interface it was never meant to have. Shopping lists, vocabulary sets, AI-extracted candidates, CSV rows and database queries should all arrive through one deliberate creation boundary, whether or not that boundary ships in the same binary.
 
 ### Exporter / Action
 
@@ -298,6 +340,7 @@ Compatibility should be implemented with migration and adapters: same Listea out
 Listea Core is not:
 
 - a file manager or document editor;
+- a generic authoring or CRUD surface for creating Tasks by hand;
 - an applicant tracking or hiring workflow system;
 - an email, notification, approval-pipeline, or business-rules engine;
 - a place for profession-specific domain semantics;
@@ -321,6 +364,9 @@ A change requires explicit architecture review when it:
 
 - makes Task and Asset identity interchangeable;
 - makes current state and history interchangeable;
+- derives review history mechanically from state mutation, or lets navigation imply review;
+- makes Task lifetime depend on how many Assets a Task has;
+- adds Task authoring to a review context;
 - makes review state depend implicitly on List membership;
 - lets a viewer own Task navigation;
 - stores a raw gesture as domain meaning;
