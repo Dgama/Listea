@@ -65,7 +65,7 @@ action in [File management](file-management.md) — and a narrower root makes al
 reason about.
 
 > Changing the root later **deletes the Lists linked to the old root**. You are shown which ones
-> first. Manual Lists are never touched.
+> first. Lists with no folder behind them are never touched.
 
 ## Browse to something worth reviewing
 
@@ -101,7 +101,9 @@ asked to confirm the replacement first — Lists are not allowed to overlap.
 The List appears on the **Lists** tab, with its progress, and can be opened, reviewed, re-synced
 and wired to a webhook from its detail page.
 
-You can also create a List with no folder behind it at all and type items into it by hand.
+This is the only way to make a List. There is no "New list" button on the Lists tab, and no way to
+type an item into a List by hand: a List that is not over a folder has nothing to be filled from.
+Lists you made that way in an earlier version are still there, with their items.
 
 ## Reviewing
 

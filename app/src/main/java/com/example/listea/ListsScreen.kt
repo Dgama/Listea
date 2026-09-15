@@ -10,18 +10,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.DropdownMenuItem
@@ -95,16 +91,17 @@ private fun ListsIndex(
     onOpenList: (Long) -> Unit
 ) {
     val summaries by viewModel.summaries.collectAsStateWithLifecycle()
-    var creating by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf<ListSummary?>(null) }
     var deleting by remember { mutableStateOf<ListSummary?>(null) }
     var filter by rememberSaveable { mutableStateOf(ListFilter.All) }
 
     val visible = remember(summaries, filter) { summaries.filter(filter::accepts) }
 
-    // The screen title lives in the shell's app bar now; this group is the filters and the one
-    // action the index owns. It wraps rather than overflowing, so "New list" cannot be pushed
-    // off the right edge of a narrow portrait screen by three filter chips.
+    // The screen title lives in the shell's app bar now; this group is the filters, and only the
+    // filters. There is no "New list" control: a List is made from the Folder tab, by pointing one
+    // at a folder, because a List that is not over a folder has no way to be given an item and so
+    // no way to ever be anything but empty. See [ListsViewModel] for why that is a product
+    // boundary rather than a rule about Lists.
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -117,15 +114,6 @@ private fun ListsIndex(
                     onClick = { filter = option },
                     label = { Text(option.label, maxLines = 1) }
                 )
-            }
-            Button(onClick = { creating = true }) {
-                Icon(
-                    Icons.Filled.Add,
-                    contentDescription = null,
-                    modifier = Modifier.size(ListeaDimens.IconSize)
-                )
-                Spacer(Modifier.width(ListeaDimens.CompactGap))
-                Text("New list", maxLines = 1)
             }
         }
         HorizontalDivider()
@@ -152,17 +140,6 @@ private fun ListsIndex(
                 }
             }
         }
-    }
-
-    if (creating) {
-        TextPromptDialog(
-            title = "New list",
-            label = "List name",
-            initialText = "",
-            confirmLabel = "Create",
-            onConfirm = { viewModel.createList(it); creating = false },
-            onDismiss = { creating = false }
-        )
     }
 
     renaming?.let { target ->

@@ -299,7 +299,7 @@ class CurrentStateTest {
     @Test
     fun `a manual item's own row is the one that is trusted`() = runTest {
         val listId = manualList()
-        dao.addItem(listId, "Buy milk", now = 1000)
+        database.writeLegacyManualItem(listId, "Buy milk", now = 1000)
         val milk = dao.getItems(listId).single()
 
         dao.setManualItemCompleted(listId, milk.id, completed = true, now = 2000)
@@ -313,7 +313,7 @@ class CurrentStateTest {
     @Test
     fun `clearing a manual item's action clears only that action`() = runTest {
         val listId = manualList()
-        dao.addItem(listId, "Buy milk", now = 1000)
+        database.writeLegacyManualItem(listId, "Buy milk", now = 1000)
         val milk = dao.getItems(listId).single()
         dao.setManualItemCompleted(listId, milk.id, completed = true, now = 2000)
 

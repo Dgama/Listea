@@ -116,8 +116,8 @@ Review queue running out, a List going complete. **Not** for the *Test webhook* 
 for a resend from the history — neither is a round you just finished, and offering to delete files
 off the back of a button labelled *Test* would be indefensible.
 
-It is also silent when the payload came from a manual List, which has no files to delete, and when
-nothing in it was both checked and still on the device.
+It is also silent when the payload came from a List with no folder behind it, which has no files to
+delete, and when nothing in it was both checked and still on the device.
 
 Deleting from the offer is the same permanent operation as above, with the same
 [write-access](#write-access) requirement. If the root can only be read, the offer says so and
@@ -176,7 +176,7 @@ anything outside it.
 Two consequences:
 
 - **Changing the root deletes the Lists linked to the old one.** You are shown which ones first.
-  Manual Lists are always kept, and nothing is rebound to the new root.
+  Lists with no folder behind them are always kept, and nothing is rebound to the new root.
 - **A file's identity is its path under the root.** Replacing a file with a different one of the
   same name, outside the app, hands the new file the old one's checked state — and therefore its
   place in a deletion.

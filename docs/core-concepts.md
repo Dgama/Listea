@@ -23,7 +23,7 @@ The grant is a Storage Access Framework tree URI. It persists across restarts, a
 reach outside it — not into a sibling folder, not into a parent.
 
 Changing the root deletes the Lists linked to the old one. You are shown which Lists those are
-before anything happens, and manual Lists are never affected.
+before anything happens, and a List with no folder behind it is never affected.
 
 ## Folders
 
@@ -39,8 +39,10 @@ A **file** is what is on disk. An **item** is a file as it appears in a queue: a
 whatever has been decided about it.
 
 - **Directories are never items.** Not in a List, not in a Quick Review queue. Only files.
-- A List can also hold **manual items** — typed by hand, with no file behind them. These behave
-  differently in one specific way, noted under [Where state lives](#where-state-lives).
+- A List may still hold **manual items** — typed by hand, with no file behind them. They are no
+  longer something you can add: a List built before v0.2 may have them, and they go on working
+  exactly as they did, reviewable and editable, until their own List's lifecycle removes them. They
+  behave differently in one specific way, noted under [Where state lives](#where-state-lives).
 
 ## Lists
 
@@ -58,7 +60,12 @@ stay in the List, flagged, keeping their checked state, until you clear them.
 **Lists may not overlap.** One List's folder cannot contain another's. Creating a List where an
 existing one already reaches is a replacement, and always asks first.
 
-A List can also be created with no folder at all, and filled by typing items into it.
+**A List is made from a folder.** There is no "New list" control and no empty List to fill in by
+hand, because a List with no folder behind it has no way to be given an item and so no way to ever
+be anything but empty. This is a product boundary rather than a rule about the model — a List is a
+queue over a folder because that is the only queue that can be filled, not because a List must be
+folder-backed to exist. Lists built before v0.2 with no folder behind them are kept as they are,
+with their items, and are never converted, migrated or deleted.
 
 <p align="center">
   <img src="assets/screenshots/list-detail.jpg" width="300" alt="A List's detail page, showing the Source card with its folder and freshness, the Progress card with a count and the Review button, and the item checklist below">
@@ -171,8 +178,9 @@ That is what makes all of these true at once:
   tick. Re-reviewing checked files is what *Review unchecked items only* is for, and a genuine
   "start fresh" would have to be its own explicit action.
 
-**Manual items are the exception, deliberately.** They have no file to be a decision about, so
-their state stays on their own row.
+**Manual items are the exception, deliberately.** They have no file behind them, so there is no
+other row for a decision about one to be shared with: it belongs to that item alone, and it goes
+when the item does.
 
 A file's identity is **its path under the root**. Replacing a file with a different one of the same
 name, outside the app, hands the new file the old one's checked state.

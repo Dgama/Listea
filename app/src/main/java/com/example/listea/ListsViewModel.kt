@@ -537,18 +537,13 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         return folderFilesOf(folderPath, contents)
     }
 
-    fun createList(title: String) = edit(title) { clean ->
-        val defaults = settingsStore.read()
-        dao.insertList(
-            ListEntity(
-                title = clean,
-                createdAt = now(),
-                // A template, copied once. The list's webhook is its own from here on.
-                webhookEnabled = defaults.defaultWebhookEnabled,
-                webhookUrl = defaults.defaultWebhookUrl
-            )
-        )
-    }
+    // There is no createList any more. Lists are made from the Folder tab, since a List is a review
+    // context over Tasks and the only way to hand it any is to point it at a folder. A List with no
+    // folder link could never gain an item once manual entry went, and completion needs an item to
+    // complete, so the control could only ever have made permanently empty Lists.
+    //
+    // A product boundary, not an architectural rule: the standalone Lists an older database holds
+    // keep working, and a future importer or Task creator is free to add another way to make one.
 
     fun renameList(listId: Long, title: String) = edit(title) { clean ->
         dao.updateListTitle(listId, clean)
@@ -765,10 +760,6 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         pendingSentDeletion = emptyList()
         pendingSentDeletionRoot = null
         _postWebhookDeletion.value = null
-    }
-
-    fun addItem(listId: Long, title: String) = edit(title) { clean ->
-        onCompletionTransition(listId, dao.addItem(listId, clean, now()))
     }
 
     /**

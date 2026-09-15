@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
@@ -81,7 +80,6 @@ fun ListDetailScreen(
 ) {
     val detailFlow = remember(listId) { viewModel.observeDetail(listId) }
     val detail by detailFlow.collectAsStateWithLifecycle(initialValue = null)
-    var newItem by remember { mutableStateOf("") }
     // Held out here, above every early return, rather than left to the LazyColumn to remember.
     // Opening an item replaces this whole page with the viewer, so a state created down inside
     // the list would leave the composition with it and the user would come back to the top of a
@@ -168,11 +166,6 @@ fun ListDetailScreen(
             onClose = { viewingItemId = null }
         )
         return
-    }
-
-    fun submitNewItem() {
-        viewModel.addItem(listId, newItem)
-        newItem = ""
     }
 
     ListeaNestedScaffold(
@@ -282,29 +275,10 @@ fun ListDetailScreen(
                 }
             }
 
-            // 4. Add item, at the end of what it adds to — scrolled to, never pinned over it.
-            item {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = ListeaDimens.SectionGap),
-                    horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    OutlinedTextField(
-                        value = newItem,
-                        onValueChange = { newItem = it },
-                        label = { Text("New item") },
-                        singleLine = true,
-                        modifier = Modifier.weight(1f),
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                        keyboardActions = KeyboardActions(onDone = { submitNewItem() })
-                    )
-                    Button(onClick = { submitNewItem() }, enabled = newItem.isNotBlank()) {
-                        Text("Add")
-                    }
-                }
-            }
+            // Items are not added here any more. A List's items come from the folder it is over:
+            // re-sync brings new files in, and the folder's own page is where that is driven from.
+            // Typed entries are gone, and the ones an older database already holds are still shown
+            // and still reviewable above — they simply cannot be added to.
         }
     }
 

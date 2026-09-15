@@ -91,8 +91,27 @@ abstract class ListsDao {
     @Query("UPDATE lists SET title = :title WHERE id = :id")
     abstract suspend fun updateListTitle(id: Long, title: String)
 
+    /**
+     * Takes a List and everything that was only reachable through it.
+     *
+     * Memberships cascade away with the List. A file's Task does not: its decision outlives the
+     * List that happened to show it, which is the property the whole model is built to keep. A
+     * manual item's Task has nothing to outlive the membership *for* - there is no file, and the
+     * membership was the only way to reach it - so it goes. Those are the ones
+     * `legacy_manual_tasks` names, and they go here.
+     *
+     * The read happens first for the obvious reason: once the List has cascaded away there is
+     * nothing left to join the names to.
+     */
+    @Transaction
+    open suspend fun deleteList(id: Long) {
+        val manualTasks = manualTasksOfList(id)
+        deleteListRow(id)
+        deleteManualTasks(manualTasks)
+    }
+
     @Query("DELETE FROM lists WHERE id = :id")
-    abstract suspend fun deleteList(id: Long)
+    protected abstract suspend fun deleteListRow(id: Long)
 
     /**
      * Drops every list linked to one SAF root, whether it was created on the root itself or on a
@@ -100,37 +119,30 @@ abstract class ListsDao {
      *
      * Manual lists have no root and can never match. Lists linked to a *different* root are left
      * alone: they have nothing to do with the folder being given up.
-     */
-    @Query("DELETE FROM lists WHERE sourceRootUri = :rootUri")
-    abstract suspend fun deleteListsForRoot(rootUri: String): Int
-
-    /**
-     * Appends an item and re-evaluates completion: adding an item to an already complete list
-     * makes it incomplete again.
      *
-     * Returns true when this edit moved the list from incomplete to complete. The before/after
-     * reads happen inside the same transaction as the write, so concurrent edits cannot both
-     * observe the transition, and the caller can fire the completion action exactly once.
+     * A folder-backed List can still hold a manual item, so this takes the same cleanup [deleteList]
+     * does. It is the same question - which Tasks existed only because of a List that is going -
+     * asked of several Lists at once, and answering it for only one of the ways a List can be
+     * deleted would leave the others quietly orphaning Tasks.
      */
     @Transaction
-    open suspend fun addItem(listId: Long, title: String, now: Long): Boolean {
-        val wasComplete = isComplete(listId) == true
-        insertItem(
-            ListItemEntity(
-                publicId = newItemPublicId(manualItemIdentity(listId, title), now),
-                listId = listId,
-                taskId = newManualTask(now),
-                title = title,
-                sortOrder = maxSortOrder(listId) + 1,
-                createdAt = now
-            )
-        )
-        refreshCompletion(listId, now)
-        return !wasComplete && isComplete(listId) == true
+    open suspend fun deleteListsForRoot(rootUri: String): Int {
+        val manualTasks = manualTasksUnderRoot(rootUri)
+        val deleted = deleteListRowsForRoot(rootUri)
+        deleteManualTasks(manualTasks)
+        return deleted
     }
 
+    @Query("DELETE FROM lists WHERE sourceRootUri = :rootUri")
+    protected abstract suspend fun deleteListRowsForRoot(rootUri: String): Int
+
     /**
-     * Checks or unchecks a *manual* item, whose state really is its own. See [addItem].
+     * Checks or unchecks a *manual* item, whose state really is its own.
+     *
+     * Manual items cannot be created any more, but the ones an older database already holds are
+     * still reviewable and editable exactly as they were, so this path stays until its last row
+     * does. It is the compatibility case, not a live feature: nothing in v0.2 reaches it except a
+     * row that predates v0.2.
      *
      * A manual entry has no file to share a decision with, so this reaches its Task directly and
      * can only ever affect the list the row is in. It writes to the Task like every other
@@ -282,11 +294,22 @@ abstract class ListsDao {
             is ReviewContext.InFolder -> ReviewContextKind.FOLDER to context.relativePath
         }
 
-    /** Returns true when removing the last unchecked item completed the list. See [addItem]. */
+    /**
+     * Removes one item, and the Task with it if that Task existed only as a manual item.
+     *
+     * Returns true when removing the last unchecked item completed the list.
+     *
+     * A source-backed row takes its Task nowhere: the file keeps its decisions, and the next List
+     * to show it will resolve the same Task. A manual one takes its Task with it, because the row
+     * was the only thing that ever reached it. The name is read while the row is still there to
+     * read it from.
+     */
     @Transaction
     open suspend fun removeItem(listId: Long, itemId: Long, now: Long): Boolean {
         val wasComplete = isComplete(listId) == true
+        val manualTask = manualTaskOfItem(itemId)
         deleteItem(itemId)
+        deleteManualTasks(manualTask)
         refreshCompletion(listId, now)
         return !wasComplete && isComplete(listId) == true
     }
@@ -853,8 +876,8 @@ abstract class ListsDao {
      * Gives each of these files a Task if it has none, and answers with every one it now has.
      *
      * Registration alone is not enough for a folder review, and this is the difference between the
-     * two paths that resolve a file. A List's rows were given Tasks by the migration and get one
-     * from [addItem]; a file nobody has ever decided about has a registration row and nothing else.
+     * two paths that resolve a file. A List's rows get their Tasks from [createFolderList] or from
+     * the migration; a file nobody has ever decided about has a registration row and nothing else.
      * A card that is being shown to somebody is a Task whether or not anything has been decided
      * about it yet — "every Task has exactly one state" is what the whole read model rests on, and
      * a registration is not a Task.
@@ -1037,10 +1060,72 @@ abstract class ListsDao {
     protected abstract suspend fun insertTaskState(state: TaskStateEntity)
 
     @Insert
-    protected abstract suspend fun insertLegacyManualTask(task: LegacyManualTaskEntity)
-
-    @Insert
     protected abstract suspend fun insertReviewEvent(event: ReviewEventEntity)
+
+    // --- the manual-item cleanup path --------------------------------------------------------------
+    //
+    // Manual items are the one kind of Task whose life is tied to a membership: there is no file
+    // holding the decision, so when the row that was the only way to reach it goes, the Task has
+    // nothing left to be for. `legacy_manual_tasks` names them, and these queries are the whole of
+    // how that name is used - read while the membership still exists, applied after it does not.
+
+    /** The Tasks of one List the migration named as manual items, read before the List goes. */
+    @Query(
+        """
+        SELECT i.taskId FROM list_items i
+        JOIN legacy_manual_tasks m ON m.taskId = i.taskId
+        WHERE i.listId = :listId
+        """
+    )
+    protected abstract suspend fun manualTasksOfList(listId: Long): List<String>
+
+    /** The same for every List under one SAF root, for the path that gives a root up. */
+    @Query(
+        """
+        SELECT i.taskId FROM list_items i
+        JOIN legacy_manual_tasks m ON m.taskId = i.taskId
+        JOIN lists l ON l.id = i.listId
+        WHERE l.sourceRootUri = :rootUri
+        """
+    )
+    protected abstract suspend fun manualTasksUnderRoot(rootUri: String): List<String>
+
+    /** The same for a single membership row. */
+    @Query(
+        """
+        SELECT i.taskId FROM list_items i
+        JOIN legacy_manual_tasks m ON m.taskId = i.taskId
+        WHERE i.id = :itemId
+        """
+    )
+    protected abstract suspend fun manualTaskOfItem(itemId: Long): List<String>
+
+    /** The Tasks themselves. Their state and any Asset go with them, both of which cascade. */
+    @Query("DELETE FROM tasks WHERE id IN (:taskIds)")
+    protected abstract suspend fun deleteTasks(taskIds: List<String>)
+
+    /**
+     * Drops the names of Tasks that have just been deleted.
+     *
+     * The table says which Tasks *are* manual items, so a row left behind would have it claiming
+     * a set it no longer describes - and the next reader of this table, whatever it is for, would
+     * be handed a Task id that names nothing. The set only ever shrinks, and this is the shrinking.
+     */
+    @Query("DELETE FROM legacy_manual_tasks WHERE taskId IN (:taskIds)")
+    protected abstract suspend fun forgetManualTasks(taskIds: List<String>)
+
+    /**
+     * Removes the manual Tasks of a gone membership, and the names of them, in one step.
+     *
+     * Empty is the ordinary case rather than an edge: most deletes are of source-backed Tasks,
+     * whose decisions live on the file and must survive the List that showed them. An empty set
+     * needs nothing said about it - SQLite accepts an empty `IN ()` and matches nothing, which is
+     * the same assumption [markFilesDeleted] and the rest of this DAO already run on.
+     */
+    private suspend fun deleteManualTasks(taskIds: List<String>) {
+        deleteTasks(taskIds)
+        forgetManualTasks(taskIds)
+    }
 
     @Query("SELECT taskId FROM assets WHERE rootUri = :rootUri AND relativePath = :relativePath")
     protected abstract suspend fun taskIdForFile(rootUri: String, relativePath: String): String?
@@ -1168,28 +1253,6 @@ abstract class ListsDao {
             )
         )
         insertTaskState(TaskStateEntity(taskId = taskId, updatedAt = now))
-        return taskId
-    }
-
-    /**
-     * A Task for a manually typed item, which has no file and therefore no content row.
-     *
-     * Every manual item gets its own Task even when two share a title, because a manual item is
-     * identified by its row and by nothing else — two "Buy milk" entries are two different things
-     * and must not collapse into one the moment they are given an identity.
-     *
-     * Recorded in [LegacyManualTaskEntity] as it is created, and not only during the migration.
-     * Manual creation is not removed until a later step, so a Task minted today would otherwise be
-     * invisible to the cleanup path that is supposed to know it may be deleted — and the table
-     * would be claiming to name a set it had stopped keeping up to date. It stays what it was
-     * meant to be, the Tasks with no file behind them, and closes for good when the write path
-     * goes.
-     */
-    private suspend fun newManualTask(now: Long): String {
-        val taskId = TaskId.new().value
-        insertTask(TaskEntity(id = taskId, createdAt = now))
-        insertTaskState(TaskStateEntity(taskId = taskId, updatedAt = now))
-        insertLegacyManualTask(LegacyManualTaskEntity(taskId))
         return taskId
     }
 

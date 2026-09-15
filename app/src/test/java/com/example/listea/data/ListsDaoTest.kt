@@ -140,7 +140,7 @@ class ListsDaoTest {
     @Test
     fun `a manual item's progress is its own row`() = runTest {
         val listId = folderList(folderPath = "2026-07-11", files = listOf("a.jpg"))
-        dao.addItem(listId, "Buy milk", now = 1000)
+        database.writeLegacyManualItem(listId, "Buy milk", now = 1000)
 
         val manual = dao.getItems(listId).single { it.sourceRelativePath == null }
         dao.setManualItemCompleted(listId, manual.id, completed = true, now = 2000)
@@ -206,24 +206,15 @@ class ListsDaoTest {
         assertEquals(3000L, dao.getList(listId)?.completedAt ?: 0L)
     }
 
-    @Test
-    fun `adding an item to a complete list makes it incomplete again`() = runTest {
-        val listId = folderList(folderPath = "2026-07-11", files = listOf("a.jpg"))
-        dao.registerFiles(listOf(fileState("2026-07-11/a.jpg")))
-        dao.setFileCompleted(ROOT, "2026-07-11/a.jpg", completed = true, now = 2000)
-        assertNotNull(dao.getList(listId)?.completedAt)
-
-        val transitioned = dao.addItem(listId, "Buy milk", now = 3000)
-
-        assertEquals(false, transitioned)
-        assertNull(dao.getList(listId)?.completedAt)
-    }
+    // There is no test here for a List that gains an item and becomes incomplete again. That was
+    // `addItem`'s own side effect and the capability went with it in v0.2: an item reaches a List
+    // now by a re-sync or by a migration, and neither is something a user does to a finished List.
 
     @Test
     fun `a manual list completes on its last item, once`() = runTest {
         val listId = manualList()
-        dao.addItem(listId, "Buy milk", now = 1000)
-        dao.addItem(listId, "Buy bread", now = 1000)
+        database.writeLegacyManualItem(listId, "Buy milk", now = 1000)
+        database.writeLegacyManualItem(listId, "Buy bread", now = 1000)
 
         val milk = dao.getItems(listId).first { it.title == "Buy milk" }
         assertEquals(false, dao.setManualItemCompleted(listId, milk.id, true, now = 2000))
@@ -236,7 +227,7 @@ class ListsDaoTest {
     @Test
     fun `a list with no items left is not a complete one`() = runTest {
         val listId = manualList()
-        dao.addItem(listId, "Buy milk", now = 1000)
+        database.writeLegacyManualItem(listId, "Buy milk", now = 1000)
         val milk = dao.getItems(listId).single()
         dao.setManualItemCompleted(listId, milk.id, true, now = 2000)
         assertNotNull(dao.getList(listId)?.completedAt)

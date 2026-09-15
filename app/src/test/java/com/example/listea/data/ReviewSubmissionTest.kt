@@ -178,7 +178,7 @@ class ReviewSubmissionTest {
     @Test
     fun `a manual item's submission records it against that item's own Task`() = runTest {
         val listId = manualList()
-        dao.addItem(listId, "Buy milk", now = 1000)
+        database.writeLegacyManualItem(listId, "Buy milk", now = 1000)
         val milk = dao.getItems(listId).single()
 
         dao.submitReview(
@@ -217,7 +217,7 @@ class ReviewSubmissionTest {
     @Test
     fun `a manual item's checkbox records nothing either`() = runTest {
         val listId = manualList()
-        dao.addItem(listId, "Buy milk", now = 1000)
+        database.writeLegacyManualItem(listId, "Buy milk", now = 1000)
         val milk = dao.getItems(listId).single()
 
         dao.setManualItemCompleted(listId, milk.id, completed = true, now = 2000)
@@ -298,10 +298,9 @@ class ReviewSubmissionTest {
     @Test
     fun `a submission about a row that has gone writes no event and no state`() = runTest {
         val listId = manualList()
-        dao.addItem(listId, "Buy milk", now = 1000)
+        val taskId = database.writeLegacyManualItem(listId, "Buy milk", now = 1000)
         val milk = dao.getItems(listId).single()
         dao.removeItem(listId, milk.id, now = 1500)
-        val taskId = rawString("SELECT id FROM tasks")
 
         val transitioned = dao.submitReview(
             target = DecisionTarget.ManualItem(listId, milk.id),
@@ -315,8 +314,11 @@ class ReviewSubmissionTest {
         // it would also count: a submission that never happened must leave no trace of having.
         assertEquals(0, rawInt("SELECT COUNT(*) FROM review_events"))
         assertEquals(emptyList<Long>(), transitioned)
-        // The Task survives its membership and is deliberately untouched.
-        assertEquals(0, rawInt("SELECT isCompleted FROM task_state WHERE taskId = '$taskId'"))
+        // Taking the row took its Task with it. This is the one case where a Task does not outlive
+        // its membership, and it is the case that has no file for it to outlive it *for* — a
+        // source-backed Task is left alone by the same path, which the cleanup tests pin.
+        assertEquals(0, rawInt("SELECT COUNT(*) FROM tasks WHERE id = '$taskId'"))
+        assertEquals(0, rawInt("SELECT COUNT(*) FROM task_state WHERE taskId = '$taskId'"))
     }
 
     // --- helpers -----------------------------------------------------------------------------------
