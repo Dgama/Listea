@@ -14,9 +14,9 @@ import org.junit.Test
  * `ListArrangeTest` and `QuickReviewQueueTest`, and what the snapshot holds once it is taken by
  * `ReviewRoundTest` — so neither is repeated here.
  *
- * Both of these are v0.2 rewrite targets: the resume cursor moves from a row id to a task id, and
- * the session identity from `Long` to `String`. What they *mean* has to be written down before they
- * move, or the rewrite has no way to be wrong.
+ * The two vocabularies meet here and only here. What the session holds is a task id; what the List
+ * remembers about it is a row id; and these tests are where a caller can see that the first is
+ * derived from the second without either becoming the other.
  */
 class ReviewSessionTest {
 
@@ -28,7 +28,7 @@ class ReviewSessionTest {
 
         // Resuming means resuming: the item the user was looking at is where they come back to,
         // not the first one they happen not to have done yet.
-        assertEquals(2L, resumeItemId(2, items))
+        assertEquals("task-2", resumeTaskId(2, items))
     }
 
     @Test
@@ -39,14 +39,14 @@ class ReviewSessionTest {
             item(3, "c.jpg")
         )
 
-        assertEquals(3L, resumeItemId(null, items))
+        assertEquals("task-3", resumeTaskId(null, items))
     }
 
     @Test
     fun `a round where everything is already checked starts at the very first item`() {
         val items = listOf(item(1, "a.jpg", completed = true), item(2, "b.jpg", completed = true))
 
-        assertEquals(1L, resumeItemId(null, items))
+        assertEquals("task-1", resumeTaskId(null, items))
     }
 
     @Test
@@ -54,7 +54,17 @@ class ReviewSessionTest {
         val items = listOf(item(1, "a.jpg", completed = true), item(2, "b.jpg"))
 
         // Re-sync, cleanup and manual deletes all shift positions, so a stale id simply falls back.
-        assertEquals(2L, resumeItemId(99, items))
+        assertEquals("task-2", resumeTaskId(99, items))
+    }
+
+    @Test
+    fun `resuming reads the row id and not the task id`() {
+        // The two spaces are numbered differently on purpose — a row is 7 while its Task is
+        // "task-7" — so a cursor that had started being read as a task id would land on the wrong
+        // row, or on none, and the fallback would cover it up rather than fail.
+        val items = listOf(item(1, "a.jpg"), item(7, "b.jpg"), item(9, "c.jpg"))
+
+        assertEquals("task-7", resumeTaskId(7, items))
     }
 
     // --- leaving -----------------------------------------------------------------------------------
@@ -109,6 +119,7 @@ class ReviewSessionTest {
 
     private fun item(id: Long, title: String, completed: Boolean = false) = ReviewItem(
         id = id,
+        taskId = "task-$id",
         publicId = "ITEM-$id",
         title = title,
         sourceUri = "content://root/$title",

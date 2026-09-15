@@ -50,6 +50,14 @@ class QuickReviewQueueTest {
         updatedAt = 0
     )
 
+    /**
+     * The Tasks the same files resolve to, which the review resolves a step before this and hands
+     * in. Per path and not per row id: two files are two Tasks whatever their registrations are
+     * numbered, and here the two numbers differ so that one standing for the other cannot pass.
+     */
+    private fun tasksOf(states: List<FileReviewStateEntity>): Map<String, String> =
+        states.associate { it.relativePath to "task-${it.relativePath}" }
+
     private fun pathOf(item: ReviewItem) = (item.target as DecisionTarget.File).relativePath
 
 
@@ -58,11 +66,8 @@ class QuickReviewQueueTest {
         // The identity every List over this folder reads too. Addressing it by anything narrower
         // — the file name, an id — would make a decision only this queue could see.
         val files = listOf(file("2026-07-11/bilibili", "a.jpg"))
-        val queue = folderReviewQueue(
-            root,
-            files,
-            listOf(state(1, "2026-07-11/bilibili/a.jpg"))
-        )
+        val states = listOf(state(1, "2026-07-11/bilibili/a.jpg"))
+        val queue = folderReviewQueue(root, files, states, tasksOf(states))
 
         assertEquals("2026-07-11/bilibili/a.jpg", pathOf(queue.single()))
         assertEquals(root, (queue.single().target as DecisionTarget.File).rootUri)
@@ -70,7 +75,8 @@ class QuickReviewQueueTest {
 
     @Test
     fun `a file directly in the root is addressed by its bare name`() {
-        val queue = folderReviewQueue(root, listOf(file("", "a.jpg")), listOf(state(1, "a.jpg")))
+        val states = listOf(state(1, "a.jpg"))
+        val queue = folderReviewQueue(root, listOf(file("", "a.jpg")), states, tasksOf(states))
         assertEquals("a.jpg", pathOf(queue.single()))
     }
 
@@ -78,13 +84,15 @@ class QuickReviewQueueTest {
     fun `decisions already held about a file come back with it`() {
         // The point of the whole refactor: reviewing a folder shows what is already known, from
         // wherever it was decided, and creating or deleting a List has nothing to do with it.
+        val states = listOf(
+            state(1, "sub/a.jpg", completed = true, favorite = true),
+            state(2, "sub/b.jpg")
+        )
         val queue = folderReviewQueue(
             root,
             listOf(file("sub", "a.jpg"), file("sub", "b.jpg")),
-            listOf(
-                state(1, "sub/a.jpg", completed = true, favorite = true),
-                state(2, "sub/b.jpg")
-            )
+            states,
+            tasksOf(states)
         )
 
         assertTrue(queue[0].decisions.isCompleted)
@@ -99,28 +107,33 @@ class QuickReviewQueueTest {
     @Test
     fun `the queue keeps the folder's own order`() {
         val files = listOf(file("", "c.jpg"), file("", "a.jpg"), file("", "b.jpg"))
-        val queue = folderReviewQueue(
-            root,
-            files,
-            listOf(state(3, "b.jpg"), state(1, "c.jpg"), state(2, "a.jpg"))
-        )
+        val states = listOf(state(3, "b.jpg"), state(1, "c.jpg"), state(2, "a.jpg"))
+        val queue = folderReviewQueue(root, files, states, tasksOf(states))
 
         // Stored state arrives in whatever order the database returns; the folder decides.
         assertEquals(listOf("c.jpg", "a.jpg", "b.jpg"), queue.map { it.title })
     }
 
     @Test
-    fun `each queued file carries the state row's id as its handle`() {
-        val queue = folderReviewQueue(root, listOf(file("", "a.jpg")), listOf(state(42, "a.jpg")))
+    fun `a queued file is identified by its Task, not by its registration row`() {
+        // The registration's own number is a handle onto a relationship with a file; the Task is
+        // what a session walks and what a judgment is recorded against. They are different numbers
+        // here so that either one standing in for the other cannot pass unnoticed.
+        val states = listOf(state(42, "a.jpg"))
+        val queue = folderReviewQueue(root, listOf(file("", "a.jpg")), states, tasksOf(states))
+
         assertEquals(42L, queue.single().id)
+        assertEquals("task-a.jpg", queue.single().taskId)
     }
 
     @Test
     fun `a file whose state vanished is dropped rather than shown undecided`() {
+        val states = listOf(state(1, "a.jpg"))
         val queue = folderReviewQueue(
             root,
             listOf(file("", "a.jpg"), file("", "b.jpg")),
-            listOf(state(1, "a.jpg"))
+            states,
+            tasksOf(states)
         )
 
         assertEquals(listOf("a.jpg"), queue.map { it.title })
@@ -130,7 +143,15 @@ class QuickReviewQueueTest {
     fun `a folder of nothing but subfolders resolves to an empty queue`() {
         // Directories are filtered out before this, so an empty file list is the honest result:
         // nothing is pulled up from the folders below to make the queue look less empty.
-        assertTrue(folderReviewQueue(root, emptyList(), listOf(state(1, "a.jpg"))).isEmpty())
+        assertTrue(
+            folderReviewQueue(root, emptyList(), listOf(state(1, "a.jpg")), emptyMap()).isEmpty()
+        )
+        // A file dropped for want of a Task is the same answer as one dropped for want of a
+        // registration: there is nothing to review, rather than a card with nothing behind it.
+        val states = listOf(state(1, "a.jpg"))
+        assertTrue(
+            folderReviewQueue(root, listOf(file("", "a.jpg")), states, emptyMap()).isEmpty()
+        )
     }
 
     @Test
@@ -153,13 +174,12 @@ class QuickReviewQueueTest {
     private fun folder(
         vararg files: FolderFile,
         checked: Set<String> = emptySet()
-    ): List<ReviewItem> = folderReviewQueue(
-        root,
-        files.toList(),
-        files.mapIndexed { index, file ->
+    ): List<ReviewItem> {
+        val states = files.mapIndexed { index, file ->
             state(index + 1L, file.rootRelativePath, completed = file.name in checked)
         }
-    )
+        return folderReviewQueue(root, files.toList(), states, tasksOf(states))
+    }
 
     private fun names(items: List<ReviewItem>) = items.map { it.title }
 

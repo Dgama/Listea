@@ -29,6 +29,7 @@ class ReviewRoundTest {
         val id = nextId++
         return ReviewItem(
             id = id,
+            taskId = "task-$id",
             publicId = newItemPublicId(fileIdentity("folder/item$id.jpg"), now = id),
             title = "item $id",
             sourceUri = "content://tree/doc/$id",
@@ -39,23 +40,23 @@ class ReviewRoundTest {
         )
     }
 
-    /** What a round takes on entry: the ids it queues, in the order it walks them. */
+    /** What a round takes on entry: the tasks it queues, in the order it walks them. */
     private fun roundIds(
         items: List<ReviewItem>,
         arrangement: FileArrangement = FileArrangement.Default,
         uncheckedOnly: Boolean = true
-    ): LongArray =
-        reviewRound(items, arrangement, uncheckedOnly, now = 0L).map { it.id }.toLongArray()
+    ): Array<String> =
+        reviewRound(items, arrangement, uncheckedOnly, now = 0L).map { it.taskId }.toTypedArray()
 
     private fun checked(item: ReviewItem) =
         item.copy(decisions = item.decisions.copy(isCompleted = true))
 
-    /** The stored row a queued item resolves back to when its payload is built. */
+    /** The stored row a queued task resolves back to when its payload is built. */
     private fun row(item: ReviewItem) = ListItemEntity(
         id = item.id,
         publicId = item.publicId,
         listId = 1,
-        taskId = "task-${item.id}",
+        taskId = item.taskId,
         title = item.title,
         isCompleted = item.decisions.isCompleted,
         sortOrder = 0,
@@ -79,7 +80,7 @@ class ReviewRoundTest {
         val items = listOf(item(completed = true), item(), item(completed = true), item())
         val queued = roundIds(items)
 
-        assertEquals(listOf(items[1].id, items[3].id), queued.toList())
+        assertEquals(listOf(items[1].taskId, items[3].taskId), queued.toList())
         assertEquals(listOf(items[1], items[3]), queuedItems(items, queued))
     }
 
@@ -108,7 +109,7 @@ class ReviewRoundTest {
         // order on every change. The snapshot is the only record of the former, so it is what
         // decides — normal Review snapshots in stored order and is therefore left untouched.
         val items = listOf(item(), item(), item())
-        val queued = longArrayOf(items[2].id, items[0].id)
+        val queued = arrayOf(items[2].taskId, items[0].taskId)
 
         assertEquals(listOf(items[2], items[0]), queuedItems(items, queued))
     }
@@ -149,8 +150,8 @@ class ReviewRoundTest {
         val afterRound = listOf(items[0], checked(items[1]), items[2])
 
         // What delivery does: narrow to the round, then read those items back as rows.
-        val roundIds = queuedItems(afterRound, queued).map { it.id }.toSet()
-        val rows = afterRound.map(::row).filter { it.id in roundIds }
+        val roundTaskIds = queuedItems(afterRound, queued).map { it.taskId }.toSet()
+        val rows = afterRound.map(::row).filter { it.taskId in roundTaskIds }
 
         val sent = webhookItems(rows, AppSettings(webhookCompletedItemsOnly = true))
 

@@ -514,9 +514,15 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         )
         // Reading them is proof they are there, which un-flags anything deleted and put back.
         dao.markFilesPresent(rootUri, paths)
+        // Every file in the listing gets a Task, so that every card in the queue has something to
+        // be identified by and something for a judgment to land on. A file decided about from
+        // another List or another folder already has one, and keeps it.
+        val tasks = dao.ensureTasksForFiles(rootUri, paths, now()).associate {
+            it.relativePath to it.taskId
+        }
         emitAll(
             dao.observeFileStates(rootUri, paths).map { states ->
-                FolderReview.Ready(folderReviewQueue(rootUri, files, states))
+                FolderReview.Ready(folderReviewQueue(rootUri, files, states, tasks))
             }
         )
     }

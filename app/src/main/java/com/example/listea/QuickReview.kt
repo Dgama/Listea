@@ -73,17 +73,25 @@ fun folderFilesOf(folderPath: String, contents: FolderContents): List<FolderFile
  * A file with no state row is dropped rather than shown undecided: a row is registered for every
  * file before this runs, so a missing one means the file went away underneath us, and reviewing
  * something that is no longer there helps nobody.
+ *
+ * [tasks] is the same answer in the other vocabulary — which Task each of those files is of —
+ * because a registration is a handle onto a file and a Task is the thing being judged. It is
+ * resolved a step earlier, where the database can be asked, leaving this function as pure as it
+ * was: nothing here reaches for a Task it was not handed.
  */
 fun folderReviewQueue(
     rootUri: String,
     files: List<FolderFile>,
-    states: List<FileReviewStateEntity>
+    states: List<FileReviewStateEntity>,
+    tasks: Map<String, String>
 ): List<ReviewItem> {
     val byPath = states.associateBy { it.relativePath }
     return files.mapNotNull { file ->
         val state = byPath[file.rootRelativePath] ?: return@mapNotNull null
+        val taskId = tasks[file.rootRelativePath] ?: return@mapNotNull null
         ReviewItem(
             id = state.id,
+            taskId = taskId,
             // Off the registration row, not made here: a folder round's payload has to name a
             // file the same way every time it reports on it.
             publicId = state.publicId,

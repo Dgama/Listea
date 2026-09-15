@@ -137,8 +137,8 @@ fun reviewItemInfo(
  * Swipe left  = mark the current item completed, then advance.
  * Swipe right = step back only; it never changes any completion state.
  *
- * Position is tracked by item id and persisted on the list, so re-sync, cleanup and deletions
- * cannot leave it pointing at the wrong item.
+ * The session walks Tasks, but the position it remembers is the membership row's: what the list
+ * page resumes is which entry the user was on, and only a row id names one of those.
  */
 @Composable
 fun ReviewScreen(
@@ -285,7 +285,7 @@ fun rememberReviewRound(
         if (items.isEmpty()) {
             null
         } else {
-            reviewRound(items, arrangement, uncheckedOnly, now).map { it.id }.toLongArray()
+            reviewRound(items, arrangement, uncheckedOnly, now).map { it.taskId }.toTypedArray()
         }
     }
 )
@@ -314,34 +314,41 @@ fun rememberRoundClock(sessionKey: Any): Long =
  * [narrowed] false hands [items] straight back and never records anything, so a mode that does
  * not narrow costs nothing and, having stored no snapshot, does not start honouring a stale one
  * if the setting behind it is switched off mid-session.
+ *
+ * The snapshot holds task ids. [ReviewItem.id] cannot be one, because the two modes number the
+ * same file differently — a list row's number here, a registration's number there — so a session
+ * identified by it would be two sessions wearing one name.
  */
 @Composable
 fun rememberRoundQueue(
     items: List<ReviewItem>,
     sessionKey: Any,
     narrowed: Boolean,
-    round: () -> LongArray?
+    round: () -> Array<String>?
 ): List<ReviewItem> {
-    var queuedIds by rememberSaveable(sessionKey) { mutableStateOf<LongArray?>(null) }
+    // Held as a list rather than the array it is asked for, because a `Array<String>` is not one
+    // of the types a saved-state bundle can carry and `rememberSaveable` would refuse it at
+    // runtime rather than at the call site.
+    var queuedIds by rememberSaveable(sessionKey) { mutableStateOf<List<String>?>(null) }
 
     val snapshot = when {
         !narrowed -> null
-        queuedIds != null -> queuedIds
+        queuedIds != null -> queuedIds!!.toTypedArray()
         else -> round()
     }
     // Recorded after the fact rather than during composition, so the first pass already renders
     // the narrowed queue instead of flashing the whole list and correcting itself.
     SideEffect {
-        if (narrowed && queuedIds == null && snapshot != null) queuedIds = snapshot
+        if (narrowed && queuedIds == null && snapshot != null) queuedIds = snapshot.toList()
     }
 
     val queued = snapshot ?: return items
-    return remember(items, queued) { queuedItems(items, queued) }
+    return remember(items, queued.toList()) { queuedItems(items, queued) }
 }
 
 /**
- * [items] narrowed to the round's snapshot, in the snapshot's own order, ignoring ids that are no
- * longer there: a re-sync or a cleanup during a review shortens the queue rather than breaking
+ * [items] narrowed to the round's snapshot, in the snapshot's own order, ignoring tasks that are
+ * no longer there: a re-sync or a cleanup during a review shortens the queue rather than breaking
  * it. An item checked since the snapshot was taken stays in, which is the whole point.
  *
  * The order comes from [queuedIds] rather than from [items] because the snapshot is the only
@@ -349,9 +356,9 @@ fun rememberRoundQueue(
  * Review takes its snapshot in the order the folder page was showing, and that order would
  * otherwise be lost the moment the database re-emitted.
  */
-fun queuedItems(items: List<ReviewItem>, queuedIds: LongArray): List<ReviewItem> {
-    val byId = items.associateBy { it.id }
-    return queuedIds.toList().mapNotNull { byId[it] }
+fun queuedItems(items: List<ReviewItem>, queuedIds: Array<String>): List<ReviewItem> {
+    val byTask = items.associateBy { it.taskId }
+    return queuedIds.mapNotNull { byTask[it] }
 }
 
 /**
@@ -394,6 +401,11 @@ fun rememberSessionDelivered(sessionKey: Any): MutableState<Boolean> =
  *
  * [onQueueFinished] is called with the queue's item ids the moment the last card is swiped off,
  * for the mode that reports a finished queue of its own. Null for a mode that does not.
+ *
+ * The session itself is three things stacked, per §6: a [TaskNavigator] that says where you are,
+ * a [TaskReviewSurface] that is one Task's review, and inside that a [AssetNavigator] and a
+ * [TaskReviewControls] that can each be extended without the other knowing. All this function
+ * does is decide *which* Task is being shown and hand it down.
  */
 @Composable
 fun ReviewSession(
@@ -410,7 +422,7 @@ fun ReviewSession(
     onBack: () -> Unit
 ) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
-    var currentItemId by rememberSaveable(sessionKey) { mutableStateOf<Long?>(null) }
+    var currentTaskId by rememberSaveable(sessionKey) { mutableStateOf<String?>(null) }
     var finished by rememberSaveable(sessionKey) { mutableStateOf(false) }
     // Not saved: reopening Info after a rotation would be answering a question nobody asked.
     var infoOpen by remember { mutableStateOf(false) }
@@ -427,14 +439,14 @@ fun ReviewSession(
 
     val imageLoader = remember(context) { buildImageLoader(context) }
 
-    // Resolve the start position, and repair it if the item it pointed at has gone.
-    LaunchedEffect(items, currentItemId) {
-        if (items.none { it.id == currentItemId }) {
-            currentItemId = resumeItemId(persistedItemId, items)
+    // Resolve the start position, and repair it if the Task it pointed at has gone.
+    LaunchedEffect(items, currentTaskId) {
+        if (items.none { it.taskId == currentTaskId }) {
+            currentTaskId = resumeTaskId(persistedItemId, items)
         }
     }
 
-    val index = items.indexOfFirst { it.id == currentItemId }
+    val index = items.indexOfFirst { it.taskId == currentTaskId }
     if (index < 0) {
         ReviewFrame(modifier, chrome.context, onBack) { CircularProgressIndicator() }
         return
@@ -453,7 +465,7 @@ fun ReviewSession(
             onRestart = onRestart?.let { restart ->
                 {
                     finished = false
-                    currentItemId = items.first().id
+                    currentTaskId = items.first().taskId
                     restart()
                 }
             }
@@ -466,80 +478,65 @@ fun ReviewSession(
     // the whole display to the media.
     MediaSystemBars(chromeVisible)
 
+    // Landing on a Task is what moves the List's cursor; [id] rather than [taskId] because the
+    // cursor names an entry, and §6 leaves it that way on purpose.
     fun goTo(newIndex: Int) {
-        val id = items[newIndex].id
-        currentItemId = id
-        onPositionChanged(id)
+        val target = items[newIndex]
+        currentTaskId = target.taskId
+        onPositionChanged(target.id)
     }
 
-    MediaShell(
+    TaskNavigator(
         modifier = modifier,
         title = item.title,
         // Where you are in this queue, which for Quick Review is the folder's items and not the
         // owning list's total. Completion progress is a list's business and lives on its page.
         position = "${index + 1} / ${items.size}",
         onBack = onBack,
-        chromeVisible = chromeVisible,
-        media = {
-            SwipeCard(
-                key = item.id,
-                // Forward is never blocked: swiping the last item off checks it and ends the
-                // review.
-                canSwipeForward = true,
-                canSwipeBack = index > 0,
-                onSwipeForward = {
-                    // A submission, because this is a review surface and the swipe is a judgment.
-                    // Everything downstream of the write — the completion transition, the round
-                    // bookkeeping, the webhook — is the same path a checkbox takes, so a list that
-                    // becomes complete here still fires exactly as it always did.
+        chromeVisible = chromeVisible
+    ) {
+        TaskReviewSurface(
+            item = item,
+            index = index,
+            player = player,
+            imageLoader = imageLoader,
+            settings = settings,
+            onSwipeForward = {
+                // A submission, because this is a review surface and the swipe is a judgment.
+                // Everything downstream of the write — the completion transition, the round
+                // bookkeeping, the webhook — is the same path a checkbox takes, so a list that
+                // becomes complete here still fires exactly as it always did.
+                viewModel.submitItemReview(item, terms)
+                if (index == items.lastIndex) {
+                    finished = true
+                    // Announced after the check above, so the delivery it may lead to sees
+                    // the item that was just swiped as checked.
+                    onQueueFinished?.invoke(items)
+                } else {
+                    goTo(index + 1)
+                }
+            },
+            // Backwards is never a judgment: it steps the queue and changes nothing about the
+            // Task that was left behind.
+            onSwipeBack = { goTo(index - 1) },
+            onTap = { chromeVisible = !chromeVisible },
+            onToggleCompleted = { completed ->
+                if (completed) {
+                    // The surface's own control, so checking it here is a judgment and unchecking
+                    // it is not: §5 records what somebody committed, and there is no retraction
+                    // for a template to record. The uncheck still has to happen — it just moves
+                    // state.
                     viewModel.submitItemReview(item, terms)
-                    if (index == items.lastIndex) {
-                        finished = true
-                        // Announced after the check above, so the delivery it may lead to sees
-                        // the item that was just swiped as checked.
-                        onQueueFinished?.invoke(items)
-                    } else {
-                        goTo(index + 1)
-                    }
-                },
-                onSwipeBack = { goTo(index - 1) },
-                modifier = Modifier.fillMaxSize(),
-                // The one control that is not in a bar, because it is the control *for* the bars.
-                onTap = { chromeVisible = !chromeVisible }
-            ) { zoom ->
-                ItemPreview(
-                    item = item,
-                    player = player,
-                    imageLoader = imageLoader,
-                    settings = settings,
-                    zoom = zoom,
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
-        },
-        controls = {
-            ReviewActionBar(
-                item = item,
-                // Observed here rather than threaded through every caller: renaming an action in
-                // Settings relabels the chips immediately, with no restart and no item touched.
-                settings = settings,
-                // The surface's own control, so checking it here is a judgment and unchecking it
-                // is not: §5 records what somebody committed, and there is no retraction for a
-                // template to record. The uncheck still has to happen — it just moves state.
-                onToggleCompleted = { completed ->
-                    if (completed) {
-                        viewModel.submitItemReview(item, terms)
-                    } else {
-                        viewModel.setItemCompleted(item, false)
-                    }
-                },
-                onToggleAction = { action, enabled ->
-                    viewModel.setItemAction(item, action, enabled)
-                },
-                onInfo = { infoOpen = true }
-            )
-        }
-    )
+                } else {
+                    viewModel.setItemCompleted(item, false)
+                }
+            },
+            onToggleAction = { action, enabled ->
+                viewModel.setItemAction(item, action, enabled)
+            },
+            onInfo = { infoOpen = true }
+        )
+    }
 
     if (infoOpen) {
         ReviewItemInfoSheet(
@@ -547,6 +544,213 @@ fun ReviewSession(
             onDismiss = { infoOpen = false }
         )
     }
+}
+
+/**
+ * The top of the hierarchy: which Task of the queue is in front of the user, and how to leave.
+ *
+ * It is the presentation the review modes already shared — [MediaShell] drawing a bar over the
+ * media — with the naming made honest. What that bar was called before was the *item's*, and the
+ * item was whichever of a file, a stored row and a queue entry the code happened to have in hand.
+ * A navigator moves between Tasks. That is what it has ever done and all it does here.
+ *
+ * It renders nothing of its own. [MediaShell] holds the frame and owns the chrome-visible state,
+ * because it is the thing that knows how much room the bars take and what the media is therefore
+ * left with; the navigator supplies what goes *in* the bar.
+ *
+ * Step 7 gives this explicit previous/next controls. The swipe is the whole of navigation today,
+ * as it has been, and the bar says where you are either way.
+ */
+@Composable
+fun TaskNavigator(
+    modifier: Modifier,
+    title: String,
+    position: String,
+    onBack: () -> Unit,
+    chromeVisible: Boolean,
+    media: @Composable () -> Unit
+) {
+    MediaShell(
+        modifier = modifier,
+        title = title,
+        position = position,
+        onBack = onBack,
+        chromeVisible = chromeVisible,
+        media = media
+    )
+}
+
+/**
+ * One Task, reviewed: the Asset in front of the user, and the controls that judge it.
+ *
+ * The two halves are deliberately siblings under it rather than one calling the other. The Asset
+ * side knows about pixels — zoom, pan, playback, whether there is anything to render at all — and
+ * the control side knows about decisions. Nothing on the control side needs to know what the Asset
+ * viewer is doing, which is what lets a second viewer be added without touching a chip.
+ *
+ * Behaviour is unchanged from when both were inlined in [ReviewSession]: forward is a submission,
+ * back is a step, a tap toggles the chrome.
+ */
+@Composable
+private fun TaskReviewSurface(
+    item: ReviewItem,
+    index: Int,
+    player: ExoPlayer,
+    imageLoader: ImageLoader,
+    settings: AppSettings,
+    onSwipeForward: () -> Unit,
+    onSwipeBack: () -> Unit,
+    onTap: () -> Unit,
+    onToggleCompleted: (Boolean) -> Unit,
+    onToggleAction: (ItemAction, Boolean) -> Unit,
+    onInfo: () -> Unit
+) {
+    // The media fills the box and the controls are drawn *over* it, exactly as the shell draws the
+    // chrome over the media. A Column that gave the bar its own room would shrink every photograph
+    // and every video by the height of a row of chips, which is the layout the whole media surface
+    // exists to have stopped doing.
+    Box(Modifier.fillMaxSize()) {
+        AssetNavigator(
+            item = item,
+            player = player,
+            imageLoader = imageLoader,
+            settings = settings,
+            // Forward is never blocked: swiping the last item off checks it and ends the review.
+            canSwipeForward = true,
+            canSwipeBack = index > 0,
+            onSwipeForward = onSwipeForward,
+            onSwipeBack = onSwipeBack,
+            onTap = onTap,
+            modifier = Modifier.fillMaxSize()
+        )
+        TaskReviewControls(
+            item = item,
+            settings = settings,
+            onToggleCompleted = onToggleCompleted,
+            onToggleAction = onToggleAction,
+            onInfo = onInfo,
+            modifier = Modifier.align(Alignment.BottomCenter)
+        )
+    }
+}
+
+/**
+ * The boundary between a Task and the content it is of.
+ *
+ * It exists, in the composition and in the state model, for every Task — including the many that
+ * have exactly one Asset and so nothing for it to navigate. That is the point of drawing it now:
+ * v0.2 has one Asset per Task by construction, so the day a Task carries two, the only thing that
+ * has to change is what happens *inside* this boundary. Adding it then would mean adding it to
+ * every screen that shows a Task at once.
+ *
+ * What it draws today is the Asset itself and nothing else, because a selector for one Asset is
+ * not a navigator. A Task with no Asset at all — a manually typed entry — is not an error and is
+ * not hidden: [AssetViewer] renders [PreviewPlaceholder] for it, which is the same treatment a
+ * file whose source has gone missing gets. There is no fake Asset standing in for the missing one.
+ *
+ * It does not consult a template. §6 defines an `ASSET_VIEWER` kind owning zoom, pan and playback,
+ * and this is where that is *chosen* — the choice is fixed for now because there is one viewer, and
+ * the shape it will take is a decision about the template registry rather than about this boundary.
+ */
+@Composable
+private fun AssetNavigator(
+    item: ReviewItem,
+    player: ExoPlayer,
+    imageLoader: ImageLoader,
+    settings: AppSettings,
+    canSwipeForward: Boolean,
+    canSwipeBack: Boolean,
+    onSwipeForward: () -> Unit,
+    onSwipeBack: () -> Unit,
+    onTap: () -> Unit,
+    modifier: Modifier
+) {
+    AssetViewer(
+        item = item,
+        player = player,
+        imageLoader = imageLoader,
+        settings = settings,
+        canSwipeForward = canSwipeForward,
+        canSwipeBack = canSwipeBack,
+        onSwipeForward = onSwipeForward,
+        onSwipeBack = onSwipeBack,
+        onTap = onTap,
+        modifier = modifier
+    )
+}
+
+/**
+ * One Asset, as large as it will go: the gestures that move through the queue, and the renderer.
+ *
+ * It owns the zoom, the pan and the playback, and it decides nothing about the Task the Asset
+ * belongs to — no completion, no action, no ViewModel. The gestures it hosts are *navigation*
+ * gestures, which is why the callbacks are handed to it rather than made here: whether a swipe is
+ * a judgment or just a step is a fact about the surface, not about the picture.
+ *
+ * The key is the task id, so landing on a Task recentres the card and drops the zoom exactly as
+ * landing on an item always has — that is the behaviour, and only the identity behind it moved.
+ */
+@Composable
+private fun AssetViewer(
+    item: ReviewItem,
+    player: ExoPlayer,
+    imageLoader: ImageLoader,
+    settings: AppSettings,
+    canSwipeForward: Boolean,
+    canSwipeBack: Boolean,
+    onSwipeForward: () -> Unit,
+    onSwipeBack: () -> Unit,
+    onTap: () -> Unit,
+    modifier: Modifier
+) {
+    SwipeCard(
+        key = item.taskId,
+        canSwipeForward = canSwipeForward,
+        canSwipeBack = canSwipeBack,
+        onSwipeForward = onSwipeForward,
+        onSwipeBack = onSwipeBack,
+        modifier = modifier,
+        // The one control that is not in a bar, because it is the control *for* the bars.
+        onTap = onTap
+    ) { zoom ->
+        ItemPreview(
+            item = item,
+            player = player,
+            imageLoader = imageLoader,
+            settings = settings,
+            zoom = zoom,
+            modifier = Modifier.fillMaxSize()
+        )
+    }
+}
+
+/**
+ * What can be done *about* the Task: mark it completed, tag it, ask what it is.
+ *
+ * The one part of the surface that writes. Every control goes through the caller's ViewModel
+ * calls, which is what keeps a decision reached in Quick Review indistinguishable from one
+ * reached in Review — including the webhook it may fire. Nothing here navigates; that belongs to
+ * the navigator above it.
+ */
+@Composable
+private fun TaskReviewControls(
+    item: ReviewItem,
+    settings: AppSettings,
+    onToggleCompleted: (Boolean) -> Unit,
+    onToggleAction: (ItemAction, Boolean) -> Unit,
+    onInfo: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    ReviewActionBar(
+        item = item,
+        // Observed by the caller rather than threaded through every screen: renaming an action in
+        // Settings relabels the chips immediately, with no restart and no item touched.
+        settings = settings,
+        onToggleCompleted = onToggleCompleted,
+        onToggleAction = onToggleAction,
+        onInfo = onInfo,
+        modifier = modifier
+    )
 }
 
 /**
@@ -594,13 +798,17 @@ fun ReviewItemInfoSheet(info: ReviewItemInfo, onDismiss: () -> Unit) {
 }
 
 /**
- * Resume rules: a still-valid persisted item wins, even if it is already checked. Otherwise start
+ * Resume rules: a still-valid persisted row wins, even if it is already checked. Otherwise start
  * at the first unchecked item, and if everything is checked, at the very first item. Passing a
  * null [persisted] is how Quick Review always starts at the first unchecked item.
+ *
+ * Answers with a task id because that is what the session holds, but takes the persisted value as
+ * the row id it is on the List: which entry the user was on is a fact about their membership, and
+ * which Task that entry is of is a fact about the judgment — see §6 of the plan, and decision 6.
  */
-internal fun resumeItemId(persisted: Long?, items: List<ReviewItem>): Long {
-    if (persisted != null && items.any { it.id == persisted }) return persisted
-    return (items.firstOrNull { !it.decisions.isCompleted } ?: items.first()).id
+internal fun resumeTaskId(persisted: Long?, items: List<ReviewItem>): String {
+    items.firstOrNull { it.id == persisted }?.let { return it.taskId }
+    return (items.firstOrNull { !it.decisions.isCompleted } ?: items.first()).taskId
 }
 
 /**

@@ -260,6 +260,15 @@ data class FileReviewStateEntity(
 data class FileCompletion(val relativePath: String, val isCompleted: Boolean)
 
 /**
+ * Which Task a registered file is of. Query result, not a table.
+ *
+ * The registration row has no such column, and giving it one would mean a migration for a value
+ * that is already one join away — see §6's note that registration is not identity. It is read the
+ * way the decision columns are read: from the `assets` row that names the same file.
+ */
+data class FileTaskId(val relativePath: String, val taskId: String)
+
+/**
  * Every decision a review can hold about one item, apart from where they are stored.
  *
  * Exists so the screens can stop caring whether they are looking at a List's row or a folder's
@@ -375,6 +384,17 @@ sealed interface DecisionTarget {
  */
 data class ReviewItem(
     val id: Long,
+
+    /**
+     * The Task this card is of, which is what a review session tracks its position by.
+     *
+     * A session identity and nothing more: it is not persisted, not shown and not sent. It is here
+     * because a position held by [id] cannot survive the thing the card is *about* — [id] is a list
+     * row's number for List review and a registration's number for a folder one, so the two modes
+     * disagree about what identifies the same file, and neither matches what a judgment is recorded
+     * against. A Task does, and the file on screen is that Task's Asset.
+     */
+    val taskId: String,
     val publicId: String,
     val title: String,
     val sourceUri: String?,
@@ -416,6 +436,10 @@ data class ReviewItem(
  */
 fun ListItemEntity.toReviewItem(rootUri: String?): ReviewItem = ReviewItem(
     id = id,
+    // The row's own column, not a projection: `list_items.taskId` is where membership records
+    // which Task it is of, and it is the one column of this row that a decision is actually
+    // about.
+    taskId = taskId,
     publicId = publicId,
     title = title,
     sourceUri = sourceUri,

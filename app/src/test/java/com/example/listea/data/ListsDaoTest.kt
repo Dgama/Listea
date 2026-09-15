@@ -247,6 +247,58 @@ class ListsDaoTest {
         assertNull(dao.getList(listId)?.completedAt)
     }
 
+    // --- a folder review gives what it shows an identity to be judged by -------------------------
+
+    @Test
+    fun `a folder review gives every file it shows a Task`() = runTest {
+        // Nothing has ever been decided about either file. Registration alone leaves no Task behind,
+        // and a card with no Task is one a session cannot walk and a judgment cannot land on.
+        dao.registerFiles(listOf(fileState("2026-07-11/a.jpg"), fileState("2026-07-11/b.jpg")))
+
+        val resolved = dao.ensureTasksForFiles(
+            ROOT,
+            listOf("2026-07-11/a.jpg", "2026-07-11/b.jpg"),
+            now = 2000
+        )
+
+        assertEquals(2, resolved.map { it.taskId }.toSet().size)
+        // Every Task has exactly one state, and this is where a Task without one would come from —
+        // so the invariant the whole read model is projected through is asserted at its source.
+        assertEquals(2, rawInt("SELECT COUNT(*) FROM tasks"))
+        assertEquals(2, rawInt("SELECT COUNT(*) FROM task_state"))
+    }
+
+    @Test
+    fun `a file already decided about keeps the Task that decision was recorded against`() = runTest {
+        // Decided from a List first, then met again in a folder review. A second Task here would
+        // put one file in two queues under two identities, and leave the user's existing checkmark
+        // answering for the one they are not looking at.
+        dao.setFileCompleted(ROOT, "2026-07-11/a.jpg", completed = true, now = 2000)
+        val decided = dao.ensureTasksForFiles(ROOT, listOf("2026-07-11/a.jpg"), now = 3000).single()
+
+        // Looking again answers the same thing...
+        val again = dao.ensureTasksForFiles(ROOT, listOf("2026-07-11/a.jpg"), now = 4000).single()
+
+        assertEquals(decided.taskId, again.taskId)
+        assertEquals(1, rawInt("SELECT COUNT(*) FROM tasks"))
+        // ...and opening a folder says nothing about what is in it.
+        assertEquals(
+            1,
+            rawInt("SELECT isCompleted FROM task_state WHERE taskId = '${decided.taskId}'")
+        )
+    }
+
+    @Test
+    fun `the answer follows the listing rather than the database's order`() = runTest {
+        // The queue is built by zipping this against the folder listing, so an answer in any other
+        // order hands the wrong Task to every card after the first one that differs.
+        val paths = listOf("c.jpg", "a.jpg", "b.jpg")
+
+        val resolved = dao.ensureTasksForFiles(ROOT, paths, now = 2000)
+
+        assertEquals(paths, resolved.map { it.relativePath })
+    }
+
     // --- helpers ---------------------------------------------------------------------------------
 
     private suspend fun folderList(

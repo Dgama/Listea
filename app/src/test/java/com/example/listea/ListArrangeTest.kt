@@ -45,7 +45,9 @@ class ListArrangeTest {
             id = id,
             publicId = newItemPublicId(fileIdentity("folder/$name"), now = id),
             listId = 1,
-            taskId = "task-$name",
+            // Per row and not per name: a session is identified by task id, so two rows sharing
+            // one would collapse into a single card the moment a queue grouped them.
+            taskId = "task-$id",
             title = name,
             isCompleted = completed,
             sortOrder = id.toInt(),
@@ -67,6 +69,9 @@ class ListArrangeTest {
         val id = nextId++
         return ReviewItem(
             id = id,
+            // A typed entry has its own Task like anything else — and two "Buy milk" rows are two
+            // Tasks, which is why this is numbered rather than named.
+            taskId = "task-$id",
             publicId = newItemPublicId(manualItemIdentity(1, name), now = id),
             title = name,
             sourceUri = null,

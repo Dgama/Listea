@@ -849,6 +849,35 @@ abstract class ListsDao {
         relativePath: String
     ): List<Long>
 
+    /**
+     * Gives each of these files a Task if it has none, and answers with every one it now has.
+     *
+     * Registration alone is not enough for a folder review, and this is the difference between the
+     * two paths that resolve a file. A List's rows were given Tasks by the migration and get one
+     * from [addItem]; a file nobody has ever decided about has a registration row and nothing else.
+     * A card that is being shown to somebody is a Task whether or not anything has been decided
+     * about it yet — "every Task has exactly one state" is what the whole read model rests on, and
+     * a registration is not a Task.
+     *
+     * Minting here rather than at registration is the same choice [writeFileState] makes: what
+     * creates a Task is a reason to have one. Looking at a folder is a reason. [ListsDao.registerFiles]
+     * is not, and it stays the cheap idempotent insert it was.
+     *
+     * One transaction for the whole listing, because it is one answer to one question and a folder
+     * half-resolved would hand its queue a mixture of new Tasks and none.
+     */
+    @Transaction
+    open suspend fun ensureTasksForFiles(
+        rootUri: String,
+        relativePaths: List<String>,
+        now: Long
+    ): List<FileTaskId> {
+        val byPath = taskIdsForFiles(rootUri, relativePaths).associateBy { it.relativePath }
+        return relativePaths.map { path ->
+            byPath[path] ?: FileTaskId(path, taskForContent(rootUri, path, now))
+        }
+    }
+
     @Query(
         """
         SELECT id, event, listTitle, itemCount, at, outcome, detail
@@ -1015,6 +1044,28 @@ abstract class ListsDao {
 
     @Query("SELECT taskId FROM assets WHERE rootUri = :rootUri AND relativePath = :relativePath")
     protected abstract suspend fun taskIdForFile(rootUri: String, relativePath: String): String?
+
+    /**
+     * Which Task each of these files is of, by the identity `assets` is unique on.
+     *
+     * A file with no Asset row is simply absent from the answer — it has no Task because nothing
+     * has ever decided anything about it, which is a state a folder review meets constantly and
+     * must not treat as an error.
+     *
+     * The one-shot twin of [observeFileStates], and for the same reason: a folder review resolves
+     * its files, registers them, and then needs to know what Tasks they turned out to be.
+     */
+    @Query(
+        """
+        SELECT relativePath, taskId
+        FROM assets
+        WHERE rootUri = :rootUri AND relativePath IN (:relativePaths)
+        """
+    )
+    protected abstract suspend fun taskIdsForFiles(
+        rootUri: String,
+        relativePaths: List<String>
+    ): List<FileTaskId>
 
     @Query("SELECT * FROM task_state WHERE taskId = :taskId")
     protected abstract suspend fun getTaskState(taskId: String): TaskStateEntity?
