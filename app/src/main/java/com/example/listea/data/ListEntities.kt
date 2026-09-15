@@ -219,6 +219,11 @@ data class FileReviewStateEntity(
      * is for a list row — and the reason both tables carry one. A folder Quick Review has no list
      * rows to send, so it sends these; before they existed the two tables' sequence numbers went
      * out under the same field name and a receiver had no way to tell which space an id came from.
+     *
+     * A receiver is no longer handed this column, though: the name is read off `legacy_item_ids`
+     * now, which holds a copy of it against the Asset. The copy is not a new scheme — it is this
+     * value, moved somewhere that survives the registration table — and it is written by
+     * [ListsDao.registerFiles] as files arrive.
      */
     val publicId: String,
     val rootUri: String,
@@ -235,20 +240,17 @@ data class FileReviewStateEntity(
     val customActions: String = "",
 
     /**
-     * Whether the file behind this registration is still there — **still authoritative**, unlike
-     * the columns above it, and the one part of this table a later step has to finish moving.
+     * The presence flag, as the columns above it are decisions: a slot a query fills, not a column
+     * anything reads.
      *
-     * A file that no longer exists must not be offered for deletion and must not be counted as one
-     * that could be, so this flag is read by [ListsDao.getCheckedFilePaths] and
-     * [ListsDao.observeCheckedFileCount] on every query the delete path makes. The decision is kept
-     * rather than erased when a file goes, for the reason it always was: a completed review is
-     * worth more than the current state of a folder, and a List whose files were deleted must not
-     * silently become incomplete again.
+     * It is projected from [AssetEntity.sourceMissing] now — see [ListsDao.observeFileStates] — and
+     * the value sitting in the table is whatever the migration left there. Nothing has written it
+     * since, because presence is a fact about the file and the Asset is where the file is.
      *
-     * [AssetEntity.sourceMissing] is the column this should have become. The migration populates
-     * it, and nothing maintains it — every re-sync still writes here — so trusting it today would
-     * report stale files as present. Moving that write is file-management work rather than
-     * read-path work, and it is scheduled as such.
+     * The decision is kept rather than erased when a file goes, for the reason it always was: a
+     * completed review is worth more than the current state of a folder, and a List whose files
+     * were deleted must not silently become incomplete again. That is a rule about the flag, not
+     * about which table holds it.
      */
     val sourceMissing: Boolean = false,
 

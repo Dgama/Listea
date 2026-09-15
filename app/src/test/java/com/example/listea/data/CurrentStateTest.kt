@@ -263,6 +263,46 @@ class CurrentStateTest {
         assertEquals(true, dao.getFileStates(ROOT, listOf("a.jpg")).single().decisions.isCompleted)
     }
 
+    /**
+     * The same question asked about presence, and it is a separate answer: a decision is one thing
+     * the file's row used to hold, and whether the file is there at all is another.
+     */
+    @Test
+    fun `a stale presence flag on the registration is never the answer either`() = runTest {
+        folderList(folderPath = "", files = listOf("a.jpg"))
+        registerFiles("a.jpg")
+        dao.setFileCompleted(ROOT, "a.jpg", completed = true, now = 2000)
+
+        // A value the migration wrote and nothing has maintained since. Reading it would report a
+        // file that is sitting right there as gone, and drop it out of a deletion the user asked
+        // for without ever saying so.
+        rawExec("UPDATE file_review_state SET sourceMissing = 1 WHERE relativePath = 'a.jpg'")
+
+        assertEquals(listOf("a.jpg"), dao.getCheckedFilePaths(ROOT))
+        assertEquals(1, dao.observeCheckedFileCount(ROOT).first())
+        assertFalse(dao.getFileStates(ROOT, listOf("a.jpg")).single().sourceMissing)
+    }
+
+    @Test
+    fun `a file that is gone is flagged on the file, not on the registration`() = runTest {
+        folderList(folderPath = "", files = listOf("a.jpg"))
+        registerFiles("a.jpg")
+        dao.setFileCompleted(ROOT, "a.jpg", completed = true, now = 2000)
+
+        dao.markFilesDeleted(ROOT, listOf("a.jpg"))
+
+        // Where the write lands is the whole of the move. The delete path is where it is read, and
+        // a file that is already gone must not be offered up to be deleted a second time.
+        assertEquals(emptyList<String>(), dao.getCheckedFilePaths(ROOT))
+        assertEquals(1, rawInt("SELECT sourceMissing FROM assets WHERE relativePath = 'a.jpg'"))
+        // And the registration's copy is left exactly where the migration put it, because nothing
+        // writes there any more. Were that write to come back, this is the assertion that says so.
+        assertEquals(
+            0,
+            rawInt("SELECT sourceMissing FROM file_review_state WHERE relativePath = 'a.jpg'")
+        )
+    }
+
     @Test
     fun `a stale column on a list row is never the answer either`() = runTest {
         val listId = folderList(folderPath = "", files = listOf("a.jpg"))
@@ -363,6 +403,12 @@ class CurrentStateTest {
     private fun rawExec(sql: String) {
         database.openHelper.writableDatabase.execSQL(sql)
     }
+
+    private fun rawInt(sql: String): Int =
+        database.openHelper.writableDatabase.query(sql).use { cursor ->
+            assertTrue("no row for: $sql", cursor.moveToFirst())
+            cursor.getInt(0)
+        }
 
     private companion object {
         const val ROOT = "content://root"

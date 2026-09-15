@@ -478,14 +478,26 @@ abstract class ListsDao {
      *
      * A file already flagged missing is excluded — there is nothing left to delete — and so is an
      * unchecked one, which is exactly the thing the user did not mark.
+     *
+     * Presence is read off the Asset rather than off the registration. It was the registration's
+     * flag until v0.2 finished moving it: the Asset is what a decision is attached to and what a
+     * path under the root names, so it is the row that can say the file behind it is gone without
+     * a second copy to keep in step. The registrations still carry the old flag, written once by
+     * the migration and never again, and nothing reads it.
+     *
+     * The join to the registration stays even though it is now redundant — a decision is what
+     * makes a file checked, and every decision goes through [writeFileState], which registers — and
+     * it is kept for that exact reason. It is the delete path's own statement that it only takes
+     * files Listea knows as files, and stating it here costs an indexed lookup, where resting it on
+     * an invariant enforced three calls away costs somebody their photographs the day it slips.
      */
     @Query(
         """
-        SELECT frs.relativePath FROM file_review_state frs
-        JOIN assets a ON a.rootUri = frs.rootUri AND a.relativePath = frs.relativePath
+        SELECT a.relativePath FROM assets a
+        JOIN file_review_state frs ON frs.rootUri = a.rootUri AND frs.relativePath = a.relativePath
         JOIN task_state ts ON ts.taskId = a.taskId
-        WHERE frs.rootUri = :rootUri AND ts.isCompleted = 1 AND frs.sourceMissing = 0
-        ORDER BY frs.relativePath COLLATE NOCASE ASC
+        WHERE a.rootUri = :rootUri AND ts.isCompleted = 1 AND a.sourceMissing = 0
+        ORDER BY a.relativePath COLLATE NOCASE ASC
         """
     )
     abstract suspend fun getCheckedFilePaths(rootUri: String): List<String>
@@ -493,10 +505,10 @@ abstract class ListsDao {
     /** How many there are, for the card that offers the delete. Same filters, no paths loaded. */
     @Query(
         """
-        SELECT COUNT(*) FROM file_review_state frs
-        JOIN assets a ON a.rootUri = frs.rootUri AND a.relativePath = frs.relativePath
+        SELECT COUNT(*) FROM assets a
+        JOIN file_review_state frs ON frs.rootUri = a.rootUri AND frs.relativePath = a.relativePath
         JOIN task_state ts ON ts.taskId = a.taskId
-        WHERE frs.rootUri = :rootUri AND ts.isCompleted = 1 AND frs.sourceMissing = 0
+        WHERE a.rootUri = :rootUri AND ts.isCompleted = 1 AND a.sourceMissing = 0
         """
     )
     abstract fun observeCheckedFileCount(rootUri: String): Flow<Int>
@@ -531,9 +543,22 @@ abstract class ListsDao {
         setListRowsMissing(rootUri, relativePaths, false)
     }
 
+    /**
+     * The one write of a file's presence, and it lands on the Asset.
+     *
+     * Three things call it and they are all talking about the same file: a re-sync that did not
+     * find it, a re-sync that did, and the delete that took it away. Each is a fact about the file
+     * rather than about any List that happened to show it, which is why the flag is where the file
+     * is and not on the registration a folder review resolves through.
+     *
+     * A file with no Asset is not written to, and does not need to be. Nothing has ever been
+     * decided about it, so nothing can offer it for deletion and nothing reads its presence; the
+     * row that would hold the flag does not exist yet. When a decision finally does arrive, the
+     * Asset is minted and the next scan sets the flag on it like any other.
+     */
     @Query(
         """
-        UPDATE file_review_state SET sourceMissing = :missing
+        UPDATE assets SET sourceMissing = :missing
         WHERE rootUri = :rootUri AND relativePath IN (:relativePaths)
           AND sourceMissing != :missing
         """
@@ -745,8 +770,10 @@ abstract class ListsDao {
      *
      * Three things have to exist before a decision about a file is visible from every screen that
      * asks about it, and they are made together: the registration row a folder review resolves the
-     * file through and which carries its path and presence flag, the Task that owns the decision,
-     * and the state row the decision is actually written into. Registration is IGNORE-inserted, so
+     * file through, the Task that owns the decision, and the state row the decision is actually
+     * written into. (A fourth follows from it: the name the file goes onto the wire under, which is
+     * [assignLegacyItemIds] copying the registration's id across once the Asset above exists.)
+     * Registration is IGNORE-inserted, so
      * a file already known is left exactly as it was; [taskForContent] resolves by `(rootUri,
      * relativePath)`, so a file another List has already decided about lands on the same Task
      * rather than a rival one.
@@ -780,9 +807,24 @@ abstract class ListsDao {
      * IGNORE rather than REPLACE, with every field left at its default: resolving a folder for
      * review must never touch what is already there. This is what lets Quick Review hand its
      * queue a stable id per file while leaving a file reviewed last month exactly as it was.
+     *
+     * Registering is one of the two moments a file can acquire the name a receiver sees, and the
+     * other is [taskForContent] minting its Asset. They are separate because either can come
+     * first — a folder opened for review registers before anything has been decided about
+     * anything in it, while a file reached through a List gets its Task before anybody thinks to
+     * review it — and both call the same idempotent assignment, so whichever arrives second finds
+     * the work already done.
      */
+    @Transaction
+    open suspend fun registerFiles(states: List<FileReviewStateEntity>) {
+        insertRegistrations(states)
+        states.groupBy { it.rootUri }.forEach { (rootUri, rows) ->
+            assignLegacyItemIds(rootUri, rows.map { it.relativePath })
+        }
+    }
+
     @Insert(onConflict = OnConflictStrategy.IGNORE)
-    abstract suspend fun registerFiles(states: List<FileReviewStateEntity>)
+    protected abstract suspend fun insertRegistrations(states: List<FileReviewStateEntity>)
 
     /**
      * Every file under one root that anything is known about, for the browser's per-file ticks.
@@ -812,20 +854,28 @@ abstract class ListsDao {
      * decided about it. So an undecided file legitimately has a row here and no Task, and it must
      * still come back: the queue's job is to show what the folder holds, and dropping the files
      * nobody has judged yet would leave it showing only the work already done.
+     *
+     * Two of the columns come from somewhere other than the registration, and both are the same
+     * move: presence is the Asset's now, and so is the name a receiver sees. The name falls back
+     * to the registration's own while there is no Asset to hang one on, and that fallback is not a
+     * second naming scheme — [ListsDao.assignLegacyItemIds] writes the registration's value into
+     * the Asset's row, so the two agree by construction and the fallback only covers the window
+     * before either exists.
      */
     @Query(
         """
         SELECT frs.id AS id,
-               frs.publicId AS publicId,
+               COALESCE(li.publicId, frs.publicId) AS publicId,
                frs.rootUri AS rootUri,
                frs.relativePath AS relativePath,
                COALESCE(ts.isCompleted, 0) AS isCompleted,
                COALESCE(ts.isFavorite, 0) AS isFavorite,
                COALESCE(ts.customActions, '') AS customActions,
-               frs.sourceMissing AS sourceMissing,
+               COALESCE(a.sourceMissing, 0) AS sourceMissing,
                frs.updatedAt AS updatedAt
         FROM file_review_state frs
         LEFT JOIN assets a ON a.rootUri = frs.rootUri AND a.relativePath = frs.relativePath
+        LEFT JOIN legacy_item_ids li ON li.assetId = a.id
         LEFT JOIN task_state ts ON ts.taskId = a.taskId
         WHERE frs.rootUri = :rootUri AND frs.relativePath IN (:relativePaths)
         """
@@ -835,20 +885,29 @@ abstract class ListsDao {
         relativePaths: List<String>
     ): Flow<List<FileReviewStateEntity>>
 
-    /** The same, once, for building a payload out of what is stored right now. */
+    /**
+     * The same, once, for building a payload out of what is stored right now.
+     *
+     * Which is where a folder round's item ids come from, and why [FileReviewStateEntity.publicId]
+     * is not what a receiver is handed any more: the name is read off `legacy_item_ids`, the side
+     * table that exists to outlive this one. Nothing is sent from here that a List round would
+     * send differently — the ids are the same strings either way, because the value written into
+     * the side table is this row's own.
+     */
     @Query(
         """
         SELECT frs.id AS id,
-               frs.publicId AS publicId,
+               COALESCE(li.publicId, frs.publicId) AS publicId,
                frs.rootUri AS rootUri,
                frs.relativePath AS relativePath,
                COALESCE(ts.isCompleted, 0) AS isCompleted,
                COALESCE(ts.isFavorite, 0) AS isFavorite,
                COALESCE(ts.customActions, '') AS customActions,
-               frs.sourceMissing AS sourceMissing,
+               COALESCE(a.sourceMissing, 0) AS sourceMissing,
                frs.updatedAt AS updatedAt
         FROM file_review_state frs
         LEFT JOIN assets a ON a.rootUri = frs.rootUri AND a.relativePath = frs.relativePath
+        LEFT JOIN legacy_item_ids li ON li.assetId = a.id
         LEFT JOIN task_state ts ON ts.taskId = a.taskId
         WHERE frs.rootUri = :rootUri AND frs.relativePath IN (:relativePaths)
         """
@@ -1238,7 +1297,16 @@ abstract class ListsDao {
      * holding that from the start is cheaper than reconciling it afterwards.
      */
     private suspend fun taskForContent(rootUri: String?, relativePath: String, now: Long): String {
-        if (rootUri != null) taskIdForFile(rootUri, relativePath)?.let { return it }
+        if (rootUri != null) {
+            val known = taskIdForFile(rootUri, relativePath)
+            if (known != null) {
+                // A file the migration had to mint an Asset for, or one a List reached before any
+                // folder did. The registration may have arrived since, and this is where that is
+                // noticed — the assignment matches on both rows, so it does nothing until it can.
+                assignLegacyItemIds(rootUri, listOf(relativePath))
+                return known
+            }
+        }
 
         val taskId = TaskId.new().value
         insertTask(TaskEntity(id = taskId, createdAt = now))
@@ -1253,8 +1321,38 @@ abstract class ListsDao {
             )
         )
         insertTaskState(TaskStateEntity(taskId = taskId, updatedAt = now))
+        // Only now is there anything for a legacy name to hang off. A pathless Asset matches
+        // nothing and is left alone: it was never a file under a root, so no folder round could
+        // ever have named it.
+        if (rootUri != null) assignLegacyItemIds(rootUri, listOf(relativePath))
         return taskId
     }
+
+    /**
+     * Hands these files the name a receiver knows them by, once there is an Asset to hang it on.
+     *
+     * The value is not invented here — it is the registration's own `publicId`, copied across.
+     * That is what makes this a move rather than a second naming scheme, and what keeps a
+     * receiver's ids stable through it: every payload a file has ever produced named it by this
+     * string, and it goes on doing so. The fallback in [getFileStates] is the same string for the
+     * same reason, not a rival answer.
+     *
+     * A file with no registration, or no Asset yet, matches nothing and is left alone. The table
+     * fills as files arrive rather than in one pass, because there is no later point at which
+     * every file is known; `OR IGNORE` is what lets both call sites run without asking which of
+     * them got there first.
+     */
+    @Query(
+        """
+        INSERT OR IGNORE INTO legacy_item_ids (assetId, publicId)
+        SELECT a.id, frs.publicId
+        FROM assets a
+        JOIN file_review_state frs
+          ON frs.rootUri = a.rootUri AND frs.relativePath = a.relativePath
+        WHERE a.rootUri = :rootUri AND a.relativePath IN (:relativePaths)
+        """
+    )
+    protected abstract suspend fun assignLegacyItemIds(rootUri: String, relativePaths: List<String>)
 
     @Query("DELETE FROM list_items WHERE id = :id")
     protected abstract suspend fun deleteItem(id: Long)
