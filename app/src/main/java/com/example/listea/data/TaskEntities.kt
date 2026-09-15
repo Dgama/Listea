@@ -121,11 +121,20 @@ data class TaskStateEntity(
     val isCompleted: Boolean = false,
     val isFavorite: Boolean = false,
 
-    /** The configured actions this Task carries, as ids. See [ListItemEntity.customActions]. */
+    /** The configured actions this Task carries, as ids, in [encodeActionIds]' encoding. */
     val customActions: String = "",
 
     val updatedAt: Long
 )
+
+/**
+ * The decisions a Task's current state is carrying.
+ *
+ * The same shape the two legacy carriers expose, so a caller that used to read a decision off a
+ * `list_items` or `file_review_state` row reads it off this instead and sees nothing different.
+ */
+val TaskStateEntity.decisions: ReviewDecisions
+    get() = ReviewDecisions(isCompleted, isFavorite, decodeActionIds(customActions))
 
 /**
  * One submitted review: what was decided, when, under which template, and from where.

@@ -110,10 +110,22 @@ data class ListItemEntity(
     val taskId: String,
     val title: String,
     /**
-     * Manual items only. A source-backed item's checked state belongs to the *file*, not to this
-     * row: it lives in [FileReviewStateEntity] and is projected back in by the queries that read
-     * items, so two Lists over the same file can never disagree about it. Reading this column
-     * directly on a source-backed row is a bug — it is left at its default and never written.
+     * Not where completion is stored any more — this field is a slot the query fills.
+     *
+     * What is true of an item is true of its Task. Every query that loads these rows resolves it
+     * from [TaskStateEntity] and lands it here with `ts.isCompleted AS isCompleted`, so a caller
+     * reading `row.isCompleted` still gets the right answer and the screens did not have to learn a
+     * new shape. That is the whole reason the field kept its name: the projection is the seam, and
+     * it is the only place the two models touch.
+     *
+     * The column underneath it is dead. A query that reads the row's own column — `SELECT *`, as
+     * [ListsDao.getSourceItems] does — fills this slot with whatever an older version last wrote,
+     * or with its default, and nothing in this app writes that column now. Treat any value read
+     * without the join as stale, because it is.
+     *
+     * Kept rather than dropped for the reason a migration never trades away the only remaining copy
+     * of somebody's work, and it goes in a later release once no reader is provable — which is a
+     * claim the tests exist to keep honest rather than to assume.
      */
     val isCompleted: Boolean = false,
     val sortOrder: Int,
@@ -124,12 +136,12 @@ data class ListItemEntity(
     val sourceRelativePath: String? = null,
 
     /**
-     * The same file's path from the SAF root rather than from this list's folder: the identity a
-     * review decision is actually stored against, in [FileReviewStateEntity].
+     * The same file's path from the SAF root rather than from this list's folder: what the file is
+     * named by everything downstream of this row.
      *
      * Denormalised on purpose. It is derivable — the owning list's folder plus [sourceRelativePath]
      * — but a list's folder link never changes after creation, so it cannot drift, and having it
-     * on the row is what lets every query that needs a decision join straight to it instead of
+     * on the row is what lets every query reach the file's Asset, and through it the Task, without
      * concatenating paths in SQL. Null for manual items, which have no file.
      */
     val rootRelativePath: String? = null,
@@ -158,29 +170,33 @@ data class ListItemEntity(
     val sourceModifiedAt: Long? = null,
 
     /**
-     * Review actions: metadata for downstream automation, deliberately not completion state.
-     * Checking an item is not an action, and setting an action never checks anything.
+     * Slots the query fills, exactly as [isCompleted] is: an action is a decision about a file, and
+     * a decision about a file belongs to the file's Task. The queries that load these rows project
+     * `ts.isFavorite` and `ts.customActions` in, and the columns underneath are dead.
      *
-     * Favourite keeps a column of its own because Listea knows what it means. The configured
-     * actions do not — there can be any number of them and they can come and go — so they are
-     * held as a set of ids in one column, encoded by [encodeActionIds]. A column per action would
-     * mean a schema migration every time the user pressed the add button.
-     *
-     * Manual items only, for the same reason as [isCompleted]: an action is a decision about a
-     * file, and a decision about a file is stored against the file.
+     * [customActions] uses [encodeActionIds]' encoding in both places, which is why an old copy of
+     * a set of ids stays legible — one format for one thing in this schema, not two.
      */
     val isFavorite: Boolean = false,
     val customActions: String = ""
 )
 
 /**
- * Every decision a review can reach about one file, and the file it is about.
+ * A file Listea has been asked to review, and the handle a folder review holds it by.
  *
- * This is the point the Lists were decoupled from. A decision belongs to the file, not to whoever
- * happened to be looking at it: a folder-scoped Quick Review, a List built over that folder, and
- * a second List built over it next month are three ways of *reaching* the same file and must all
- * see and write the same state. Storing it here is what makes that true by construction rather
- * than by everyone remembering to copy it around.
+ * **This table no longer holds a decision.** The job it was built for — one place a decision about
+ * a file could live, so a List over a folder and a Quick Review over that same folder could never
+ * disagree — is [TaskStateEntity]'s now, reached through [AssetEntity] by the very identity below.
+ * The three decision columns on the row are dead; the *fields* are still read, because the queries
+ * that resolve a folder review project the Task's state into them, and that projection is the seam
+ * the screens read across.
+ *
+ * What is left is registration: which files a review has a relationship with. The browser is given
+ * one tick per registered file by [ListsDao.observeFileCompletion] — an empty tick for a file
+ * nobody has judged yet, rather than no tick at all — and [ListsDao.observeFileStates] resolves the
+ * same row set into a review queue, including the files that are still undecided. That row *set* is
+ * the thing being preserved, which is why those queries joined out to the decision rather than
+ * re-driving themselves from `assets`.
  *
  * Identity is [rootUri] plus [relativePath] — the SAF grant the file is under, and where it sits
  * beneath it — because that is the only name for a file that survives everything Listea does to
@@ -189,8 +205,7 @@ data class ListItemEntity(
  *
  * [id] exists so a resolved file has a stable handle for a review queue to hold on to, which a
  * folder-resolved item has no [ListItemEntity] to borrow one from. Rows are created as files are
- * resolved for review, with every decision false, so registering a file never asserts anything
- * about it.
+ * resolved for review — idempotently, and asserting nothing about them.
  */
 @Entity(
     tableName = "file_review_state",
@@ -208,24 +223,36 @@ data class FileReviewStateEntity(
     val publicId: String,
     val rootUri: String,
     val relativePath: String,
+
+    /**
+     * Slots the query fills. See the class doc: a decision lives on the Task now, and the queries
+     * that resolve a folder review project it in here.
+     */
     val isCompleted: Boolean = false,
     val isFavorite: Boolean = false,
 
-    /** The configured actions this file carries, as ids. See [ListItemEntity.customActions]. */
+    /** The same slot, in [encodeActionIds]' encoding. */
     val customActions: String = "",
 
     /**
-     * Set when the file behind this state is gone, exactly as [ListItemEntity.sourceMissing] is.
+     * Whether the file behind this registration is still there — **still authoritative**, unlike
+     * the columns above it, and the one part of this table a later step has to finish moving.
      *
-     * The decision is kept rather than deleted, for the reason it always was: a completed review
-     * is worth more than the current state of a folder, and a list whose files were deleted must
-     * not silently become incomplete again. What this flag buys is honesty everywhere else — a
-     * file that no longer exists is not offered for deletion and is not counted as one that could
-     * be. Cleared again the moment a folder resolution finds the file present.
+     * A file that no longer exists must not be offered for deletion and must not be counted as one
+     * that could be, so this flag is read by [ListsDao.getCheckedFilePaths] and
+     * [ListsDao.observeCheckedFileCount] on every query the delete path makes. The decision is kept
+     * rather than erased when a file goes, for the reason it always was: a completed review is
+     * worth more than the current state of a folder, and a List whose files were deleted must not
+     * silently become incomplete again.
+     *
+     * [AssetEntity.sourceMissing] is the column this should have become. The migration populates
+     * it, and nothing maintains it — every re-sync still writes here — so trusting it today would
+     * report stale files as present. Moving that write is file-management work rather than
+     * read-path work, and it is scheduled as such.
      */
     val sourceMissing: Boolean = false,
 
-    /** When the decision last changed, for nothing but debugging: no behaviour reads it. */
+    /** When this row was last written. Nothing branches on it; it exists to date a registration. */
     val updatedAt: Long
 )
 
@@ -288,26 +315,40 @@ private const val ActionIdChars = 12
 /**
  * A file's path from the SAF root: the owning list's folder, then the file's path inside it.
  *
- * The canonical join, kept here because it is what a decision's identity is made of. Everything
- * that needs to name a file the same way a [FileReviewStateEntity] does goes through this.
+ * The canonical join, kept here because it is what a file's identity is made of — the same string
+ * a [FileReviewStateEntity] registers the file under and the one an [AssetEntity] is located by,
+ * which is what lets the two be joined at all. Everything that needs to name a file the way the
+ * schema does goes through this.
  */
 fun rootRelativePathOf(listPath: String, itemPath: String): String =
     if (listPath.isEmpty()) itemPath else "$listPath/$itemPath"
 
-/** The decisions a file's stored state is carrying. */
+/**
+ * The decisions a resolved file row is carrying.
+ *
+ * Only meaningful on a row that came out of [ListsDao.observeFileStates] or
+ * [ListsDao.getFileStates], which fill these fields from the file's Task. On a row read any other
+ * way it is reading a dead column, and the answer is whatever an older version left there.
+ */
 val FileReviewStateEntity.decisions: ReviewDecisions
     get() = ReviewDecisions(isCompleted, isFavorite, decodeActionIds(customActions))
 
-/** The decisions a stored row is carrying, whatever its origin. */
+/**
+ * The decisions a resolved membership row is carrying.
+ *
+ * Same caveat as [FileReviewStateEntity.decisions]: meaningful on a row that came out of a query
+ * that joined the Task's state in, stale on one that did not.
+ */
 val ListItemEntity.decisions: ReviewDecisions
     get() = ReviewDecisions(isCompleted, isFavorite, decodeActionIds(customActions))
 
 /**
  * Where a decision is written when the user makes one.
  *
- * Two cases only, and they are not symmetric: [File] is the normal one and is shared by everything
- * that can see that file, while [ManualItem] is a row that *is* the item — a manually typed entry
- * has no file to be a decision about, so its state stays where it always was, on its own row.
+ * Two cases only, and they are not symmetric: [File] names content, and every List and every folder
+ * review that reaches that content shares it. [ManualItem] names a membership row instead, because
+ * a manually typed entry has no file to be a decision about — which is a difference in how the
+ * Task is *found*, not in where its state ends up. Both write to the Task.
  */
 sealed interface DecisionTarget {
     data class File(val rootUri: String, val relativePath: String) : DecisionTarget
@@ -368,9 +409,10 @@ data class ReviewItem(
 /**
  * A stored row resolved for review, with its decisions taken from wherever they actually live.
  *
- * [decisions] is passed in rather than read off the row: the queries that load items project the
- * shared file state into the entity's columns, and this keeps the one place that assumption is
- * made visible instead of scattering `item.isCompleted` across the screens again.
+ * Its decisions come off the row's fields, but they were put there by the query that loaded it:
+ * the queries that resolve items join the Task's state in and land it on those columns, so this
+ * function is one of the places that assumption is visible rather than one of the places it is
+ * made. Nothing here reads a decision out of the `list_items` table.
  */
 fun ListItemEntity.toReviewItem(rootUri: String?): ReviewItem = ReviewItem(
     id = id,

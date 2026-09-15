@@ -807,7 +807,7 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
                     dao.setFileAction(target.rootUri, target.relativePath, action, enabled, now())
 
                 is DecisionTarget.ManualItem ->
-                    dao.setManualItemAction(target.itemId, action, enabled)
+                    dao.setManualItemAction(target.itemId, action, enabled, now())
             }
         }
     }

@@ -52,18 +52,21 @@ class ListsDaoTest {
     // --- a decision belongs to the file, not to a list row ---------------------------------------
 
     @Test
-    fun `checking a file writes the file's state and leaves the list row alone`() = runTest {
+    fun `checking a file writes its Task's state and no older column`() = runTest {
         val listId = folderList(folderPath = "2026-07-11", files = listOf("a.jpg"))
         dao.registerFiles(listOf(fileState("2026-07-11/a.jpg")))
 
         dao.setFileCompleted(ROOT, "2026-07-11/a.jpg", completed = true, now = 2000)
 
-        assertEquals(1, rawInt("SELECT isCompleted FROM file_review_state"))
-        // The reading that counts resolves through the file state...
+        // One file in this fixture, so one Task and one state row: no subquery needed to name it.
+        assertEquals(1, rawInt("SELECT isCompleted FROM task_state"))
+        // The reading that counts resolves through the Task...
         assertEquals(true, dao.getItems(listId).single().isCompleted)
-        // ...and the column underneath stays at its default, because a source-backed row's own
-        // isCompleted is never written. A stale value here would be a second, diverging answer.
+        // ...and both columns a decision used to be written to stay at their defaults, because
+        // neither is written any more. A stale value in either is a second answer that could
+        // disagree with the one the app shows, which is the whole defect this replaces.
         assertEquals(0, rawInt("SELECT isCompleted FROM list_items"))
+        assertEquals(0, rawInt("SELECT isCompleted FROM file_review_state"))
     }
 
     @Test

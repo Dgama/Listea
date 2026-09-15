@@ -18,19 +18,13 @@ abstract class ListsDao {
                l.title AS title,
                l.completedAt AS completedAt,
                COUNT(i.id) AS totalItems,
-               COALESCE(
-                   SUM(
-                       CASE WHEN i.rootRelativePath IS NULL THEN i.isCompleted
-                            ELSE COALESCE(s.isCompleted, 0) END
-                   ), 0
-               ) AS completedItems,
+               COALESCE(SUM(ts.isCompleted), 0) AS completedItems,
                l.webhookEnabled AS webhookEnabled,
                l.lastDeliveryStatus AS lastDeliveryStatus,
                l.lastDeliveryCode AS lastDeliveryCode
         FROM lists l
         LEFT JOIN list_items i ON i.listId = l.id
-        LEFT JOIN file_review_state s
-               ON s.rootUri = l.sourceRootUri AND s.relativePath = i.rootRelativePath
+        LEFT JOIN task_state ts ON ts.taskId = i.taskId
         GROUP BY l.id
         ORDER BY l.createdAt DESC, l.id DESC
         """
@@ -43,14 +37,20 @@ abstract class ListsDao {
     /**
      * One list's items with their decisions resolved.
      *
-     * A source-backed row's checked state and actions are not on the row — they belong to the file
-     * and live in `file_review_state` — so every read that shows an item projects them back in
-     * here. The CASE is what keeps that honest: a manual item reads its own columns, and a
-     * source-backed one reads the file's state and *never* its own, so a value left behind on the
-     * row by an older version cannot leak into the UI.
+     * A membership row holds no decision of its own any more. What is true of the thing judged
+     * lives on its Task, and this joins it back in — one path for every row, whether it is a
+     * manually typed entry or a file. The CASE that used to send the two kinds to different
+     * tables is gone rather than rewritten, because a manual entry and a file now answer the
+     * question the same way: a manual entry is a Task with no content, a file is a Task with an
+     * Asset, and both have state.
      *
-     * Room sees `file_review_state` in the query and invalidates this flow when it changes, which
-     * is what makes a decision taken in a folder's Quick Review appear on this list immediately.
+     * The join is inner, and that is safe for a reason worth stating: every Task is created with
+     * its state in the same breath, and the migration test asserts over a realistic fixture that
+     * migrated data holds the same. A left join here would not be more robust — it would turn a
+     * violated invariant into a row that silently disappears from somebody's list.
+     *
+     * Room sees `task_state` in the query and invalidates this flow when it changes, which is what
+     * makes a decision taken in a folder's Quick Review appear on this list immediately.
      */
     @Query(
         """
@@ -59,7 +59,7 @@ abstract class ListsDao {
                i.listId AS listId,
                i.taskId AS taskId,
                i.title AS title,
-               CASE WHEN i.rootRelativePath IS NULL THEN i.isCompleted ELSE COALESCE(s.isCompleted, 0) END AS isCompleted,
+               ts.isCompleted AS isCompleted,
                i.sortOrder AS sortOrder,
                i.createdAt AS createdAt,
                i.sourceUri AS sourceUri,
@@ -68,13 +68,10 @@ abstract class ListsDao {
                i.sourceMissing AS sourceMissing,
                i.sourceSizeBytes AS sourceSizeBytes,
                i.sourceModifiedAt AS sourceModifiedAt,
-               CASE WHEN i.rootRelativePath IS NULL THEN i.isFavorite ELSE COALESCE(s.isFavorite, 0) END AS isFavorite,
-               CASE WHEN i.rootRelativePath IS NULL THEN i.customActions
-                    ELSE COALESCE(s.customActions, '') END AS customActions
+               ts.isFavorite AS isFavorite,
+               ts.customActions AS customActions
         FROM list_items i
-        JOIN lists l ON l.id = i.listId
-        LEFT JOIN file_review_state s
-               ON s.rootUri = l.sourceRootUri AND s.relativePath = i.rootRelativePath
+        JOIN task_state ts ON ts.taskId = i.taskId
         WHERE i.listId = :listId
         ORDER BY i.sortOrder ASC, i.id ASC
         """
@@ -128,8 +125,14 @@ abstract class ListsDao {
     /**
      * Checks or unchecks a *manual* item, whose state really is its own. See [addItem].
      *
-     * Manual items have no file to hold a decision, so this is the one completion write that
-     * still touches a `list_items` column, and it can only ever affect the list the row is in.
+     * A manual entry has no file to share a decision with, so this reaches its Task directly and
+     * can only ever affect the list the row is in. It writes to the Task like every other
+     * completion write: what makes an item manual is the shape of its Task — one with no Asset —
+     * and not a second place for its state to live.
+     *
+     * A row that has gone from underneath this call writes nothing and still recomputes, which is
+     * what the previous version did too: the update matched no rows and the list was re-evaluated
+     * regardless.
      */
     @Transaction
     open suspend fun setManualItemCompleted(
@@ -139,7 +142,9 @@ abstract class ListsDao {
         now: Long
     ): Boolean {
         val wasComplete = isComplete(listId) == true
-        updateItemCompleted(itemId, completed)
+        taskIdForItem(itemId)?.let { taskId ->
+            writeTaskState(taskId, now) { it.copy(isCompleted = completed) }
+        }
         refreshCompletion(listId, now)
         return !wasComplete && isComplete(listId) == true
     }
@@ -207,19 +212,13 @@ abstract class ListsDao {
                l.sourceRelativePath AS relativePath,
                l.completedAt AS completedAt,
                COUNT(i.id) AS totalItems,
-               COALESCE(
-                   SUM(
-                       CASE WHEN i.rootRelativePath IS NULL THEN i.isCompleted
-                            ELSE COALESCE(s.isCompleted, 0) END
-                   ), 0
-               ) AS completedItems,
+               COALESCE(SUM(ts.isCompleted), 0) AS completedItems,
                l.webhookEnabled AS webhookEnabled,
                l.lastDeliveryStatus AS lastDeliveryStatus,
                l.lastDeliveryCode AS lastDeliveryCode
         FROM lists l
         LEFT JOIN list_items i ON i.listId = l.id
-        LEFT JOIN file_review_state s
-               ON s.rootUri = l.sourceRootUri AND s.relativePath = i.rootRelativePath
+        LEFT JOIN task_state ts ON ts.taskId = i.taskId
         WHERE l.sourceRootUri = :rootUri AND l.sourceRelativePath IS NOT NULL
         GROUP BY l.id
         """
@@ -236,11 +235,10 @@ abstract class ListsDao {
         """
         SELECT i.listId AS listId,
                i.sourceRelativePath AS relativePath,
-               COALESCE(s.isCompleted, 0) AS isCompleted
+               ts.isCompleted AS isCompleted
         FROM list_items i
         JOIN lists l ON l.id = i.listId
-        LEFT JOIN file_review_state s
-               ON s.rootUri = l.sourceRootUri AND s.relativePath = i.rootRelativePath
+        JOIN task_state ts ON ts.taskId = i.taskId
         WHERE l.sourceRootUri = :rootUri
           AND l.sourceRelativePath IS NOT NULL
           AND i.sourceRelativePath IS NOT NULL
@@ -322,7 +320,7 @@ abstract class ListsDao {
                i.listId AS listId,
                i.taskId AS taskId,
                i.title AS title,
-               CASE WHEN i.rootRelativePath IS NULL THEN i.isCompleted ELSE COALESCE(s.isCompleted, 0) END AS isCompleted,
+               ts.isCompleted AS isCompleted,
                i.sortOrder AS sortOrder,
                i.createdAt AS createdAt,
                i.sourceUri AS sourceUri,
@@ -331,13 +329,10 @@ abstract class ListsDao {
                i.sourceMissing AS sourceMissing,
                i.sourceSizeBytes AS sourceSizeBytes,
                i.sourceModifiedAt AS sourceModifiedAt,
-               CASE WHEN i.rootRelativePath IS NULL THEN i.isFavorite ELSE COALESCE(s.isFavorite, 0) END AS isFavorite,
-               CASE WHEN i.rootRelativePath IS NULL THEN i.customActions
-                    ELSE COALESCE(s.customActions, '') END AS customActions
+               ts.isFavorite AS isFavorite,
+               ts.customActions AS customActions
         FROM list_items i
-        JOIN lists l ON l.id = i.listId
-        LEFT JOIN file_review_state s
-               ON s.rootUri = l.sourceRootUri AND s.relativePath = i.rootRelativePath
+        JOIN task_state ts ON ts.taskId = i.taskId
         WHERE i.listId = :listId
         ORDER BY i.sortOrder ASC, i.id ASC
         """
@@ -347,18 +342,27 @@ abstract class ListsDao {
     /**
      * Every checked file under one SAF root that Listea still believes exists.
      *
-     * Read from the file state and not from any list, which is what makes it right: a file checked
-     * in a folder no List covers is just as checked as one checked from a List, and the feature
-     * that deletes checked files has to see both or it is lying about what "checked" means.
+     * Read from what is true of the file, not from what any List says about it, which is what
+     * makes it right: a file checked in a folder no List covers is just as checked as one checked
+     * from a List, and the feature that deletes checked files has to see both or it is lying about
+     * what "checked" means.
+     *
+     * The registration row drives it, because that is where a file's path under the root and its
+     * presence flag live; the state itself comes from the Task. Both joins are inner, and can be,
+     * because a file is only ever checked *because* somebody decided about it, and deciding mints
+     * the Task and writes its state in the same transaction. A file that could be marked checked
+     * without those rows existing is not a shape this code can produce.
      *
      * A file already flagged missing is excluded — there is nothing left to delete — and so is an
      * unchecked one, which is exactly the thing the user did not mark.
      */
     @Query(
         """
-        SELECT relativePath FROM file_review_state
-        WHERE rootUri = :rootUri AND isCompleted = 1 AND sourceMissing = 0
-        ORDER BY relativePath COLLATE NOCASE ASC
+        SELECT frs.relativePath FROM file_review_state frs
+        JOIN assets a ON a.rootUri = frs.rootUri AND a.relativePath = frs.relativePath
+        JOIN task_state ts ON ts.taskId = a.taskId
+        WHERE frs.rootUri = :rootUri AND ts.isCompleted = 1 AND frs.sourceMissing = 0
+        ORDER BY frs.relativePath COLLATE NOCASE ASC
         """
     )
     abstract suspend fun getCheckedFilePaths(rootUri: String): List<String>
@@ -366,8 +370,10 @@ abstract class ListsDao {
     /** How many there are, for the card that offers the delete. Same filters, no paths loaded. */
     @Query(
         """
-        SELECT COUNT(*) FROM file_review_state
-        WHERE rootUri = :rootUri AND isCompleted = 1 AND sourceMissing = 0
+        SELECT COUNT(*) FROM file_review_state frs
+        JOIN assets a ON a.rootUri = frs.rootUri AND a.relativePath = frs.relativePath
+        JOIN task_state ts ON ts.taskId = a.taskId
+        WHERE frs.rootUri = :rootUri AND ts.isCompleted = 1 AND frs.sourceMissing = 0
         """
     )
     abstract fun observeCheckedFileCount(rootUri: String): Flow<Int>
@@ -581,23 +587,21 @@ abstract class ListsDao {
      * Sets one review action on a manual item. Action metadata only: it deliberately does not call
      * [refreshCompletion] and returns nothing, so it can never report a completion transition and
      * therefore can never cause a webhook to be delivered.
+     *
+     * Both kinds of action are one read-modify-write of the Task's set now. Favourite is no longer
+     * a column of its own — [ItemAction.Favourite] and a configured action differ in who decides
+     * what they mean, not in where they are kept — and the read stays inside the transaction so
+     * two actions toggled at once cannot each write a set that never saw the other.
      */
     @Transaction
-    open suspend fun setManualItemAction(itemId: Long, action: ItemAction, enabled: Boolean) {
-        when (action) {
-            // Its own column, so it is still one write.
-            ItemAction.Favourite -> setItemFavorite(itemId, enabled)
-
-            // The configured actions share a column, so changing one means reading the set,
-            // altering it and writing it back. Inside the transaction, so two actions toggled at
-            // once cannot each write a set that never saw the other.
-            is ItemAction.Custom -> {
-                val current = decodeActionIds(getItemCustomActions(itemId).orEmpty())
-                setItemCustomActions(itemId, encodeActionIds(action.setOn(
-                    ReviewDecisions(customActions = current), enabled
-                ).customActions))
-            }
-        }
+    open suspend fun setManualItemAction(
+        itemId: Long,
+        action: ItemAction,
+        enabled: Boolean,
+        now: Long
+    ) {
+        val taskId = taskIdForItem(itemId) ?: return
+        writeTaskState(taskId, now) { action.setOn(it, enabled) }
     }
 
     /** The same, on a file, so every list holding it sees the action. Still never completes. */
@@ -613,11 +617,19 @@ abstract class ListsDao {
     }
 
     /**
-     * Read-modify-write of one file's decisions, creating the row on the first decision.
+     * Read-modify-write of one file's decisions, registering the file and minting its Task on the
+     * first decision anybody makes about it.
      *
-     * Not an upsert: the row's primary key is only a handle, and the real identity is the unique
-     * (root, path) pair, which `@Upsert` would not match on. Callers are already inside a
-     * transaction, so the read and the write cannot be interleaved with another decision.
+     * Three things have to exist before a decision about a file is visible from every screen that
+     * asks about it, and they are made together: the registration row a folder review resolves the
+     * file through and which carries its path and presence flag, the Task that owns the decision,
+     * and the state row the decision is actually written into. Registration is IGNORE-inserted, so
+     * a file already known is left exactly as it was; [taskForContent] resolves by `(rootUri,
+     * relativePath)`, so a file another List has already decided about lands on the same Task
+     * rather than a rival one.
+     *
+     * Callers are already inside a transaction, so none of this can interleave with another
+     * decision about the same file.
      */
     protected open suspend fun writeFileState(
         rootUri: String,
@@ -625,29 +637,17 @@ abstract class ListsDao {
         now: Long,
         change: (ReviewDecisions) -> ReviewDecisions
     ) {
-        val existing = getFileState(rootUri, relativePath)
-        val next = change(existing?.decisions ?: ReviewDecisions())
-        if (existing == null) {
-            insertFileState(
+        registerFiles(
+            listOf(
                 FileReviewStateEntity(
                     publicId = newItemPublicId(fileIdentity(relativePath), now),
                     rootUri = rootUri,
                     relativePath = relativePath,
-                    isCompleted = next.isCompleted,
-                    isFavorite = next.isFavorite,
-                    customActions = encodeActionIds(next.customActions),
                     updatedAt = now
                 )
             )
-        } else {
-            updateFileState(
-                id = existing.id,
-                isCompleted = next.isCompleted,
-                isFavorite = next.isFavorite,
-                customActions = encodeActionIds(next.customActions),
-                updatedAt = now
-            )
-        }
+        )
+        writeTaskState(taskForContent(rootUri, relativePath, now), now, change)
     }
 
     /**
@@ -670,16 +670,41 @@ abstract class ListsDao {
      */
     @Query(
         """
-        SELECT relativePath, isCompleted FROM file_review_state WHERE rootUri = :rootUri
+        SELECT frs.relativePath AS relativePath,
+               COALESCE(ts.isCompleted, 0) AS isCompleted
+        FROM file_review_state frs
+        LEFT JOIN assets a ON a.rootUri = frs.rootUri AND a.relativePath = frs.relativePath
+        LEFT JOIN task_state ts ON ts.taskId = a.taskId
+        WHERE frs.rootUri = :rootUri
         """
     )
     abstract fun observeFileCompletion(rootUri: String): Flow<List<FileCompletion>>
 
-    /** The decisions currently held for these files, for a folder-resolved review queue. */
+    /**
+     * The decisions currently held for these files, for a folder-resolved review queue.
+     *
+     * Left-joined where the list queries are inner, and the asymmetry is the point. A file reaches
+     * this table by being *registered* — which happens whenever a folder is opened for review and
+     * asserts nothing about the file — while a Task only exists once something has actually been
+     * decided about it. So an undecided file legitimately has a row here and no Task, and it must
+     * still come back: the queue's job is to show what the folder holds, and dropping the files
+     * nobody has judged yet would leave it showing only the work already done.
+     */
     @Query(
         """
-        SELECT * FROM file_review_state
-        WHERE rootUri = :rootUri AND relativePath IN (:relativePaths)
+        SELECT frs.id AS id,
+               frs.publicId AS publicId,
+               frs.rootUri AS rootUri,
+               frs.relativePath AS relativePath,
+               COALESCE(ts.isCompleted, 0) AS isCompleted,
+               COALESCE(ts.isFavorite, 0) AS isFavorite,
+               COALESCE(ts.customActions, '') AS customActions,
+               frs.sourceMissing AS sourceMissing,
+               frs.updatedAt AS updatedAt
+        FROM file_review_state frs
+        LEFT JOIN assets a ON a.rootUri = frs.rootUri AND a.relativePath = frs.relativePath
+        LEFT JOIN task_state ts ON ts.taskId = a.taskId
+        WHERE frs.rootUri = :rootUri AND frs.relativePath IN (:relativePaths)
         """
     )
     abstract fun observeFileStates(
@@ -690,46 +715,25 @@ abstract class ListsDao {
     /** The same, once, for building a payload out of what is stored right now. */
     @Query(
         """
-        SELECT * FROM file_review_state
-        WHERE rootUri = :rootUri AND relativePath IN (:relativePaths)
+        SELECT frs.id AS id,
+               frs.publicId AS publicId,
+               frs.rootUri AS rootUri,
+               frs.relativePath AS relativePath,
+               COALESCE(ts.isCompleted, 0) AS isCompleted,
+               COALESCE(ts.isFavorite, 0) AS isFavorite,
+               COALESCE(ts.customActions, '') AS customActions,
+               frs.sourceMissing AS sourceMissing,
+               frs.updatedAt AS updatedAt
+        FROM file_review_state frs
+        LEFT JOIN assets a ON a.rootUri = frs.rootUri AND a.relativePath = frs.relativePath
+        LEFT JOIN task_state ts ON ts.taskId = a.taskId
+        WHERE frs.rootUri = :rootUri AND frs.relativePath IN (:relativePaths)
         """
     )
     abstract suspend fun getFileStates(
         rootUri: String,
         relativePaths: List<String>
     ): List<FileReviewStateEntity>
-
-    @Query(
-        """
-        SELECT * FROM file_review_state
-        WHERE rootUri = :rootUri AND relativePath = :relativePath
-        """
-    )
-    protected abstract suspend fun getFileState(
-        rootUri: String,
-        relativePath: String
-    ): FileReviewStateEntity?
-
-    @Insert
-    protected abstract suspend fun insertFileState(state: FileReviewStateEntity)
-
-    @Query(
-        """
-        UPDATE file_review_state
-        SET isCompleted = :isCompleted,
-            isFavorite = :isFavorite,
-            customActions = :customActions,
-            updatedAt = :updatedAt
-        WHERE id = :id
-        """
-    )
-    protected abstract suspend fun updateFileState(
-        id: Long,
-        isCompleted: Boolean,
-        isFavorite: Boolean,
-        customActions: String,
-        updatedAt: Long
-    )
 
     /** Every list holding this file, so a decision about it can reach all of them. */
     @Query(
@@ -830,7 +834,16 @@ abstract class ListsDao {
         }
     }
 
-    /** Only source-backed items take part in reconciliation; manual items are excluded here. */
+    /**
+     * Only source-backed items take part in reconciliation; manual items are excluded here.
+     *
+     * `SELECT *`, and deliberately not a resolved projection like [getItems]: every caller is
+     * asking about *membership* — which paths are present, which have gone, how big they are — and
+     * none of them asks what was decided. The decision columns on these rows are therefore not the
+     * state, only whatever those columns happen to hold; reading one from here would be reading a
+     * copy nothing keeps up to date. Should a caller ever need a decision, it wants [getItems] or
+     * a join, not this.
+     */
     @Query(
         """
         SELECT * FROM list_items
@@ -872,12 +885,18 @@ abstract class ListsDao {
 
     // --- the v13 tables --------------------------------------------------------------------------
     //
-    // v0.2 step 3 adds these tables and makes every membership row name a Task, and stops there:
-    // every read is still where it was, and the decision columns on `list_items` and
-    // `file_review_state` are still what the app shows and what it writes. What follows exists so
-    // the new foreign keys are satisfiable. Room turns foreign keys on, so a `list_items` row
-    // whose Task was never minted is not a row that reads oddly — it is a row that cannot be
-    // written at all.
+    // `task_state` is where a decision lives, and `tasks` / `assets` are how one is found: through
+    // the membership row when a List is asking, and through the file's path when a folder is.
+    // `file_review_state` still carries a file's registration, its path under the root and its
+    // presence flag, and is the row a folder review resolves — but no decision is read from it or
+    // written to it any more, and neither is one read from or written to a `list_items` column.
+    // Those columns are still there, still holding whatever they held, and nothing consults them;
+    // they go in a later release once no reader is provable, which is what the tests here are for.
+    //
+    // Room turns foreign keys on, so a `list_items` row whose Task was never minted is not a row
+    // that reads oddly — it is a row that cannot be written at all. The same holds for a decision,
+    // which has nowhere to go until its Task exists. That is why the minting lives beside the
+    // writes rather than in the migration alone.
 
     @Insert
     protected abstract suspend fun insertTask(task: TaskEntity)
@@ -893,6 +912,69 @@ abstract class ListsDao {
 
     @Query("SELECT taskId FROM assets WHERE rootUri = :rootUri AND relativePath = :relativePath")
     protected abstract suspend fun taskIdForFile(rootUri: String, relativePath: String): String?
+
+    @Query("SELECT * FROM task_state WHERE taskId = :taskId")
+    protected abstract suspend fun getTaskState(taskId: String): TaskStateEntity?
+
+    @Query(
+        """
+        UPDATE task_state
+        SET isCompleted = :isCompleted,
+            isFavorite = :isFavorite,
+            customActions = :customActions,
+            updatedAt = :updatedAt
+        WHERE taskId = :taskId
+        """
+    )
+    protected abstract suspend fun updateTaskState(
+        taskId: String,
+        isCompleted: Boolean,
+        isFavorite: Boolean,
+        customActions: String,
+        updatedAt: Long
+    )
+
+    /**
+     * Read-modify-write of one Task's current state, and the only way it is ever changed.
+     *
+     * Every decision in the app funnels through here — a checkbox on a List, a swipe in Quick
+     * Review, a favourite toggled from either — which is what makes "the state of a Task" a single
+     * fact rather than a value that four writes agree to keep in step. The read is inside the
+     * caller's transaction, so two actions toggled at once cannot each write a set that never saw
+     * the other.
+     *
+     * The row is upserted by hand rather than with `@Upsert` for the reason [taskForContent] gives:
+     * the key here is the Task, and a Task's state is created with the Task. An absent row means
+     * this call is the first thing to touch the Task, not that something is wrong.
+     */
+    protected open suspend fun writeTaskState(
+        taskId: String,
+        now: Long,
+        change: (ReviewDecisions) -> ReviewDecisions
+    ) {
+        val existing = getTaskState(taskId)
+        val next = change(existing?.decisions ?: ReviewDecisions())
+        val encoded = encodeActionIds(next.customActions)
+        if (existing == null) {
+            insertTaskState(
+                TaskStateEntity(
+                    taskId = taskId,
+                    isCompleted = next.isCompleted,
+                    isFavorite = next.isFavorite,
+                    customActions = encoded,
+                    updatedAt = now
+                )
+            )
+        } else {
+            updateTaskState(
+                taskId = taskId,
+                isCompleted = next.isCompleted,
+                isFavorite = next.isFavorite,
+                customActions = encoded,
+                updatedAt = now
+            )
+        }
+    }
 
     /**
      * The Task a source-backed piece of content belongs to, minting one if this file has none yet.
@@ -954,17 +1036,9 @@ abstract class ListsDao {
     @Query("DELETE FROM list_items WHERE id = :id")
     protected abstract suspend fun deleteItem(id: Long)
 
-    @Query("UPDATE list_items SET isCompleted = :completed WHERE id = :id")
-    protected abstract suspend fun updateItemCompleted(id: Long, completed: Boolean)
-
-    @Query("UPDATE list_items SET isFavorite = :enabled WHERE id = :id")
-    protected abstract suspend fun setItemFavorite(id: Long, enabled: Boolean)
-
-    @Query("SELECT customActions FROM list_items WHERE id = :id")
-    protected abstract suspend fun getItemCustomActions(id: Long): String?
-
-    @Query("UPDATE list_items SET customActions = :actions WHERE id = :id")
-    protected abstract suspend fun setItemCustomActions(id: Long, actions: String)
+    /** The Task a membership row is of. Null only if the row has already gone. */
+    @Query("SELECT taskId FROM list_items WHERE id = :itemId")
+    protected abstract suspend fun taskIdForItem(itemId: Long): String?
 
     @Query("SELECT COALESCE(MAX(sortOrder), -1) FROM list_items WHERE listId = :listId")
     protected abstract suspend fun maxSortOrder(listId: Long): Int
@@ -975,22 +1049,17 @@ abstract class ListsDao {
     /**
      * How many of a list's items are still unchecked, by the state that actually counts.
      *
-     * This is what decides whether a list is complete, so it has to read the same resolved value
-     * the user sees. Reading the raw column here would leave a list permanently incomplete the
-     * moment its files were checked from a folder's Quick Review instead of from the list.
+     * This is what decides whether a list is complete, so it reads the same value the user sees —
+     * the Task's, which is also what a folder's Quick Review writes. Reading the row's own column
+     * here would leave a list permanently incomplete the moment its files were checked from
+     * somewhere other than the list.
      */
     @Query(
         """
         SELECT COUNT(*)
         FROM list_items i
-        JOIN lists l ON l.id = i.listId
-        LEFT JOIN file_review_state s
-               ON s.rootUri = l.sourceRootUri AND s.relativePath = i.rootRelativePath
-        WHERE i.listId = :listId
-          AND (
-              CASE WHEN i.rootRelativePath IS NULL THEN i.isCompleted
-                   ELSE COALESCE(s.isCompleted, 0) END
-          ) = 0
+        JOIN task_state ts ON ts.taskId = i.taskId
+        WHERE i.listId = :listId AND ts.isCompleted = 0
         """
     )
     protected abstract suspend fun unfinishedItemCount(listId: Long): Int
