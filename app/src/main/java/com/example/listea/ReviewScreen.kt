@@ -362,6 +362,39 @@ fun queuedItems(items: List<ReviewItem>, queuedIds: Array<String>): List<ReviewI
 }
 
 /**
+ * Which way a session can step from [index], and what stepping there would be.
+ *
+ * Pure and separate from the screen, because what these controls may do is a decision about the
+ * review model and not about layout. A step changes which Task is shown and moves the List's
+ * resume cursor; it does not complete anything, submit anything or append anything, and §7 makes
+ * that a property of navigation itself rather than of one control. Holding the boundaries here is
+ * what lets that be asserted without a device.
+ *
+ * The forward end is closed rather than special. Stepping past the last Task would be the only
+ * way to reach the completion screen by navigation, and §7 rules it out: the round ends when the
+ * last Task is *completed*, not when it is arrived at. So the last Task is where the forward
+ * control stops, and completing it is still the thing that finishes the round.
+ *
+ * Each side is the adjacent Task, or null where there is none - which is the same statement as
+ * "that control is disabled", so the boundary is not stored twice and cannot disagree with itself.
+ * An index outside [items] has neither, which is the honest answer for a queue that is empty or
+ * has not resolved yet.
+ */
+internal data class TaskNavigation(val previous: ReviewItem?, val next: ReviewItem?) {
+    val canGoPrevious: Boolean get() = previous != null
+    val canGoNext: Boolean get() = next != null
+}
+
+internal fun taskNavigation(items: List<ReviewItem>, index: Int): TaskNavigation {
+    val canGoPrevious = index in 1..items.lastIndex
+    val canGoNext = index >= 0 && index < items.lastIndex
+    return TaskNavigation(
+        previous = if (canGoPrevious) items[index - 1] else null,
+        next = if (canGoNext) items[index + 1] else null
+    )
+}
+
+/**
  * Wraps leaving a review so the on-exit webhook fires at most once, whichever way the user goes:
  * the top bar arrow, the system back gesture, or Exit on the completion screen.
  *
@@ -480,11 +513,12 @@ fun ReviewSession(
 
     // Landing on a Task is what moves the List's cursor; [id] rather than [taskId] because the
     // cursor names an entry, and §6 leaves it that way on purpose.
-    fun goTo(newIndex: Int) {
-        val target = items[newIndex]
+    fun goTo(target: ReviewItem) {
         currentTaskId = target.taskId
         onPositionChanged(target.id)
     }
+
+    val navigation = taskNavigation(items, index)
 
     TaskNavigator(
         modifier = modifier,
@@ -493,7 +527,14 @@ fun ReviewSession(
         // owning list's total. Completion progress is a list's business and lives on its page.
         position = "${index + 1} / ${items.size}",
         onBack = onBack,
-        chromeVisible = chromeVisible
+        chromeVisible = chromeVisible,
+        // Stepping here is navigation and nothing else, which is what §7 asks of these controls
+        // and what the swipe deliberately is not. Neither of them submits, completes or records:
+        // a null on a side is that arrow drawn disabled, because there is nowhere to go.
+        navigation = MediaNavigation(
+            onPrevious = navigation.previous?.let { target -> { goTo(target) } },
+            onNext = navigation.next?.let { target -> { goTo(target) } }
+        )
     ) {
         TaskReviewSurface(
             item = item,
@@ -513,12 +554,12 @@ fun ReviewSession(
                     // the item that was just swiped as checked.
                     onQueueFinished?.invoke(items)
                 } else {
-                    goTo(index + 1)
+                    goTo(items[index + 1])
                 }
             },
             // Backwards is never a judgment: it steps the queue and changes nothing about the
             // Task that was left behind.
-            onSwipeBack = { goTo(index - 1) },
+            onSwipeBack = { navigation.previous?.let { goTo(it) } },
             onTap = { chromeVisible = !chromeVisible },
             onToggleCompleted = { completed ->
                 if (completed) {
@@ -558,8 +599,11 @@ fun ReviewSession(
  * because it is the thing that knows how much room the bars take and what the media is therefore
  * left with; the navigator supplies what goes *in* the bar.
  *
- * Step 7 gives this explicit previous/next controls. The swipe is the whole of navigation today,
- * as it has been, and the bar says where you are either way.
+ * [navigation] is what makes this a navigator rather than a viewer: the bar gains explicit
+ * previous/next controls beside the counter. Navigation's entry point is always an explicit
+ * control and never a gesture, per §7 - the swipe bindings belong to the Task Review template and
+ * mean what that template says they mean, which for the built-in one is a judgment rather than a
+ * step. The two agree only about where the ends of the queue are.
  */
 @Composable
 fun TaskNavigator(
@@ -568,6 +612,7 @@ fun TaskNavigator(
     position: String,
     onBack: () -> Unit,
     chromeVisible: Boolean,
+    navigation: MediaNavigation? = null,
     media: @Composable () -> Unit
 ) {
     MediaShell(
@@ -576,6 +621,7 @@ fun TaskNavigator(
         position = position,
         onBack = onBack,
         chromeVisible = chromeVisible,
+        navigation = navigation,
         media = media
     )
 }

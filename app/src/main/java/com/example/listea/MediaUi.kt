@@ -32,6 +32,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.SaveAlt
@@ -62,6 +64,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -121,6 +124,23 @@ data class MediaChromeInsets(
 val LocalMediaChrome = compositionLocalOf { MediaChromeInsets() }
 
 /**
+ * The explicit step controls for a screen that walks a queue.
+ *
+ * A null callback is a disabled control, not an absent one, so an end of the queue is expressed by
+ * having nowhere to go rather than by a second flag saying so - there is one answer to "can I step
+ * this way", and it is whether there is a step to take.
+ *
+ * The caller passes this only when its screen really is a navigator. [MediaShell] draws no step
+ * controls without it, so a viewer that is not walking anything is never handed arrows it would
+ * have to disable.
+ */
+@Immutable
+data class MediaNavigation(
+    val onPrevious: (() -> Unit)?,
+    val onNext: (() -> Unit)?
+)
+
+/**
  * The frame every media screen shares: media underneath, chrome on top of it.
  *
  * The media slot is given the whole box in both orientations, always, and is composed exactly
@@ -146,6 +166,7 @@ fun MediaShell(
     modifier: Modifier = Modifier,
     position: String? = null,
     chromeVisible: Boolean = true,
+    navigation: MediaNavigation? = null,
     controls: @Composable (() -> Unit)? = null,
     media: @Composable () -> Unit
 ) {
@@ -181,7 +202,12 @@ fun MediaShell(
                     .only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
                 onHeightChange = { topBarHeight = it }
             ) {
-                MediaTopBar(title = title, position = position, onBack = onBack)
+                MediaTopBar(
+                    title = title,
+                    position = position,
+                    onBack = onBack,
+                    navigation = navigation
+                )
             }
         }
 
@@ -295,15 +321,31 @@ internal tailrec fun Context.findActivity(): Activity? = when (this) {
 }
 
 /**
- * Back, what you are looking at, and where you are in the queue. Nothing else.
+ * Back, what you are looking at, where you are in the queue, and how to step.
  *
- * The title carries the weight, so a long filename ellipsizes into the space left over instead of
- * pushing the position off the right edge, and the bar is one line tall whatever it is given.
+ * The title carries the weight, so a long name ellipsizes into the space left over instead of
+ * pushing the rest off the right edge, and the bar is one line tall whatever it is given.
  * The back affordance is the icon alone: where it goes is obvious from how you got here, and
  * "Back to List" cost a third of the bar to say so.
+ *
+ * The step controls bracket the counter - "‹ 3 / 12 ›" - rather than sitting apart from it,
+ * because that is what they move: they are the position's own control, and reading them as a
+ * group is what stops them being mistaken for anything that acts on the item. Grouped, they also
+ * take width from the title in one place instead of two, and the title is the part that can
+ * afford to lose it.
+ *
+ * A control at an end is shown disabled rather than removed. Removing it would re-measure the
+ * bar as the user reaches the end of a queue, sliding the counter and the remaining arrow
+ * sideways under a finger that is still on the screen; and an arrow that is present and greyed
+ * says "this is the end", which an absent one does not.
  */
 @Composable
-private fun MediaTopBar(title: String, position: String?, onBack: () -> Unit) {
+private fun MediaTopBar(
+    title: String,
+    position: String?,
+    onBack: () -> Unit,
+    navigation: MediaNavigation?
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -322,13 +364,41 @@ private fun MediaTopBar(title: String, position: String?, onBack: () -> Unit) {
         )
         position?.let {
             Spacer(Modifier.width(ListeaDimens.RowGap))
+            navigation?.let { nav ->
+                MediaStepButton(
+                    icon = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                    label = "Previous",
+                    onClick = nav.onPrevious
+                )
+            }
             Text(
                 it,
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1
             )
+            navigation?.let { nav ->
+                MediaStepButton(
+                    icon = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    label = "Next",
+                    onClick = nav.onNext
+                )
+            }
         }
+    }
+}
+
+/**
+ * One step control, drawn whether or not there is anywhere to step to.
+ *
+ * A disabled [IconButton] never invokes its callback, so standing one in for the missing one is
+ * how a null step becomes a greyed arrow rather than no arrow - see [MediaTopBar] for why the
+ * control stays on screen at the ends of a queue.
+ */
+@Composable
+private fun MediaStepButton(icon: ImageVector, label: String, onClick: (() -> Unit)?) {
+    IconButton(onClick = onClick ?: { }, enabled = onClick != null) {
+        Icon(icon, contentDescription = label)
     }
 }
 
