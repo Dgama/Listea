@@ -1,0 +1,363 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 12,
+    "identityHash": "bcec33665b49c243a35b1688e40514f6",
+    "entities": [
+      {
+        "tableName": "lists",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `title` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `completedAt` INTEGER, `webhookEnabled` INTEGER NOT NULL, `webhookUrl` TEXT NOT NULL, `lastDeliveryAt` INTEGER, `lastDeliveryStatus` TEXT, `lastDeliveryCode` INTEGER, `lastDeliveryError` TEXT, `sourceRootUri` TEXT, `sourceRelativePath` TEXT, `reviewCurrentItemId` INTEGER)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "completedAt",
+            "columnName": "completedAt",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "webhookEnabled",
+            "columnName": "webhookEnabled",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "webhookUrl",
+            "columnName": "webhookUrl",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastDeliveryAt",
+            "columnName": "lastDeliveryAt",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastDeliveryStatus",
+            "columnName": "lastDeliveryStatus",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "lastDeliveryCode",
+            "columnName": "lastDeliveryCode",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastDeliveryError",
+            "columnName": "lastDeliveryError",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sourceRootUri",
+            "columnName": "sourceRootUri",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sourceRelativePath",
+            "columnName": "sourceRelativePath",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "reviewCurrentItemId",
+            "columnName": "reviewCurrentItemId",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "list_items",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `publicId` TEXT NOT NULL, `listId` INTEGER NOT NULL, `title` TEXT NOT NULL, `isCompleted` INTEGER NOT NULL, `sortOrder` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, `sourceUri` TEXT, `sourceRelativePath` TEXT, `rootRelativePath` TEXT, `sourceMissing` INTEGER NOT NULL, `sourceSizeBytes` INTEGER, `sourceModifiedAt` INTEGER, `isFavorite` INTEGER NOT NULL, `customActions` TEXT NOT NULL, FOREIGN KEY(`listId`) REFERENCES `lists`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "publicId",
+            "columnName": "publicId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "listId",
+            "columnName": "listId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isCompleted",
+            "columnName": "isCompleted",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sortOrder",
+            "columnName": "sortOrder",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceUri",
+            "columnName": "sourceUri",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sourceRelativePath",
+            "columnName": "sourceRelativePath",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "rootRelativePath",
+            "columnName": "rootRelativePath",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sourceMissing",
+            "columnName": "sourceMissing",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceSizeBytes",
+            "columnName": "sourceSizeBytes",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "sourceModifiedAt",
+            "columnName": "sourceModifiedAt",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "isFavorite",
+            "columnName": "isFavorite",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "customActions",
+            "columnName": "customActions",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_list_items_listId",
+            "unique": false,
+            "columnNames": [
+              "listId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_list_items_listId` ON `${TABLE_NAME}` (`listId`)"
+          },
+          {
+            "name": "index_list_items_rootRelativePath",
+            "unique": false,
+            "columnNames": [
+              "rootRelativePath"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_list_items_rootRelativePath` ON `${TABLE_NAME}` (`rootRelativePath`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "lists",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "listId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "webhook_history",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `event` TEXT NOT NULL, `listTitle` TEXT NOT NULL, `itemCount` INTEGER NOT NULL, `payload` TEXT NOT NULL, `at` INTEGER NOT NULL, `outcome` TEXT NOT NULL, `detail` TEXT NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "event",
+            "columnName": "event",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "listTitle",
+            "columnName": "listTitle",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "itemCount",
+            "columnName": "itemCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "payload",
+            "columnName": "payload",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "at",
+            "columnName": "at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "outcome",
+            "columnName": "outcome",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "detail",
+            "columnName": "detail",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "file_review_state",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `publicId` TEXT NOT NULL, `rootUri` TEXT NOT NULL, `relativePath` TEXT NOT NULL, `isCompleted` INTEGER NOT NULL, `isFavorite` INTEGER NOT NULL, `customActions` TEXT NOT NULL, `sourceMissing` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "publicId",
+            "columnName": "publicId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rootUri",
+            "columnName": "rootUri",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "relativePath",
+            "columnName": "relativePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isCompleted",
+            "columnName": "isCompleted",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isFavorite",
+            "columnName": "isFavorite",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "customActions",
+            "columnName": "customActions",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceMissing",
+            "columnName": "sourceMissing",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_file_review_state_rootUri_relativePath",
+            "unique": true,
+            "columnNames": [
+              "rootUri",
+              "relativePath"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_file_review_state_rootUri_relativePath` ON `${TABLE_NAME}` (`rootUri`, `relativePath`)"
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'bcec33665b49c243a35b1688e40514f6')"
+    ]
+  }
+}

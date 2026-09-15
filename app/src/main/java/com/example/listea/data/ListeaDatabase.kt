@@ -17,7 +17,7 @@ import androidx.sqlite.execSQL
         FileReviewStateEntity::class
     ],
     version = 12,
-    exportSchema = false
+    exportSchema = true
 )
 abstract class ListeaDatabase : RoomDatabase() {
 
@@ -25,7 +25,7 @@ abstract class ListeaDatabase : RoomDatabase() {
 
     companion object {
         /** V3 added the optional webhook action and its last-delivery record to each list. */
-        private val MIGRATION_1_2 = object : Migration(1, 2) {
+        internal val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(connection: SQLiteConnection) {
                 connection.execSQL(
                     "ALTER TABLE lists ADD COLUMN webhookEnabled INTEGER NOT NULL DEFAULT 0"
@@ -41,7 +41,7 @@ abstract class ListeaDatabase : RoomDatabase() {
         }
 
         /** V3.1 linked lists to a folder subtree and items to their source file. */
-        private val MIGRATION_2_3 = object : Migration(2, 3) {
+        internal val MIGRATION_2_3 = object : Migration(2, 3) {
             override fun migrate(connection: SQLiteConnection) {
                 connection.execSQL("ALTER TABLE lists ADD COLUMN sourceRootUri TEXT")
                 connection.execSQL("ALTER TABLE lists ADD COLUMN sourceRelativePath TEXT")
@@ -51,7 +51,7 @@ abstract class ListeaDatabase : RoomDatabase() {
         }
 
         /** V3.3 lets a re-sync flag an item whose source file has vanished, without deleting it. */
-        private val MIGRATION_3_4 = object : Migration(3, 4) {
+        internal val MIGRATION_3_4 = object : Migration(3, 4) {
             override fun migrate(connection: SQLiteConnection) {
                 connection.execSQL(
                     "ALTER TABLE list_items ADD COLUMN sourceMissing INTEGER NOT NULL DEFAULT 0"
@@ -60,7 +60,7 @@ abstract class ListeaDatabase : RoomDatabase() {
         }
 
         /** V3.4 remembers where swipe Review left off, by item id. */
-        private val MIGRATION_4_5 = object : Migration(4, 5) {
+        internal val MIGRATION_4_5 = object : Migration(4, 5) {
             override fun migrate(connection: SQLiteConnection) {
                 connection.execSQL("ALTER TABLE lists ADD COLUMN reviewCurrentItemId INTEGER")
             }
@@ -70,7 +70,7 @@ abstract class ListeaDatabase : RoomDatabase() {
          * V3.5 adds the per-item review actions. Purely additive with a false default, so every
          * existing item survives unchanged and simply carries no actions.
          */
-        private val MIGRATION_5_6 = object : Migration(5, 6) {
+        internal val MIGRATION_5_6 = object : Migration(5, 6) {
             override fun migrate(connection: SQLiteConnection) {
                 connection.execSQL(
                     "ALTER TABLE list_items ADD COLUMN isFavorite INTEGER NOT NULL DEFAULT 0"
@@ -89,7 +89,7 @@ abstract class ListeaDatabase : RoomDatabase() {
          * costs a resend rather than a round of review. A new table only: nothing existing is
          * touched, and a database that has never failed a delivery simply has none of these.
          */
-        private val MIGRATION_6_7 = object : Migration(6, 7) {
+        internal val MIGRATION_6_7 = object : Migration(6, 7) {
             override fun migrate(connection: SQLiteConnection) {
                 connection.execSQL(
                     "CREATE TABLE IF NOT EXISTS unsent_webhooks (" +
@@ -122,7 +122,7 @@ abstract class ListeaDatabase : RoomDatabase() {
          * did hold a duplicate, taking "reviewed" over "not reviewed" loses nothing, whereas
          * failing the migration would lose the whole database.
          */
-        private val MIGRATION_7_8 = object : Migration(7, 8) {
+        internal val MIGRATION_7_8 = object : Migration(7, 8) {
             override fun migrate(connection: SQLiteConnection) {
                 connection.execSQL("ALTER TABLE list_items ADD COLUMN rootRelativePath TEXT")
                 connection.execSQL(
@@ -183,7 +183,7 @@ abstract class ListeaDatabase : RoomDatabase() {
          * linked folder fills in. Nothing is backfilled here: this migration has no folder to
          * read, and inventing a zero would be worse than admitting an absence.
          */
-        private val MIGRATION_8_9 = object : Migration(8, 9) {
+        internal val MIGRATION_8_9 = object : Migration(8, 9) {
             override fun migrate(connection: SQLiteConnection) {
                 connection.execSQL("ALTER TABLE list_items ADD COLUMN sourceSizeBytes INTEGER")
                 connection.execSQL("ALTER TABLE list_items ADD COLUMN sourceModifiedAt INTEGER")
@@ -211,7 +211,7 @@ abstract class ListeaDatabase : RoomDatabase() {
          * in, which is honest in its own way: that is when the row first became something the
          * outside world could name.
          */
-        private val MIGRATION_9_10 = object : Migration(9, 10) {
+        internal val MIGRATION_9_10 = object : Migration(9, 10) {
             override fun migrate(connection: SQLiteConnection) {
                 val now = System.currentTimeMillis()
 
@@ -297,7 +297,7 @@ abstract class ListeaDatabase : RoomDatabase() {
          * and the switched-off case has always said so in the same fixed phrase — so the outcome
          * is recoverable exactly, without guessing.
          */
-        private val MIGRATION_10_11 = object : Migration(10, 11) {
+        internal val MIGRATION_10_11 = object : Migration(10, 11) {
             override fun migrate(connection: SQLiteConnection) {
                 connection.execSQL(
                     "CREATE TABLE IF NOT EXISTS webhook_history (" +
@@ -342,7 +342,7 @@ abstract class ListeaDatabase : RoomDatabase() {
          * Favourite is untouched. It is the one action Listea knows the meaning of, so it keeps
          * a column of its own.
          */
-        private val MIGRATION_11_12 = object : Migration(11, 12) {
+        internal val MIGRATION_11_12 = object : Migration(11, 12) {
             override fun migrate(connection: SQLiteConnection) {
                 rebuildWithActionIds(
                     connection = connection,
