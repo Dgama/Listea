@@ -8,15 +8,22 @@ import androidx.room.migration.Migration
 import androidx.sqlite.SQLiteConnection
 import androidx.sqlite.SQLiteStatement
 import androidx.sqlite.execSQL
+import java.util.UUID
 
 @Database(
     entities = [
         ListEntity::class,
         ListItemEntity::class,
         WebhookRecordEntity::class,
-        FileReviewStateEntity::class
+        FileReviewStateEntity::class,
+        TaskEntity::class,
+        AssetEntity::class,
+        TaskStateEntity::class,
+        ReviewEventEntity::class,
+        LegacyItemIdEntity::class,
+        LegacyManualTaskEntity::class
     ],
-    version = 12,
+    version = 13,
     exportSchema = true
 )
 abstract class ListeaDatabase : RoomDatabase() {
@@ -399,6 +406,378 @@ abstract class ListeaDatabase : RoomDatabase() {
         }
 
         /**
+         * V13 splits what a List *contains* from what it is *about*.
+         *
+         * Until now one row was both: `list_items` was a file's membership in a List and the place
+         * its decision lived, which is why a file reachable from two Lists needed the whole
+         * `file_review_state` detour to keep the copies from disagreeing. A Task is the thing
+         * judged, an Asset is content presented for it, and a membership is a membership — so a
+         * file reached from two Lists is one Task with two memberships, in the schema rather than
+         * only in the queries.
+         *
+         * Four things happen, in this order, and the order is load-bearing:
+         *
+         * 1. The new tables and the two `lists` template columns.
+         * 2. Every file that already has a decision becomes a Task with one Asset, its state
+         *    copied across, and the `publicId` it already had kept in `legacy_item_ids` so a
+         *    receiver keyed on that name keeps seeing it.
+         * 3. Every membership resolves the Task of the file it names — looking up what step 2 made,
+         *    and inventing an all-false one where there is none, which is exactly what today's
+         *    `COALESCE(..., 0)` projects. Manually typed items get a Task of their own and a name
+         *    in `legacy_manual_tasks`.
+         * 4. `list_items` is rebuilt with `taskId TEXT NOT NULL`.
+         *
+         * **No ReviewEvents are written.** A review that nobody performed must not appear in a
+         * record of reviews, and a migration marker that could be counted as a submission would be
+         * worse than no history at all. A List's existing progress therefore survives as TaskState
+         * and reads as it always did; what it does not become is a claim about who judged what.
+         *
+         * The decision columns on `list_items` are carried across with their values intact rather
+         * than cleared, as `MIGRATION_7_8` cleared its equivalents. They stop being read the moment
+         * the read paths move, but until then they are the only remaining copy of what a manual
+         * item's state was, and a migration later found wrong is easier to reason about with the
+         * original still on disk. They are dropped in a later release, once no reader is provable.
+         *
+         * UUIDs are generated here rather than in SQL, which is why the two loops are Kotlin. Room
+         * runs the whole thing in one transaction, so a failure part-way leaves nothing behind.
+         */
+        internal val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(connection: SQLiteConnection) {
+                val now = System.currentTimeMillis()
+
+                createTaskTables(connection)
+                connection.execSQL(
+                    "ALTER TABLE lists ADD COLUMN taskReviewTemplateId TEXT NOT NULL " +
+                        "DEFAULT 'builtin.media.rapid-review'"
+                )
+                connection.execSQL(
+                    "ALTER TABLE lists ADD COLUMN taskReviewTemplateVersion INTEGER NOT NULL DEFAULT 1"
+                )
+
+                // Every file something is already known about becomes a Task with one Asset.
+                val taskByFile = mutableMapOf<Pair<String, String>, String>()
+                connection.prepare(
+                    "SELECT publicId, rootUri, relativePath, isCompleted, isFavorite, " +
+                        "customActions, sourceMissing, updatedAt FROM file_review_state"
+                ).use { row ->
+                    while (row.step()) {
+                        val rootUri = row.getText(1)
+                        val relativePath = row.getText(2)
+                        // A row the V8 migration created had no time of its own and stored 0.
+                        // The migration's clock stands in, which is honest: that is when this
+                        // file first became something with state attached.
+                        val updatedAt = row.getLong(7).takeIf { it > 0 } ?: now
+
+                        val taskId = UUID.randomUUID().toString()
+                        val assetId = UUID.randomUUID().toString()
+
+                        insertTask(connection, taskId, updatedAt)
+                        insertAsset(
+                            connection = connection,
+                            id = assetId,
+                            taskId = taskId,
+                            rootUri = rootUri,
+                            relativePath = relativePath,
+                            sourceMissing = row.getInt(6) != 0
+                        )
+                        insertTaskState(
+                            connection = connection,
+                            taskId = taskId,
+                            isCompleted = row.getInt(3) != 0,
+                            isFavorite = row.getInt(4) != 0,
+                            customActions = row.getText(5),
+                            updatedAt = updatedAt
+                        )
+                        insertLegacyItemId(connection, assetId, row.getText(0))
+
+                        taskByFile[rootUri to relativePath] = taskId
+                    }
+                }
+
+                // Every membership is given the Task of the file it names.
+                val rootByList = mutableMapOf<Long, String>()
+                connection.prepare(
+                    "SELECT id, sourceRootUri FROM lists WHERE sourceRootUri IS NOT NULL"
+                ).use { row ->
+                    while (row.step()) rootByList[row.getLong(0)] = row.getText(1)
+                }
+
+                // The resolved ids land in a scratch table so the rebuild below can stay one
+                // INSERT ... SELECT instead of a sixteen-argument bind per row.
+                connection.execSQL(
+                    "CREATE TABLE list_items_v13_tasks (" +
+                        "itemId INTEGER PRIMARY KEY, taskId TEXT NOT NULL)"
+                )
+                connection.prepare(
+                    "INSERT INTO list_items_v13_tasks (itemId, taskId) VALUES (?, ?)"
+                ).use { insert ->
+                    connection.prepare(
+                        "SELECT id, listId, rootRelativePath, isCompleted, isFavorite, " +
+                            "customActions, createdAt, sourceMissing FROM list_items"
+                    ).use { row ->
+                        while (row.step()) {
+                            val rootUri = rootByList[row.getLong(1)]
+                            val rootRelativePath = if (row.isNull(2)) null else row.getText(2)
+
+                            val taskId = if (rootRelativePath != null && rootUri != null) {
+                                taskByFile.getOrPut(rootUri to rootRelativePath) {
+                                    // A file the app has never recorded a decision about. Its
+                                    // Task starts with everything false, which is what the read
+                                    // paths already project for exactly this case.
+                                    val fresh = UUID.randomUUID().toString()
+                                    insertTask(connection, fresh, now)
+                                    insertAsset(
+                                        connection = connection,
+                                        id = UUID.randomUUID().toString(),
+                                        taskId = fresh,
+                                        rootUri = rootUri,
+                                        relativePath = rootRelativePath,
+                                        // Carried, not assumed. A file that went missing before
+                                        // this migration was still missing after it, and an
+                                        // Asset claiming otherwise would offer up a file that is
+                                        // not there as one that could be deleted.
+                                        sourceMissing = row.getInt(7) != 0
+                                    )
+                                    insertTaskState(
+                                        connection = connection,
+                                        taskId = fresh,
+                                        isCompleted = false,
+                                        isFavorite = false,
+                                        customActions = "",
+                                        updatedAt = now
+                                    )
+                                    fresh
+                                }
+                            } else {
+                                // A manually typed item — or the one shape treated as one: a row
+                                // carrying a root-relative path whose List is not linked to a
+                                // root. Treated as manual rather than dropped, because a row
+                                // nobody can resolve is still somebody's item.
+                                //
+                                // One Task per row, so two entries with the same title stay two
+                                // things; no Asset, because there is no file; and a name in
+                                // `legacy_manual_tasks`, which is what lets the cleanup path
+                                // delete it later instead of guessing from an empty Asset count.
+                                val fresh = UUID.randomUUID().toString()
+                                insertTask(connection, fresh, now)
+                                insertTaskState(
+                                    connection = connection,
+                                    taskId = fresh,
+                                    isCompleted = row.getInt(3) != 0,
+                                    isFavorite = row.getInt(4) != 0,
+                                    customActions = row.getText(5),
+                                    updatedAt = row.getLong(6).takeIf { it > 0 } ?: now
+                                )
+                                insertLegacyManualTask(connection, fresh)
+                                fresh
+                            }
+
+                            insert.bindLong(1, row.getLong(0))
+                            insert.bindText(2, taskId)
+                            insert.step()
+                            insert.reset()
+                        }
+                    }
+                }
+
+                rebuildListItemsWithTaskId(connection)
+            }
+        }
+
+        /**
+         * The six tables V13 introduces, in the shape the entities declare and `13.json` records.
+         *
+         * Written out one statement at a time rather than driven from a list, so a column that
+         * changes in an entity is a line that has to change here — and so this can be diffed
+         * against the exported schema by eye rather than by decoding a loop.
+         */
+        private fun createTaskTables(connection: SQLiteConnection) {
+            connection.execSQL(
+                "CREATE TABLE IF NOT EXISTS tasks (" +
+                    "id TEXT NOT NULL, createdAt INTEGER NOT NULL, PRIMARY KEY(id))"
+            )
+            connection.execSQL(
+                "CREATE TABLE IF NOT EXISTS assets (" +
+                    "id TEXT NOT NULL, taskId TEXT NOT NULL, sortOrder INTEGER NOT NULL, " +
+                    "rootUri TEXT, relativePath TEXT, sourceMissing INTEGER NOT NULL, " +
+                    "PRIMARY KEY(id), FOREIGN KEY(taskId) REFERENCES tasks(id) " +
+                    "ON UPDATE NO ACTION ON DELETE CASCADE)"
+            )
+            connection.execSQL(
+                "CREATE INDEX IF NOT EXISTS index_assets_taskId ON assets (taskId)"
+            )
+            // One file has one Asset, which is what keeps two Lists over the same folder
+            // resolving to the same Task rather than minting a rival one.
+            connection.execSQL(
+                "CREATE UNIQUE INDEX IF NOT EXISTS index_assets_rootUri_relativePath " +
+                    "ON assets (rootUri, relativePath)"
+            )
+            connection.execSQL(
+                "CREATE TABLE IF NOT EXISTS task_state (" +
+                    "taskId TEXT NOT NULL, isCompleted INTEGER NOT NULL, " +
+                    "isFavorite INTEGER NOT NULL, customActions TEXT NOT NULL, " +
+                    "updatedAt INTEGER NOT NULL, PRIMARY KEY(taskId), " +
+                    "FOREIGN KEY(taskId) REFERENCES tasks(id) " +
+                    "ON UPDATE NO ACTION ON DELETE CASCADE)"
+            )
+            // No foreign key to `tasks`, on purpose: history is not owned by the thing it is
+            // about. See [ReviewEventEntity].
+            connection.execSQL(
+                "CREATE TABLE IF NOT EXISTS review_events (" +
+                    "id TEXT NOT NULL, taskId TEXT NOT NULL, at INTEGER NOT NULL, " +
+                    "kind TEXT NOT NULL, templateId TEXT NOT NULL, " +
+                    "templateVersion INTEGER NOT NULL, response TEXT NOT NULL, " +
+                    "contextKind TEXT, contextRef TEXT, PRIMARY KEY(id))"
+            )
+            connection.execSQL(
+                "CREATE INDEX IF NOT EXISTS index_review_events_taskId_at " +
+                    "ON review_events (taskId, at)"
+            )
+            connection.execSQL(
+                "CREATE TABLE IF NOT EXISTS legacy_item_ids (" +
+                    "assetId TEXT NOT NULL, publicId TEXT NOT NULL, PRIMARY KEY(assetId))"
+            )
+            connection.execSQL(
+                "CREATE TABLE IF NOT EXISTS legacy_manual_tasks (" +
+                    "taskId TEXT NOT NULL, PRIMARY KEY(taskId))"
+            )
+        }
+
+        /**
+         * Copies `list_items` into the same shape with a `taskId` that has to be there.
+         *
+         * SQLite cannot add a `NOT NULL` column to an existing table without giving it a default,
+         * and has never been able to tighten a nullable one afterwards — and `minSdk` is 24, so
+         * nothing newer can be assumed. `NOT NULL DEFAULT ''` would make the empty string a
+         * sentinel meaning "broken row", which is worse than the copy. So the column arrives the
+         * way V11 and V12 already brought theirs here: by rebuilding the table.
+         *
+         * `id` is carried explicitly rather than re-assigned, so autoincrement row ids survive —
+         * and with them resume positions, round snapshots and webhook queue scoping, all of which
+         * speak in membership ids and none of which are Task identity.
+         */
+        private fun rebuildListItemsWithTaskId(connection: SQLiteConnection) {
+            val carried = listOf(
+                "id", "publicId", "listId", "title", "isCompleted", "sortOrder", "createdAt",
+                "sourceUri", "sourceRelativePath", "rootRelativePath", "sourceMissing",
+                "sourceSizeBytes", "sourceModifiedAt", "isFavorite", "customActions"
+            )
+            val names = carried.joinToString(", ")
+            val fromOldTable = carried.joinToString(", ") { "i.$it" }
+
+            connection.execSQL(
+                "CREATE TABLE list_items_v13 (" +
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                    "publicId TEXT NOT NULL, listId INTEGER NOT NULL, taskId TEXT NOT NULL, " +
+                    "title TEXT NOT NULL, isCompleted INTEGER NOT NULL, " +
+                    "sortOrder INTEGER NOT NULL, createdAt INTEGER NOT NULL, " +
+                    "sourceUri TEXT, sourceRelativePath TEXT, rootRelativePath TEXT, " +
+                    "sourceMissing INTEGER NOT NULL, sourceSizeBytes INTEGER, " +
+                    "sourceModifiedAt INTEGER, isFavorite INTEGER NOT NULL, " +
+                    "customActions TEXT NOT NULL, " +
+                    "FOREIGN KEY(listId) REFERENCES lists(id) " +
+                    "ON UPDATE NO ACTION ON DELETE CASCADE, " +
+                    "FOREIGN KEY(taskId) REFERENCES tasks(id) " +
+                    "ON UPDATE NO ACTION ON DELETE NO ACTION)"
+            )
+            connection.execSQL(
+                "INSERT INTO list_items_v13 ($names, taskId) " +
+                    "SELECT $fromOldTable, m.taskId FROM list_items i " +
+                    "JOIN list_items_v13_tasks m ON m.itemId = i.id"
+            )
+            connection.execSQL("DROP TABLE list_items")
+            connection.execSQL("ALTER TABLE list_items_v13 RENAME TO list_items")
+            connection.execSQL(
+                "CREATE INDEX IF NOT EXISTS index_list_items_listId ON list_items (listId)"
+            )
+            connection.execSQL(
+                "CREATE INDEX IF NOT EXISTS index_list_items_rootRelativePath " +
+                    "ON list_items (rootRelativePath)"
+            )
+            connection.execSQL(
+                "CREATE INDEX IF NOT EXISTS index_list_items_taskId ON list_items (taskId)"
+            )
+            // The scratch mapping has done its job; nothing outside this migration names it. It is
+            // dropped last so a failure anywhere above leaves the transaction with something to
+            // roll back to rather than a half-resolved table.
+            connection.execSQL("DROP TABLE list_items_v13_tasks")
+        }
+
+        private fun insertTask(connection: SQLiteConnection, id: String, createdAt: Long) {
+            connection.prepare("INSERT INTO tasks (id, createdAt) VALUES (?, ?)").use { row ->
+                row.bindText(1, id)
+                row.bindLong(2, createdAt)
+                row.step()
+            }
+        }
+
+        private fun insertAsset(
+            connection: SQLiteConnection,
+            id: String,
+            taskId: String,
+            rootUri: String,
+            relativePath: String,
+            sourceMissing: Boolean
+        ) {
+            connection.prepare(
+                "INSERT INTO assets (id, taskId, sortOrder, rootUri, relativePath, sourceMissing) " +
+                    "VALUES (?, ?, 0, ?, ?, ?)"
+            ).use { row ->
+                row.bindText(1, id)
+                row.bindText(2, taskId)
+                row.bindText(3, rootUri)
+                row.bindText(4, relativePath)
+                row.bindLong(5, if (sourceMissing) 1 else 0)
+                row.step()
+            }
+        }
+
+        private fun insertTaskState(
+            connection: SQLiteConnection,
+            taskId: String,
+            isCompleted: Boolean,
+            isFavorite: Boolean,
+            customActions: String,
+            updatedAt: Long
+        ) {
+            connection.prepare(
+                "INSERT INTO task_state " +
+                    "(taskId, isCompleted, isFavorite, customActions, updatedAt) " +
+                    "VALUES (?, ?, ?, ?, ?)"
+            ).use { row ->
+                row.bindText(1, taskId)
+                row.bindLong(2, if (isCompleted) 1 else 0)
+                row.bindLong(3, if (isFavorite) 1 else 0)
+                row.bindText(4, customActions)
+                row.bindLong(5, updatedAt)
+                row.step()
+            }
+        }
+
+        private fun insertLegacyItemId(
+            connection: SQLiteConnection,
+            assetId: String,
+            publicId: String
+        ) {
+            connection.prepare(
+                "INSERT INTO legacy_item_ids (assetId, publicId) VALUES (?, ?)"
+            ).use { row ->
+                row.bindText(1, assetId)
+                row.bindText(2, publicId)
+                row.step()
+            }
+        }
+
+        private fun insertLegacyManualTask(connection: SQLiteConnection, taskId: String) {
+            connection.prepare(
+                "INSERT INTO legacy_manual_tasks (taskId) VALUES (?)"
+            ).use { row ->
+                row.bindText(1, taskId)
+                row.step()
+            }
+        }
+
+        /**
          * Copies one decision-carrying table into the same shape with `custom1`/`custom2` folded
          * into a `customActions` id set.
          *
@@ -456,7 +835,8 @@ abstract class ListeaDatabase : RoomDatabase() {
                     MIGRATION_8_9,
                     MIGRATION_9_10,
                     MIGRATION_10_11,
-                    MIGRATION_11_12
+                    MIGRATION_11_12,
+                    MIGRATION_12_13
                 )
                     .build()
                     .also { instance = it }

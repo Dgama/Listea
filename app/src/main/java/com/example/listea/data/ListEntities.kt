@@ -1,9 +1,11 @@
 package com.example.listea.data
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import com.example.listea.domain.Templates
 import java.util.UUID
 
 @Entity(tableName = "lists")
@@ -36,7 +38,24 @@ data class ListEntity(
      * Where swipe Review should resume. A stable item id, never an index: re-sync, missing-item
      * cleanup and manual deletes all shift positions, and a stale id simply falls back.
      */
-    val reviewCurrentItemId: Long? = null
+    val reviewCurrentItemId: Long? = null,
+
+    /**
+     * The Task Review template this List is judged under, as a versioned reference.
+     *
+     * Two columns rather than one `id@version` token so a query can range over versions of one
+     * lineage without parsing text. Stored per List rather than looked up, because a completed
+     * review has to stay interpretable after the template it was made under has moved on.
+     *
+     * The defaults are what makes this invisible on upgrade: a List written before templates
+     * existed resolves to the media workflow it was always going to get. The `@ColumnInfo` values
+     * repeat that as SQL, which is not redundant — SQLite cannot add a `NOT NULL` column without a
+     * default, and Room compares the declared default against the real one at open time.
+     */
+    @ColumnInfo(defaultValue = "'builtin.media.rapid-review'")
+    val taskReviewTemplateId: String = Templates.MediaRapidReview.ref.templateId.value,
+    @ColumnInfo(defaultValue = "1")
+    val taskReviewTemplateVersion: Int = Templates.MediaRapidReview.ref.version
 )
 
 @Entity(
@@ -47,9 +66,14 @@ data class ListEntity(
             parentColumns = ["id"],
             childColumns = ["listId"],
             onDelete = ForeignKey.CASCADE
+        ),
+        ForeignKey(
+            entity = TaskEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["taskId"]
         )
     ],
-    indices = [Index("listId"), Index("rootRelativePath")]
+    indices = [Index("listId"), Index("rootRelativePath"), Index("taskId")]
 )
 data class ListItemEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -64,6 +88,26 @@ data class ListItemEntity(
      */
     val publicId: String,
     val listId: Long,
+
+    /**
+     * The Task this row is a membership of. This row is the *containment*; the Task is the thing.
+     *
+     * A ListEntry says a Task is in a List, at a position, and nothing else — which is what lets a
+     * file reached from two Lists be one Task with two memberships rather than two rival copies of
+     * one decision, all the way down to the schema instead of only in the queries.
+     *
+     * A foreign key with the default `NO ACTION` rather than `CASCADE`, on purpose. Deleting a
+     * List cascades its memberships away, but a Task is not a child of any List and must not
+     * disappear with one: the decision about a file outlives the List that happened to show it,
+     * which is exactly the property `file_review_state` was introduced to get. Ordering is
+     * explicit in the DAO — the membership goes, then whatever may follow it — so getting it
+     * wrong fails loudly instead of silently taking a Task with it.
+     *
+     * There is no Kotlin default. A row whose Task was never minted cannot be stored, because the
+     * constraint above will not accept it, and an empty default would only move that failure from
+     * the compiler to the first insert.
+     */
+    val taskId: String,
     val title: String,
     /**
      * Manual items only. A source-backed item's checked state belongs to the *file*, not to this

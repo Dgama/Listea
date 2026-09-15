@@ -55,6 +55,7 @@ class ReviewRoundTest {
         id = item.id,
         publicId = item.publicId,
         listId = 1,
+        taskId = "task-${item.id}",
         title = item.title,
         isCompleted = item.decisions.isCompleted,
         sortOrder = 0,

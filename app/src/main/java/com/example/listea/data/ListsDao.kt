@@ -5,6 +5,8 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
+import com.example.listea.domain.AssetId
+import com.example.listea.domain.TaskId
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -55,6 +57,7 @@ abstract class ListsDao {
         SELECT i.id AS id,
                i.publicId AS publicId,
                i.listId AS listId,
+               i.taskId AS taskId,
                i.title AS title,
                CASE WHEN i.rootRelativePath IS NULL THEN i.isCompleted ELSE COALESCE(s.isCompleted, 0) END AS isCompleted,
                i.sortOrder AS sortOrder,
@@ -112,6 +115,7 @@ abstract class ListsDao {
             ListItemEntity(
                 publicId = newItemPublicId(manualItemIdentity(listId, title), now),
                 listId = listId,
+                taskId = newManualTask(now),
                 title = title,
                 sortOrder = maxSortOrder(listId) + 1,
                 createdAt = now
@@ -285,6 +289,13 @@ abstract class ListsDao {
                         now
                     ),
                     listId = listId,
+                    // Resolved, not minted: a folder can be covered by more than one List, and
+                    // both must arrive at the same Task for the same file.
+                    taskId = taskForContent(
+                        rootUri,
+                        rootRelativePathOf(relativePath, file.relativePath),
+                        now
+                    ),
                     title = file.name,
                     sortOrder = index,
                     createdAt = now,
@@ -309,6 +320,7 @@ abstract class ListsDao {
         SELECT i.id AS id,
                i.publicId AS publicId,
                i.listId AS listId,
+               i.taskId AS taskId,
                i.title AS title,
                CASE WHEN i.rootRelativePath IS NULL THEN i.isCompleted ELSE COALESCE(s.isCompleted, 0) END AS isCompleted,
                i.sortOrder AS sortOrder,
@@ -474,6 +486,13 @@ abstract class ListsDao {
                         now
                     ),
                     listId = listId,
+                    // The same resolution a fresh list makes, and for the same reason: a file
+                    // appended here may already be under review somewhere else.
+                    taskId = taskForContent(
+                        list?.sourceRootUri,
+                        rootRelativePathOf(listPath, file.relativePath),
+                        now
+                    ),
                     title = file.name,
                     sortOrder = appendFrom + index,
                     createdAt = now,
@@ -850,6 +869,87 @@ abstract class ListsDao {
 
     @Insert
     protected abstract suspend fun insertItems(items: List<ListItemEntity>)
+
+    // --- the v13 tables --------------------------------------------------------------------------
+    //
+    // v0.2 step 3 adds these tables and makes every membership row name a Task, and stops there:
+    // every read is still where it was, and the decision columns on `list_items` and
+    // `file_review_state` are still what the app shows and what it writes. What follows exists so
+    // the new foreign keys are satisfiable. Room turns foreign keys on, so a `list_items` row
+    // whose Task was never minted is not a row that reads oddly — it is a row that cannot be
+    // written at all.
+
+    @Insert
+    protected abstract suspend fun insertTask(task: TaskEntity)
+
+    @Insert
+    protected abstract suspend fun insertAsset(asset: AssetEntity)
+
+    @Insert
+    protected abstract suspend fun insertTaskState(state: TaskStateEntity)
+
+    @Insert
+    protected abstract suspend fun insertLegacyManualTask(task: LegacyManualTaskEntity)
+
+    @Query("SELECT taskId FROM assets WHERE rootUri = :rootUri AND relativePath = :relativePath")
+    protected abstract suspend fun taskIdForFile(rootUri: String, relativePath: String): String?
+
+    /**
+     * The Task a source-backed piece of content belongs to, minting one if this file has none yet.
+     *
+     * Looked up before it is created, because `assets` is unique on `(rootUri, relativePath)` and
+     * that uniqueness is the whole point: a file reached from a second List, or re-appended to one
+     * by a re-sync, is the *same* Task. Minting a rival here would either collide on the index or
+     * — if the index were ever relaxed — quietly split one file's judgment in two.
+     *
+     * [rootUri] is nullable for the one degenerate shape the migration also refuses to guess about:
+     * a row carrying a root-relative path whose List is not linked to a root. Such a row is treated
+     * as manual everywhere else, so its Task simply has pathless content rather than being dropped.
+     *
+     * A minted Task always gets its state row in the same breath. Nothing reads it yet, but "every
+     * Task has exactly one state" is what lets the read paths drop their `COALESCE` later, and
+     * holding that from the start is cheaper than reconciling it afterwards.
+     */
+    private suspend fun taskForContent(rootUri: String?, relativePath: String, now: Long): String {
+        if (rootUri != null) taskIdForFile(rootUri, relativePath)?.let { return it }
+
+        val taskId = TaskId.new().value
+        insertTask(TaskEntity(id = taskId, createdAt = now))
+        insertAsset(
+            AssetEntity(
+                id = AssetId.new().value,
+                taskId = taskId,
+                // v0.2 is one Asset per Task, so nothing has to choose an order yet.
+                sortOrder = 0,
+                rootUri = rootUri,
+                relativePath = relativePath
+            )
+        )
+        insertTaskState(TaskStateEntity(taskId = taskId, updatedAt = now))
+        return taskId
+    }
+
+    /**
+     * A Task for a manually typed item, which has no file and therefore no content row.
+     *
+     * Every manual item gets its own Task even when two share a title, because a manual item is
+     * identified by its row and by nothing else — two "Buy milk" entries are two different things
+     * and must not collapse into one the moment they are given an identity.
+     *
+     * Recorded in [LegacyManualTaskEntity] as it is created, and not only during the migration.
+     * Manual creation is not removed until a later step, so a Task minted today would otherwise be
+     * invisible to the cleanup path that is supposed to know it may be deleted — and the table
+     * would be claiming to name a set it had stopped keeping up to date. It stays what it was
+     * meant to be, the Tasks with no file behind them, and closes for good when the write path
+     * goes.
+     */
+    private suspend fun newManualTask(now: Long): String {
+        val taskId = TaskId.new().value
+        insertTask(TaskEntity(id = taskId, createdAt = now))
+        insertTaskState(TaskStateEntity(taskId = taskId, updatedAt = now))
+        insertLegacyManualTask(LegacyManualTaskEntity(taskId))
+        return taskId
+    }
 
     @Query("DELETE FROM list_items WHERE id = :id")
     protected abstract suspend fun deleteItem(id: Long)

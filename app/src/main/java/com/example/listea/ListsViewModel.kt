@@ -1261,6 +1261,10 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         id = id,
         publicId = publicId,
         listId = 0,
+        // Never inserted. The foreign key that makes a stored membership name a real Task is the
+        // only thing that would care, and it never sees this row — it is built, serialised and
+        // dropped. This is not a sentinel meaning "broken row"; the row does not exist.
+        taskId = "",
         title = title,
         isCompleted = decisions.isCompleted,
         sortOrder = sortOrder,

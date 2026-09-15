@@ -28,6 +28,7 @@ class SentCheckedFilesTest {
         id = 0,
         publicId = title,
         listId = 1,
+        taskId = "task-$title",
         title = title,
         isCompleted = checked,
         sortOrder = 0,

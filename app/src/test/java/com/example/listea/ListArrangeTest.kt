@@ -45,6 +45,7 @@ class ListArrangeTest {
             id = id,
             publicId = newItemPublicId(fileIdentity("folder/$name"), now = id),
             listId = 1,
+            taskId = "task-$name",
             title = name,
             isCompleted = completed,
             sortOrder = id.toInt(),

@@ -33,6 +33,7 @@ class WebhookPayloadTest {
         id = 173,
         publicId = "0AT9K3QWMB-4H7ZP2-XC5N0V",
         listId = 1,
+        taskId = "task-173",
         title = "example.jpg",
         sortOrder = 0,
         createdAt = 0,

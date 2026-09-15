@@ -29,6 +29,31 @@ class MigrationSmokeTest {
 
     private val context: Context get() = ApplicationProvider.getApplicationContext()
 
+    /**
+     * The schema of a database built from the entities, rather than migrated to.
+     *
+     * Room checks the other tests' migrations *against* this, so a renamed column or a changed
+     * default fails here first and in the most readable way: the value below is what the entities
+     * actually say, not what a migration remembers writing.
+     */
+    @Test
+    fun `the current schema declares the template a List is judged under`() {
+        val database = Room.databaseBuilder(context, ListeaDatabase::class.java, SCHEMA_DB).build()
+        database.openHelper.writableDatabase.execSQL(
+            "INSERT INTO lists (id, title, createdAt, webhookEnabled, webhookUrl) " +
+                "VALUES (1, 'Trip', 1000, 0, '')"
+        )
+        database.openHelper.writableDatabase
+            .query(
+                "SELECT taskReviewTemplateId, taskReviewTemplateVersion FROM lists WHERE id = 1"
+            ).use { row ->
+                assertEquals(true, row.moveToFirst())
+                assertEquals("builtin.media.rapid-review", row.getString(0))
+                assertEquals(1, row.getInt(1))
+            }
+        database.close()
+    }
+
     @Test
     fun `a database created from the entities round-trips`() {
         val database = Room.databaseBuilder(context, ListeaDatabase::class.java, FRESH_DB).build()
@@ -48,8 +73,12 @@ class MigrationSmokeTest {
     fun `MIGRATION_11_12 folds custom1 and custom2 into a customActions set`() {
         writeV11Fixture()
 
+        // Both steps, because a v11 database now has two to walk before it is current — and the
+        // version the app opens at is what decides how many are needed, not what this test is
+        // about. The assertions below survive V13 unchanged: it carries every decision column
+        // across and rebuilds only the table they sit on.
         val database = Room.databaseBuilder(context, ListeaDatabase::class.java, V11_DB)
-            .addMigrations(ListeaDatabase.MIGRATION_11_12)
+            .addMigrations(ListeaDatabase.MIGRATION_11_12, ListeaDatabase.MIGRATION_12_13)
             .build()
 
         database.openHelper.writableDatabase
@@ -145,6 +174,7 @@ class MigrationSmokeTest {
 
     private companion object {
         const val FRESH_DB = "migration-smoke-fresh.db"
+        const val SCHEMA_DB = "migration-smoke-schema.db"
         const val V11_DB = "migration-smoke-v11.db"
     }
 }

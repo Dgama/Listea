@@ -94,6 +94,7 @@ class WebhookBodyTest {
         val folderItem = ListItemEntity(
             publicId = "FILE-1",
             listId = 0,
+            taskId = "task-file-1",
             title = "a.jpg",
             sortOrder = 0,
             createdAt = 1000
@@ -111,6 +112,7 @@ class WebhookBodyTest {
         val manual = ListItemEntity(
             publicId = "MANUAL-1",
             listId = 7,
+            taskId = "task-manual-1",
             title = "Buy milk",
             sortOrder = 0,
             createdAt = 1000
@@ -209,6 +211,7 @@ class WebhookBodyTest {
         id = 99,
         publicId = "PUBLIC-1",
         listId = 7,
+        taskId = "task-99",
         title = "a.jpg",
         isCompleted = completed,
         sortOrder = 0,
