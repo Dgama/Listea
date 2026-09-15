@@ -16,6 +16,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.listea.data.ReviewItem
+import com.example.listea.domain.ReviewContext
+import com.example.listea.domain.Templates
 
 /** What the Folder screen is currently quick-reviewing: a folder, under the root it sits in. */
 data class QuickReviewTarget(val rootUri: String, val folderPath: String)
@@ -177,6 +179,13 @@ private fun QuickReviewQueue(
                 completed = files.count { it.decisions.isCompleted },
                 total = files.size
             )
+        ),
+        // The folder this was reached from, which is the whole of what provenance means for a
+        // round that landed on no List. There is no List row to read a template version off, so a
+        // folder's judgments are recorded under the only Task Review this build defines.
+        terms = ReviewTerms(
+            context = ReviewContext.InFolder(target.rootUri, target.folderPath),
+            template = Templates.MediaRapidReview.ref
         ),
         // Null start point and a no-op position sink: a folder round is temporary and has nowhere
         // to resume from, so normal Review resumes exactly where it always would.

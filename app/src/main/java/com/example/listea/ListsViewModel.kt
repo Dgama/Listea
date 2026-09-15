@@ -43,6 +43,8 @@ import com.example.listea.data.rootRelativePathOf
 import com.example.listea.data.toReviewItem
 import com.example.listea.data.WebhookRecordEntity
 import com.example.listea.data.WebhookRecordSummary
+import com.example.listea.domain.ReviewContext
+import com.example.listea.domain.ReviewResponse
 
 /** What the Folder screen should be showing about a pending "create list from folder" action. */
 sealed interface FolderListRequest {
@@ -793,6 +795,36 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
                 onCompletionTransition(target.listId, transitioned, inRound)
             }
         }
+    }
+
+    /**
+     * A judgment committed on a Task Review surface, which is the only thing that records one.
+     *
+     * The other half of §5's fork. [setItemCompleted] moves the same state and records nothing,
+     * because a checkbox on a List's own page is an edit rather than a verdict; this is reached
+     * only from the review surface, and only when the person *checking* the Task is doing so as a
+     * review. Unchecking goes back through [setItemCompleted] even on that surface: retracting a
+     * decision is not committing a judgment, and there is no retraction for a template to record.
+     *
+     * The response is built from the item's decisions as the surface was showing them, which is
+     * what makes the stored snapshot the answer to "what did they commit" rather than to "what
+     * does the row say now".
+     *
+     * Everything after the write is [setItemCompleted]'s, unchanged and shared: the ordering lock,
+     * the round bookkeeping and the completion transition are the same whether the completion came
+     * from a judgment or an edit, so a List completes and fires its webhook identically either way.
+     */
+    fun submitItemReview(item: ReviewItem, terms: ReviewTerms) = launchDb {
+        val response = ReviewResponse.MediaReview(
+            completed = true,
+            favorite = item.decisions.isFavorite,
+            customActions = item.decisions.customActions
+        )
+        val (transitioned, inRound) = writeOrder.withLock {
+            val ids = dao.submitReview(item.target, response, terms.template, terms.context, now())
+            ids to ids.filterTo(mutableSetOf()) { it in openReviewRounds }
+        }
+        transitioned.forEach { onCompletionTransition(it, true, it in inRound) }
     }
 
     /**

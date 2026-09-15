@@ -6,7 +6,14 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
 import com.example.listea.domain.AssetId
+import com.example.listea.domain.ReviewContext
+import com.example.listea.domain.ReviewEventId
+import com.example.listea.domain.ReviewEventKind
+import com.example.listea.domain.ReviewResponse
 import com.example.listea.domain.TaskId
+import com.example.listea.domain.TemplateVersionRef
+import com.example.listea.domain.completesTask
+import com.example.listea.domain.encode
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -174,6 +181,79 @@ abstract class ListsDao {
 
         writeFileState(rootUri, relativePath, now) { it.copy(isCompleted = completed) }
 
+        return refreshAffected(affected, wasComplete, now)
+    }
+
+    /**
+     * A review *submission*: somebody was shown this Task through a Task Review surface and
+     * committed a response to it.
+     *
+     * The other half of the fork §5 turns on, and the only method here that appends a
+     * [ReviewEventEntity]. [setFileCompleted] and [setManualItemCompleted] write the same
+     * [TaskStateEntity] field and record nothing, because every other reason a Task's completion
+     * moves — a checkbox on the List's own page, a bulk edit, a migration backfill — is not
+     * somebody's verdict. No caller inherits event-writing by asking for "completed": a submission
+     * has to say so.
+     *
+     * The state and the event are written in one transaction, so a judgment and the state it
+     * committed cannot be observed apart. The response is written as given rather than recomputed
+     * from the state: what goes on record is what was committed, and if the two ever disagreed that
+     * disagreement is itself worth having, since a history that can only repeat current state would
+     * answer nothing.
+     *
+     * Returns the Lists that this moved from incomplete to complete, on the same terms as
+     * [setFileCompleted], so whoever called it fires the completion action exactly as before.
+     */
+    @Transaction
+    open suspend fun submitReview(
+        target: DecisionTarget,
+        response: ReviewResponse,
+        template: TemplateVersionRef,
+        context: ReviewContext?,
+        now: Long
+    ): List<Long> {
+        val taskId = when (target) {
+            is DecisionTarget.File -> taskForContent(target.rootUri, target.relativePath, now)
+            is DecisionTarget.ManualItem -> taskIdForItem(target.itemId) ?: return emptyList()
+        }
+        val affected = when (target) {
+            is DecisionTarget.File -> listsContainingFile(target.rootUri, target.relativePath)
+            is DecisionTarget.ManualItem -> listOf(target.listId)
+        }
+        val wasComplete = affected.filter { isComplete(it) == true }.toSet()
+
+        writeTaskState(taskId, now) { it.copy(isCompleted = response.completesTask) }
+
+        val (kind, ref) = reviewContextColumns(context)
+        insertReviewEvent(
+            ReviewEventEntity(
+                id = ReviewEventId.new().value,
+                taskId = taskId,
+                at = now,
+                kind = ReviewEventKind.SUBMITTED.key,
+                templateId = template.templateId.value,
+                templateVersion = template.version,
+                response = response.encode(),
+                contextKind = kind,
+                contextRef = ref
+            )
+        )
+
+        return refreshAffected(affected, wasComplete, now)
+    }
+
+    /**
+     * Re-evaluates every List one decision could have completed, and reports the ones it did.
+     *
+     * Shared by the two write paths rather than written twice, because "which Lists moved to
+     * complete" is the same question whether the answer leads to a delivery or to nothing, and two
+     * copies of it would be two chances to answer it differently.
+     */
+    private suspend fun refreshAffected(
+        affected: List<Long>,
+        wasComplete: Set<Long>,
+        now: Long
+    ): List<Long> {
         val transitioned = mutableListOf<Long>()
         for (listId in affected) {
             refreshCompletion(listId, now)
@@ -181,6 +261,26 @@ abstract class ListsDao {
         }
         return transitioned
     }
+
+    /**
+     * How a submission's provenance is spelled in `review_events`.
+     *
+     * [ReviewEventEntity.contextKind] says what [ReviewEventEntity.contextRef] names, so the two are
+     * produced together and never interpreted apart. A List's ref is its id. A folder's is the
+     * folder's path under its SAF grant — the grant is deliberately not repeated, because the
+     * event's Task already points at an Asset carrying that pair, so the root is one join away and
+     * a second stored copy is a second copy that can disagree.
+     *
+     * A null context stays null on both columns rather than becoming an empty string: "submitted
+     * from nowhere in particular" is a fact about the submission, and a blank ref would read as a
+     * folder with an empty path.
+     */
+    private fun reviewContextColumns(context: ReviewContext?): Pair<String?, String?> =
+        when (context) {
+            null -> null to null
+            is ReviewContext.InList -> ReviewContextKind.LIST to context.listId.value.toString()
+            is ReviewContext.InFolder -> ReviewContextKind.FOLDER to context.relativePath
+        }
 
     /** Returns true when removing the last unchecked item completed the list. See [addItem]. */
     @Transaction
@@ -910,6 +1010,9 @@ abstract class ListsDao {
     @Insert
     protected abstract suspend fun insertLegacyManualTask(task: LegacyManualTaskEntity)
 
+    @Insert
+    protected abstract suspend fun insertReviewEvent(event: ReviewEventEntity)
+
     @Query("SELECT taskId FROM assets WHERE rootUri = :rootUri AND relativePath = :relativePath")
     protected abstract suspend fun taskIdForFile(rootUri: String, relativePath: String): String?
 
@@ -946,12 +1049,17 @@ abstract class ListsDao {
      * The row is upserted by hand rather than with `@Upsert` for the reason [taskForContent] gives:
      * the key here is the Task, and a Task's state is created with the Task. An absent row means
      * this call is the first thing to touch the Task, not that something is wrong.
+     *
+     * Returns what was written rather than nothing, because a caller that has to record *what it
+     * committed* — [submitReview] — must record the state as it stood after the write and not as
+     * the caller guessed before it. Returning the value is what keeps that from being a second read
+     * that could see something else.
      */
     protected open suspend fun writeTaskState(
         taskId: String,
         now: Long,
         change: (ReviewDecisions) -> ReviewDecisions
-    ) {
+    ): ReviewDecisions {
         val existing = getTaskState(taskId)
         val next = change(existing?.decisions ?: ReviewDecisions())
         val encoded = encodeActionIds(next.customActions)
@@ -974,6 +1082,7 @@ abstract class ListsDao {
                 updatedAt = now
             )
         }
+        return next
     }
 
     /**

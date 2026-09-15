@@ -63,3 +63,21 @@ fun ReviewResponse.encode(): String = when (this) {
         "actions=${customActions.filter { it.isNotBlank() }.sorted().joinToString(",")}"
     ).joinToString(";")
 }
+
+/**
+ * The one thing a committed response moves in [TaskState]: whether the Task is complete.
+ *
+ * The rest of a response is a snapshot — [ReviewResponse.MediaReview.favorite] and its
+ * [ReviewResponse.MediaReview.customActions] record what the Task was marked with at the moment
+ * somebody judged it, and toggling either of those is not itself a submission (§5). Writing them
+ * back from a response would quietly turn a record of a judgment into a second way to make one.
+ *
+ * Spelled as an exhaustive `when` rather than read off a member, for the reason
+ * [TaskAction.isSubmission] is: a response type that arrives without being classified would append
+ * its event and leave the state exactly as it was, and a review that is on record but did not
+ * complete anything is the kind of disagreement the state/event split exists to make impossible.
+ * Naming the answer here means adding one stops the build instead.
+ */
+val ReviewResponse.completesTask: Boolean get() = when (this) {
+    is ReviewResponse.MediaReview -> completed
+}

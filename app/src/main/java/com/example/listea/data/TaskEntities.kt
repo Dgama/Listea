@@ -186,6 +186,22 @@ data class ReviewEventEntity(
 )
 
 /**
+ * The `contextKind` vocabulary: what `review_events.contextRef` names.
+ *
+ * Constants rather than an enum, for the reason [ReviewEventKind]'s `key` exists and the column
+ * itself does — a stored value has to keep being readable by a build that has never heard of it, and
+ * an enum's `valueOf` throws on exactly that row. The two members are not expected to grow in v0.2;
+ * they are named here so that the two places that read and write this column agree on the spelling.
+ */
+object ReviewContextKind {
+    /** A List review: the ref is that List's id. */
+    const val LIST = "list"
+
+    /** A folder review: the ref is the folder's path under its SAF grant. */
+    const val FOLDER = "folder"
+}
+
+/**
  * The wire name a file-backed Task already had, kept so a webhook can still send it.
  *
  * A compatibility boundary, not part of the model: it exists because a receiver keyed on the

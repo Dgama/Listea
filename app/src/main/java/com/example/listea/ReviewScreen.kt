@@ -42,6 +42,10 @@ import androidx.media3.exoplayer.ExoPlayer
 import coil3.ImageLoader
 import com.example.listea.data.ItemAction
 import com.example.listea.data.ReviewItem
+import com.example.listea.domain.ListId
+import com.example.listea.domain.ReviewContext
+import com.example.listea.domain.TemplateId
+import com.example.listea.domain.TemplateVersionRef
 
 /**
  * The few strings that distinguish one review context from another. Everything else — the queue
@@ -66,6 +70,18 @@ data class ReviewChrome(
     /** What the completion screen reports, which is never the round's own arithmetic. */
     val progress: ReviewProgress
 )
+
+/**
+ * What a round is conducted under: where it was reached from, and the exact template version its
+ * judgments are made under.
+ *
+ * Supplied by the screen that opened the round, because it is the only thing that knows either. A
+ * List's template lives on its own row and can differ between two Lists; a folder round belongs to
+ * no List at all, so there is nothing to read one off and the built-in Task Review is what applies.
+ * The two travel together because a submission needs both, and a caller that supplied one and
+ * guessed the other would be recording a judgment under terms nobody chose.
+ */
+data class ReviewTerms(val context: ReviewContext, val template: TemplateVersionRef)
 
 /**
  * How far along the *whole* list or folder is, passed in rather than counted from the queue.
@@ -202,6 +218,15 @@ fun ReviewScreen(
             // The list's own numbers, not the round's: a filtered round that finishes has not
             // finished the list, and the page it returns to will still say so.
             progress = ReviewProgress(current.completedCount, items.size)
+        ),
+        // This List's own template version, off its row rather than assumed, so a judgment is
+        // recorded under the definition that was actually in force when it was made.
+        terms = ReviewTerms(
+            context = ReviewContext.InList(ListId(listId)),
+            template = TemplateVersionRef(
+                TemplateId(current.list.taskReviewTemplateId),
+                current.list.taskReviewTemplateVersion
+            )
         ),
         // The setting decides what is read on entry, not what is written: the position keeps
         // being recorded below either way, so switching resuming back on picks up where Review
@@ -377,6 +402,7 @@ fun ReviewSession(
     items: List<ReviewItem>,
     sessionKey: Any,
     chrome: ReviewChrome,
+    terms: ReviewTerms,
     persistedItemId: Long?,
     onPositionChanged: (Long) -> Unit,
     onRestart: (() -> Unit)?,
@@ -462,9 +488,11 @@ fun ReviewSession(
                 canSwipeForward = true,
                 canSwipeBack = index > 0,
                 onSwipeForward = {
-                    // The existing completion path, so a list that becomes complete here fires
-                    // the webhook exactly as a manual checkbox tick would — from either mode.
-                    viewModel.setItemCompleted(item, true)
+                    // A submission, because this is a review surface and the swipe is a judgment.
+                    // Everything downstream of the write — the completion transition, the round
+                    // bookkeeping, the webhook — is the same path a checkbox takes, so a list that
+                    // becomes complete here still fires exactly as it always did.
+                    viewModel.submitItemReview(item, terms)
                     if (index == items.lastIndex) {
                         finished = true
                         // Announced after the check above, so the delivery it may lead to sees
@@ -495,7 +523,16 @@ fun ReviewSession(
                 // Observed here rather than threaded through every caller: renaming an action in
                 // Settings relabels the chips immediately, with no restart and no item touched.
                 settings = settings,
-                onToggleCompleted = { viewModel.setItemCompleted(item, it) },
+                // The surface's own control, so checking it here is a judgment and unchecking it
+                // is not: §5 records what somebody committed, and there is no retraction for a
+                // template to record. The uncheck still has to happen — it just moves state.
+                onToggleCompleted = { completed ->
+                    if (completed) {
+                        viewModel.submitItemReview(item, terms)
+                    } else {
+                        viewModel.setItemCompleted(item, false)
+                    }
+                },
                 onToggleAction = { action, enabled ->
                     viewModel.setItemAction(item, action, enabled)
                 },
