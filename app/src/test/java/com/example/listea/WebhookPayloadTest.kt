@@ -9,8 +9,11 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
- * Covers the two pure pieces of the webhook item payload. The JSON assembly itself needs
- * org.json, which is not available to host tests, so it is exercised on device instead.
+ * Covers the two pure pieces of the webhook item payload: the folder path an item resolves to, and
+ * the action names settings resolve it to.
+ *
+ * The JSON assembly itself is in `WebhookBodyTest`. It used to live on the device, because org.json
+ * was not available to host tests — Robolectric, added in v0.2 step 0, is what changed that.
  */
 class WebhookPayloadTest {
 

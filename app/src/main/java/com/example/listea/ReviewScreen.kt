@@ -561,7 +561,7 @@ fun ReviewItemInfoSheet(info: ReviewItemInfo, onDismiss: () -> Unit) {
  * at the first unchecked item, and if everything is checked, at the very first item. Passing a
  * null [persisted] is how Quick Review always starts at the first unchecked item.
  */
-private fun resumeItemId(persisted: Long?, items: List<ReviewItem>): Long {
+internal fun resumeItemId(persisted: Long?, items: List<ReviewItem>): Long {
     if (persisted != null && items.any { it.id == persisted }) return persisted
     return (items.firstOrNull { !it.decisions.isCompleted } ?: items.first()).id
 }
