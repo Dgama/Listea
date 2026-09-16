@@ -60,19 +60,33 @@ fun sourceFolderLabel(context: Context, rootUri: Uri, relativePath: String): Str
 }
 
 /**
- * Every file in the subtree rooted at [folderUri], depth first. Blocking: call on an IO
- * dispatcher.
+ * What one recursive walk of a folder saw: the files beneath it, and the directories beneath it.
  *
- * Directories are traversed but never emitted. Children only ever come from [DocumentFile.listFiles]
- * on a folder already inside the subtree, so the walk cannot escape it, and each child is visited
- * exactly once so files cannot be duplicated. Returns null if any part of the scan fails, so the
- * caller can abort before writing anything.
+ * Both lists are root-relative and in the same deterministic, case-insensitive path order. The
+ * directories are what an importer needs to see an immediate child folder that holds no files at
+ * all — a fact a file-only scan cannot distinguish from "the folder was never looked at".
  */
-fun scanFolderFiles(context: Context, folderUri: Uri): List<ScannedFile>? = runCatching {
+data class FolderSnapshot(
+    val files: List<ScannedFile>,
+    val directories: List<String>
+)
+
+/**
+ * Every file *and* directory in the subtree rooted at [folderUri], one depth-first walk. Blocking:
+ * call on an IO dispatcher.
+ *
+ * The walk is the same one [scanFolderFiles] has always made; it now records the directories it was
+ * visiting anyway rather than throwing them away. Children only ever come from
+ * [DocumentFile.listFiles] on a folder already inside the subtree, so the walk cannot escape it,
+ * and each child is visited exactly once so files cannot be duplicated. Returns null if any part of
+ * the scan fails, so the caller can abort before writing anything.
+ */
+fun scanFolderTree(context: Context, folderUri: Uri): FolderSnapshot? = runCatching {
     val root = DocumentFile.fromTreeUri(context, folderUri)
     if (root == null || !root.isDirectory || !root.canRead()) return@runCatching null
 
     val files = mutableListOf<ScannedFile>()
+    val directories = mutableListOf<String>()
     val pending = ArrayDeque<Pair<DocumentFile, String>>()
     pending.addLast(root to "")
 
@@ -83,6 +97,7 @@ fun scanFolderFiles(context: Context, folderUri: Uri): List<ScannedFile>? = runC
             val path = childRelativePath(prefix, name)
             if (child.isDirectory) {
                 check(path.count { it == '/' } < MAX_DEPTH) { "Folder nesting too deep" }
+                directories += path
                 pending.addLast(child to path)
             } else {
                 files += ScannedFile(
@@ -96,11 +111,27 @@ fun scanFolderFiles(context: Context, folderUri: Uri): List<ScannedFile>? = runC
         }
     }
 
-    files.sortedWith(
-        compareBy(String.CASE_INSENSITIVE_ORDER, ScannedFile::relativePath)
-            .thenBy(ScannedFile::relativePath)
+    FolderSnapshot(
+        files = files.sortedWith(
+            compareBy(String.CASE_INSENSITIVE_ORDER, ScannedFile::relativePath)
+                .thenBy(ScannedFile::relativePath)
+        ),
+        directories = directories.sortedWith(
+            compareBy(String.CASE_INSENSITIVE_ORDER, { path: String -> path })
+                .thenBy { path: String -> path }
+        )
     )
 }.getOrNull()
+
+/**
+ * Every file in the subtree rooted at [folderUri], depth first. Blocking: call on an IO dispatcher.
+ *
+ * Expressed on top of [scanFolderTree] so the two cannot walk a folder differently; the file-only
+ * view is the tree walk with its directories dropped. Returns null if any part of the scan fails,
+ * so the caller can abort before writing anything.
+ */
+fun scanFolderFiles(context: Context, folderUri: Uri): List<ScannedFile>? =
+    scanFolderTree(context, folderUri)?.files
 
 /**
  * What a whole subtree adds up to.
