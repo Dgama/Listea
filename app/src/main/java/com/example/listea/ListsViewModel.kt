@@ -1309,12 +1309,19 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
 
         // Re-read decisions by Task id rather than by a registration row: a Task without one — a
         // multi-Asset Task, or one no List ever touched — must not silently drop out of the payload.
-        val fresh = writeOrder.withLock { dao.getTaskStates(taskIds) }
-            .associateBy { it.taskId }
-
-        val rows = items.mapIndexedNotNull { index, item ->
-            item.copy(decisions = fresh[item.taskId]?.decisions ?: item.decisions)
-                .toPayloadRow(index)
+        // A Task with no single Asset to name it gets its stable wire id from legacy_task_ids,
+        // minted lazily the first time it is reported.
+        val rows = writeOrder.withLock {
+            val fresh = dao.getTaskStates(taskIds).associateBy { it.taskId }
+            items.mapIndexedNotNull { index, item ->
+                val publicId = if (item.publicId.isNotEmpty()) {
+                    item.publicId
+                } else {
+                    dao.legacyTaskId(item.taskId, now())
+                }
+                item.copy(publicId = publicId, decisions = fresh[item.taskId]?.decisions ?: item.decisions)
+                    .toPayloadRow(index)
+            }
         }
 
         deliverPayload(

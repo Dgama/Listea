@@ -31,7 +31,7 @@ import org.robolectric.annotation.Config
  * The two orders matter and are tested separately. A folder opened for review registers its files
  * before anything has been decided, and a List over the same folder mints their Tasks before
  * anybody thinks to review them — so whichever half arrives first, the naming has to catch up
- * when the other does. Minting is now reached through [ListsDao.ensureTasksForFiles] rather than
+ * when the other does. Minting is now reached through [ListsDao.taskIdsOf] rather than
  * through a write, because resolving a Task is a resolution concern and the write path no longer
  * mints.
  */
@@ -66,7 +66,7 @@ class LegacyItemIdTest {
         // Registered and nothing else: no decision, so no Asset, so nothing for a name to hang on.
         assertEquals(0, rawInt("SELECT COUNT(*) FROM legacy_item_ids"))
 
-        dao.ensureTasksForFiles(ROOT, listOf("a.jpg"), now = 2000)
+        dao.taskIdsOf(ROOT, listOf("a.jpg"), now = 2000)
 
         assertEquals("FILE-a.jpg", rawText("SELECT publicId FROM legacy_item_ids"))
     }
@@ -91,9 +91,9 @@ class LegacyItemIdTest {
         // decided about it. A step that only named files on the other order would leave this queue
         // sending ids it had nowhere to resolve.
         register("a.jpg", "b.jpg")
-        dao.ensureTasksForFiles(ROOT, listOf("a.jpg"), now = 2000)
+        dao.taskIdsOf(ROOT, listOf("a.jpg"), now = 2000)
 
-        val resolved = dao.ensureTasksForFiles(ROOT, listOf("a.jpg", "b.jpg"), 2000)
+        val resolved = dao.taskIdsOf(ROOT, listOf("a.jpg", "b.jpg"), 2000)
 
         assertEquals(setOf("a.jpg", "b.jpg"), resolved.map { it.relativePath }.toSet())
         assertEquals(
@@ -133,7 +133,7 @@ class LegacyItemIdTest {
     @Test
     fun `the name a folder round sends is the registration's own`() = runTest {
         register("a.jpg")
-        dao.ensureTasksForFiles(ROOT, listOf("a.jpg"), now = 2000)
+        dao.taskIdsOf(ROOT, listOf("a.jpg"), now = 2000)
 
         // Read the way the payload reads it. The same string it sent before the move, because the
         // side table was handed the registration's value rather than minting one of its own.
@@ -144,7 +144,7 @@ class LegacyItemIdTest {
     @Test
     fun `an undecided file is still named for the queue it is in`() = runTest {
         register("a.jpg", "b.jpg")
-        dao.ensureTasksForFiles(ROOT, listOf("a.jpg"), now = 2000)
+        dao.taskIdsOf(ROOT, listOf("a.jpg"), now = 2000)
 
         // `b.jpg` has no Asset, so it has no row in the side table and never will until somebody
         // decides about it — and it must still come back from the queue read carrying the name it
@@ -163,7 +163,7 @@ class LegacyItemIdTest {
         // on. Naming by path alone would hand one root's review the other root's id — the same way
         // reading a decision by path alone would hand it the other root's answer.
         register("a.jpg")
-        dao.ensureTasksForFiles(ROOT, listOf("a.jpg"), now = 2000)
+        dao.taskIdsOf(ROOT, listOf("a.jpg"), now = 2000)
         dao.registerFiles(
             listOf(
                 FileReviewStateEntity(
@@ -174,7 +174,7 @@ class LegacyItemIdTest {
                 )
             )
         )
-        dao.ensureTasksForFiles(OTHER, listOf("a.jpg"), now = 2000)
+        dao.taskIdsOf(OTHER, listOf("a.jpg"), now = 2000)
 
         assertEquals(
             listOf("FILE-a.jpg", "FILE-other-a"),
@@ -185,7 +185,7 @@ class LegacyItemIdTest {
     @Test
     fun `naming a file a second time does not rename it`() = runTest {
         register("a.jpg")
-        dao.ensureTasksForFiles(ROOT, listOf("a.jpg"), now = 2000)
+        dao.taskIdsOf(ROOT, listOf("a.jpg"), now = 2000)
 
         // Deliberately provoked, because nothing in the app rewrites a registration's publicId —
         // and that is exactly why the promise needs a test rather than an argument. Opening a

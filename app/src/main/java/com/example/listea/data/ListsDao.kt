@@ -11,12 +11,10 @@ import com.example.listea.PlannedTask
 import com.example.listea.assetViewerAvailable
 import com.example.listea.isAncestorOrSame
 import com.example.listea.scopesOverlap
-import com.example.listea.domain.AssetId
 import com.example.listea.domain.ReviewContext
 import com.example.listea.domain.ReviewEventId
 import com.example.listea.domain.ReviewEventKind
 import com.example.listea.domain.ReviewResponse
-import com.example.listea.domain.TaskId
 import com.example.listea.domain.TemplateVersionRef
 import com.example.listea.domain.completesTask
 import com.example.listea.domain.encode
@@ -826,11 +824,10 @@ abstract class ListsDao {
      * queue a stable id per file while leaving a file reviewed last month exactly as it was.
      *
      * Registering is one of the two moments a file can acquire the name a receiver sees, and the
-     * other is [taskForContent] minting its Asset. They are separate because either can come
-     * first — a folder opened for review registers before anything has been decided about
-     * anything in it, while a file reached through a List gets its Task before anybody thinks to
-     * review it — and both call the same idempotent assignment, so whichever arrives second finds
-     * the work already done.
+     * other is an import run creating its Asset. They are separate because either can come first —
+     * a folder opened for review registers before anything has been imported, while a file reached
+     * through a List gets its Task before anybody thinks to review it — and both call the same
+     * idempotent assignment, so whichever arrives second finds the work already done.
      */
     @Transaction
     open suspend fun registerFiles(states: List<FileReviewStateEntity>) {
@@ -949,35 +946,6 @@ abstract class ListsDao {
         """
     )
     protected abstract suspend fun listsContainingTask(taskId: String): List<Long>
-
-    /**
-     * Gives each of these files a Task if it has none, and answers with every one it now has.
-     *
-     * Registration alone is not enough for a folder review, and this is the difference between the
-     * two paths that resolve a file. A List's rows get their Tasks from [createFolderList] or from
-     * the migration; a file nobody has ever decided about has a registration row and nothing else.
-     * A card that is being shown to somebody is a Task whether or not anything has been decided
-     * about it yet — "every Task has exactly one state" is what the whole read model rests on, and
-     * a registration is not a Task.
-     *
-     * Minting here rather than at registration is the same choice every resolution path makes:
-     * what creates a Task is a reason to have one. Looking at a folder is a reason.
-     * [ListsDao.registerFiles] is not, and it stays the cheap idempotent insert it was.
-     *
-     * One transaction for the whole listing, because it is one answer to one question and a folder
-     * half-resolved would hand its queue a mixture of new Tasks and none.
-     */
-    @Transaction
-    open suspend fun ensureTasksForFiles(
-        rootUri: String,
-        relativePaths: List<String>,
-        now: Long
-    ): List<FileTaskId> {
-        val byPath = taskIdsForFiles(rootUri, relativePaths).associateBy { it.relativePath }
-        return relativePaths.map { path ->
-            byPath[path] ?: FileTaskId(path, taskForContent(rootUri, path, now))
-        }
-    }
 
     @Query(
         """
@@ -1205,31 +1173,6 @@ abstract class ListsDao {
         forgetManualTasks(taskIds)
     }
 
-    @Query("SELECT taskId FROM assets WHERE rootUri = :rootUri AND relativePath = :relativePath")
-    protected abstract suspend fun taskIdForFile(rootUri: String, relativePath: String): String?
-
-    /**
-     * Which Task each of these files is of, by the identity `assets` is unique on.
-     *
-     * A file with no Asset row is simply absent from the answer — it has no Task because nothing
-     * has ever decided anything about it, which is a state a folder review meets constantly and
-     * must not treat as an error.
-     *
-     * The one-shot twin of [observeFileStates], and for the same reason: a folder review resolves
-     * its files, registers them, and then needs to know what Tasks they turned out to be.
-     */
-    @Query(
-        """
-        SELECT relativePath, taskId
-        FROM assets
-        WHERE rootUri = :rootUri AND relativePath IN (:relativePaths)
-        """
-    )
-    protected abstract suspend fun taskIdsForFiles(
-        rootUri: String,
-        relativePaths: List<String>
-    ): List<FileTaskId>
-
     @Query("SELECT * FROM task_state WHERE taskId = :taskId")
     protected abstract suspend fun getTaskState(taskId: String): TaskStateEntity?
 
@@ -1260,7 +1203,7 @@ abstract class ListsDao {
      * caller's transaction, so two actions toggled at once cannot each write a set that never saw
      * the other.
      *
-     * Update-only, deliberately. A Task's state row is created with the Task — [taskForContent]
+     * Update-only, deliberately. A Task's state row is created with the Task — the import run
      * inserts it, the migration inserts it — so an absent row does not mean "this is the first
      * thing to touch the Task", it means the Task has gone. A write addressed at a vanished Task is
      * therefore a silent no-op (zero rows updated) rather than a mint or a foreign-key violation:
@@ -1284,54 +1227,6 @@ abstract class ListsDao {
             updatedAt = now
         )
         return next
-    }
-
-    /**
-     * The Task a source-backed piece of content belongs to, minting one if this file has none yet.
-     *
-     * Looked up before it is created, because `assets` is unique on `(rootUri, relativePath)` and
-     * that uniqueness is the whole point: a file reached from a second List, or re-appended to one
-     * by a re-sync, is the *same* Task. Minting a rival here would either collide on the index or
-     * — if the index were ever relaxed — quietly split one file's judgment in two.
-     *
-     * [rootUri] is nullable for the one degenerate shape the migration also refuses to guess about:
-     * a row carrying a root-relative path whose List is not linked to a root. Such a row is treated
-     * as manual everywhere else, so its Task simply has pathless content rather than being dropped.
-     *
-     * A minted Task always gets its state row in the same breath. Nothing reads it yet, but "every
-     * Task has exactly one state" is what lets the read paths drop their `COALESCE` later, and
-     * holding that from the start is cheaper than reconciling it afterwards.
-     */
-    private suspend fun taskForContent(rootUri: String?, relativePath: String, now: Long): String {
-        if (rootUri != null) {
-            val known = taskIdForFile(rootUri, relativePath)
-            if (known != null) {
-                // A file the migration had to mint an Asset for, or one a List reached before any
-                // folder did. The registration may have arrived since, and this is where that is
-                // noticed — the assignment matches on both rows, so it does nothing until it can.
-                assignLegacyItemIds(rootUri, listOf(relativePath))
-                return known
-            }
-        }
-
-        val taskId = TaskId.new().value
-        insertTask(TaskEntity(id = taskId, createdAt = now))
-        insertAsset(
-            AssetEntity(
-                id = AssetId.new().value,
-                taskId = taskId,
-                // v0.2 is one Asset per Task, so nothing has to choose an order yet.
-                sortOrder = 0,
-                rootUri = rootUri,
-                relativePath = relativePath
-            )
-        )
-        insertTaskState(TaskStateEntity(taskId = taskId, updatedAt = now))
-        // Only now is there anything for a legacy name to hang off. A pathless Asset matches
-        // nothing and is left alone: it was never a file under a root, so no folder round could
-        // ever have named it.
-        if (rootUri != null) assignLegacyItemIds(rootUri, listOf(relativePath))
-        return taskId
     }
 
     /**
@@ -1608,6 +1503,29 @@ abstract class ListsDao {
 
     @Query("DELETE FROM legacy_source_tasks WHERE taskId = :taskId")
     protected abstract suspend fun deleteLegacyClaim(taskId: String)
+
+    @Query("SELECT publicId FROM legacy_task_ids WHERE taskId = :taskId")
+    protected abstract suspend fun legacyTaskIdOf(taskId: String): String?
+
+    @Insert
+    protected abstract suspend fun insertLegacyTaskId(id: LegacyTaskIdEntity)
+
+    /**
+     * The wire id a Task with no single Asset is reported under, minted and stored on first use.
+     *
+     * A folder round over a multi-Asset Task has no `list_items` row and no single Asset whose
+     * `legacy_item_ids` can name it, yet the wire still has to carry a stable `id`. This is where
+     * that name lives, and it is a compatibility boundary written lazily by the webhook adapter —
+     * never by an import run, never by the catalog. The id is stable across rounds because the first
+     * one is stored and read back.
+     */
+    @Transaction
+    open suspend fun legacyTaskId(taskId: String, now: Long): String {
+        legacyTaskIdOf(taskId)?.let { return it }
+        val id = newItemPublicId("task:$taskId", now)
+        insertLegacyTaskId(LegacyTaskIdEntity(taskId = taskId, publicId = id))
+        return id
+    }
 
     @Query("SELECT * FROM assets WHERE rootUri = :rootUri AND relativePath = :relativePath")
     protected abstract suspend fun assetByLocator(rootUri: String, relativePath: String): AssetEntity?

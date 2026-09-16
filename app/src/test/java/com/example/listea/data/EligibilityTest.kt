@@ -144,6 +144,38 @@ class EligibilityTest {
             assertEquals(1, dao.getItems(listId).size)
         }
 
+    // Definition of Done, v0.3 readiness
+    @Test
+    fun `a PDF Task and an image Task are identical except that the PDF cannot be reviewed`() = runTest {
+        val source = registerSource(ROOT, "", ImporterKind.FOLDER_AS_TASK)
+        dao.runImport(source.id, "", folderPlan("", listOf("img/cv.jpg", "pdf/cv.pdf"), listOf("img", "pdf")), 2000)
+        val rows = dao.getCatalogTasks(source.id).associateBy { it.displayName }
+        val image = rows.getValue("img")
+        val pdf = rows.getValue("pdf")
+
+        // Both are imported, catalogued and measured alike; only the viewability flag differs.
+        assertEquals(1, image.assetCount)
+        assertEquals(1, pdf.assetCount)
+        assertEquals(false, image.hasUnviewableAsset)
+        assertEquals(true, pdf.hasUnviewableAsset)
+
+        // Both are members of the same List — eligibility does not gate membership.
+        val listId = dao.createListFromTasks("Trip", listOf(image.taskId, pdf.taskId), false, "", 3000)
+        assertEquals(2, dao.getItems(listId).size)
+        assertEquals(1, rawInt("SELECT COUNT(*) FROM task_state WHERE taskId = '${image.taskId}'"))
+        assertEquals(1, rawInt("SELECT COUNT(*) FROM task_state WHERE taskId = '${pdf.taskId}'"))
+
+        // The image Task submits and records a judgment; the PDF Task writes nothing.
+        dao.submitReview(image.taskId, media(true), Templates.MediaRapidReview.ref, ReviewContext.InFolder(ROOT, ""), 4000)
+        assertEquals(
+            emptyList<Long>(),
+            dao.submitReview(pdf.taskId, media(true), Templates.MediaRapidReview.ref, ReviewContext.InFolder(ROOT, ""), 4000)
+        )
+        assertEquals(1, rawInt("SELECT COUNT(*) FROM review_events"))
+        assertEquals(1, rawInt("SELECT isCompleted FROM task_state WHERE taskId = '${image.taskId}'"))
+        assertEquals(0, rawInt("SELECT isCompleted FROM task_state WHERE taskId = '${pdf.taskId}'"))
+    }
+
     // --- helpers ---------------------------------------------------------------------------------
 
     private fun media(completed: Boolean) =
