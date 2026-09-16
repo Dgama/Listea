@@ -2,7 +2,7 @@
 
 > **Status:** Normative architectural direction  
 > **Scope:** Long-lived product and domain boundaries  
-> **Last updated:** 2026-09-15 (revised: orthogonal boundaries; navigation, submission and lifetime semantics)
+> **Last updated:** 2026-09-16 (revised: source/import/catalog boundaries and review-context independence)
 
 Listea is a lightweight human-judgment layer between structured inputs and workflow outputs. It turns a collection of reviewable tasks into a fast, resumable feed, records what a person decided, and leaves upstream ingestion and downstream consequences to other systems.
 
@@ -317,6 +317,174 @@ An exporter translates canonical review results into an external representation 
 Exporter configuration must not appear on Task, Asset, or Template merely because one current workflow uses it. Delivery attempts and delivery history may have their own persistence at the boundary.
 
 These boundaries do not require a generalized importer/exporter framework in the first iteration. Preserving a clean seam is sufficient until multiple implementations justify an abstraction.
+
+## Source material, import, and review selection
+
+The path into Core contains several distinct concepts and operations:
+
+```text
+External material
+    |
+    v
+Source registration
+    |
+    v
+Importer / Task Builder -------- Import provenance
+    |
+    v
+Normalized Tasks + Assets
+    |
+    +---------------------> Source-backed catalog / browse projection
+    |                                      |
+    |                                      +--> Quick Review context
+    |                                      |
+    |                                      +--> Task selection
+    |                                                |
+    +------------------------------------------------+--> persistent List + ListEntries
+                                                                |
+                                                                v
+                                                            Task review
+```
+
+The interface may present several of these stages as one convenient motion. The domain must still keep them separate. Opening a folder, interpreting its contents, selecting Tasks, and creating a List are not one operation whose meaning changes according to the current screen.
+
+### File and Source
+
+A **file** is raw external material. It may be discovered through a local folder, document provider, cloud service, archive, or another source. A file is not a Task merely because Listea can open it, and it is not an Asset until an importer deliberately attaches a representation of it to a Task. It has no List membership, TaskState, completion, or review history of its own.
+
+A **Source** is a registered origin from which raw material can be discovered. A folder is one Source kind, not a universal container in Core. A Source may retain a stable internal identity, external root locator and access information, display name, chosen importer configuration, import status, and enough provenance to reconcile later imports.
+
+Source identity remains distinct from Task and Asset identity. A path or URI may help recognize the same external material again, but it is never a globally stable domain ID. Source availability also remains distinct from Task lifetime: removing access to a Source or finding a file missing must not silently delete TaskState or ReviewEvents.
+
+### Import decides Task boundaries
+
+The importer owns the grouping decision:
+
+> Which source records or files together form one reviewable Task?
+
+Examples include one file becoming one Task with one Asset, one immediate child folder becoming a Task containing several descendant files as Assets, one CSV row becoming a structured Task, or an upstream vocabulary system emitting the prompt due today.
+
+The same folder tree may therefore be interpreted differently by different explicit importers. The choice is made during import, recorded as provenance, and remains stable during review. The current folder or screen must never decide Task identity after import.
+
+Once created, a Task is indivisible from the point of view of review selection:
+
+- selection includes the Task, not an arbitrary subset of its Assets;
+- a ListEntry points to the Task, not to the files currently visible;
+- Quick Review may include the Task only when it is complete in the selected scope;
+- browsing a narrower folder must not split the Task or mint a replacement identity.
+
+Changing Task boundaries is a new import/reconciliation operation. It is never an effect of creating a List or entering Quick Review.
+
+### Source structure is not Task structure
+
+Folders and other source hierarchies help an importer discover material and help a catalog present it. They do not define universal Task ownership.
+
+For example:
+
+```text
+source/
+├── candidate-a/
+│   ├── cv.pdf
+│   └── research.pdf
+└── candidate-b/
+    └── cv.pdf
+```
+
+A file-as-Task importer may produce three Tasks. A folder-as-Task importer may produce two. If `candidate-a` has already been imported as one Task, entering that folder and choosing Quick Review or Create List cannot reinterpret its two PDFs as separate Tasks.
+
+### Catalog, scope, and Task groups
+
+A **Task Catalog** is a browse-and-selection projection over imported Tasks. It may preserve useful Source hierarchy and present top-level labels such as “Picture Classification” or “Candidate Selection.”
+
+The interface may call such a top-level view a **Task Group**, but Task Group is not initially a new Core ownership entity. It is a source-backed catalog scope or saved browse projection unless a demonstrated requirement gives it independent identity, membership, lifecycle, permissions, or behavior.
+
+Therefore:
+
+- a catalog/group does not own TaskState or ReviewEvents;
+- deleting a List does not remove a Task from its catalog;
+- a List may select Tasks from more than one catalog scope;
+- catalog hierarchy does not become List hierarchy;
+- moving through folders does not change Task identity;
+- future non-file Tasks can appear in a catalog without pretending to be files.
+
+### Complete containment in a scope
+
+A source-backed Task is **complete in a scope** when every Asset required to present it is resolvable through and contained by that scope. For file-backed Tasks:
+
+```text
+required source-backed Assets(Task) ⊆ Assets resolvable in Scope
+```
+
+Merely intersecting a Task is insufficient. If a scope exposes only some Assets of a Task, the Task is partial there. A partial Task may be shown to explain the situation, but it cannot be reviewed or added to a List as though it were a smaller Task.
+
+Completeness is selection eligibility, not Task health or TaskState. A Task can be incomplete in one browse scope and complete in a wider one without changing identity, content, or judgment state. Tasks without file-backed Assets use an appropriate catalog scope rather than a fabricated folder location.
+
+### Import is independent from selection
+
+The legacy action called **Select Folder** combines at least three operations:
+
+```text
+choose external material
++ import it using file-as-Task
++ build or open a review context
+```
+
+The product may retain a shortcut that performs these consecutively, but the operations and their failure states remain independent:
+
+1. **Register or choose Source** identifies external material.
+2. **Import** creates or reconciles Tasks and Assets using an explicit importer.
+3. **Select Tasks** chooses already normalized, complete Tasks.
+4. **Start Quick Review or create a List** establishes a review context.
+
+Failure to import must not create a partly meaningful List. Failure to create a List must not roll back otherwise successful imported Tasks. Reopening a catalog scope must not re-import merely because the user wants to review it.
+
+User-facing language should name the intended operation. Prefer **Import Folder**, **Review This Scope**, and **Add Tasks to List** over one ambiguous **Select Folder** command.
+
+### Quick Review and List are independent review contexts
+
+Quick Review and List Review consume the same normalized Tasks and use the same TaskState and ReviewEvent semantics. Neither defines Task boundaries.
+
+**Quick Review** creates an ephemeral ordered review context over complete Tasks discoverable in the current catalog scope. It does not implicitly run an importer for already imported material, create or reshape Tasks, or create a persistent List merely to hold its queue. “Quick” describes persistence and entry cost, not a partial form of review: the judgment target remains a complete Task.
+
+A **List** is a named, persistent, ordered review context. Creating one selects existing Tasks and creates ListEntries. It must not scan raw files to infer Tasks or alter Task-to-Asset membership. A Task may appear in Quick Review and several Lists while retaining one identity, current state, and review history. Deleting the List removes membership and context only.
+
+An interface may offer **Import and create List** as a composed workflow. Internally it remains `Import`, followed by `Select Tasks`, followed by `Create List`, with separately meaningful failure and retry behavior.
+
+### Independence matrix
+
+| Concept | Defines Task boundary | Owns TaskState/history | Owns ordering | Owns external location | Persistent review context |
+|---|---:|---:|---:|---:|---:|
+| File | No | No | No | Source system | No |
+| Source | No | No | Source browse order only | Yes | No |
+| Importer | Yes, during import | No | May assign Asset order | Interprets it | No |
+| Asset | No | No | Asset order within Task | Retains locator/provenance | No |
+| Task | Is the resulting boundary | Yes | No | No | No |
+| Catalog scope / Task Group | No | No | Browse/display order | May project Source hierarchy | No |
+| Quick Review | No | No; writes through Task | Ephemeral queue order | No | No |
+| List / ListEntry | No | No; reads/writes through Task | Yes | No | Yes |
+
+### Re-import and reconciliation
+
+Re-import is the routine operation allowed to reconsider imported material. It must be explicit and use stored Source and importer provenance.
+
+It must distinguish unchanged material, newly discovered material, changed content or metadata at an existing source locator, material no longer resolvable, and a requested change of importer/grouping rule. Unchanged material should reconcile to the same Task and Asset identities. Missing material must not erase review state or history.
+
+Changing from file-as-Task to folder-as-Task can merge or split Task identity and is therefore not an ordinary refresh. It requires an explicit migration policy; until one exists, the system must create a separate import or reject the change rather than silently rewriting reviewed Tasks.
+
+Whether one Asset may eventually be referenced by multiple Tasks remains an open architecture decision. Initial importers may enforce one Task association per imported Asset without declaring shared Assets permanently impossible.
+
+### Source/import invariants
+
+1. A file path, URI, filename, folder name, or List position is never a Task or Asset domain ID.
+2. Only an importer or Task Builder defines which raw inputs form a Task.
+3. Selecting a narrower scope never splits an existing Task.
+4. Quick Review and List creation operate only on normalized Tasks.
+5. A review context reviews the whole Task even when the surface displays one Asset at a time.
+6. Quick Review and every List observe the same TaskState for the same Task.
+7. List deletion removes ListEntries, not Tasks, Assets, TaskState, or ReviewEvents.
+8. Source removal or temporary unavailability does not silently rewrite review history.
+9. An Asset Viewer never decides Task navigation, completion, or import grouping.
+10. Adding PDF support changes Asset kind and viewer capability; it does not redefine Task, List, Quick Review, or import semantics.
 
 ## Legacy compatibility is not architecture
 
