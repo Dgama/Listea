@@ -358,9 +358,13 @@ abstract class ListsDao {
 
     /**
      * Creates a folder-backed list in one transaction: drops the confirmed overlapping lists
-     * (cascading their items and webhook state), inserts the new list, then all of its items.
-     * Either the whole snapshot lands or nothing does, so a failure can never leave a
-     * half-populated folder list behind.
+     * (cascading their items and webhook state), runs a file-as-Task import over the folder, then
+     * builds the list from the resulting Tasks. Either the whole snapshot lands or nothing does.
+     *
+     * The composition proceeds only on a `complete` import; on a partial one it throws and creates
+     * nothing, which is the spec's "no List is created from a failed or incomplete import". The
+     * resulting `list_items` row is byte-identical to the one this method wrote before it imported,
+     * because the import's groupPath and Asset measurements are exactly what the scan measured.
      */
     @Transaction
     open suspend fun createFolderList(
@@ -374,6 +378,14 @@ abstract class ListsDao {
         now: Long
     ): Long {
         replacedListIds.forEach { deleteList(it) }
+
+        val source = registerOrReuseSource(rootUri, relativePath, now)
+        val result = runImportInternal(source.id, relativePath, fileAsTaskPlan(relativePath, files), now)
+        if (result.outcome != ImportOutcome.COMPLETE) {
+            throw IllegalStateException("Import of $relativePath did not complete")
+        }
+
+        val taskIdsByGroup = taskImportsForSource(source.id).associate { it.groupPath to it.taskId }
         val listId = insertList(
             ListEntity(
                 title = title,
@@ -388,39 +400,101 @@ abstract class ListsDao {
         )
         insertItems(
             files.mapIndexed { index, file ->
-                ListItemEntity(
-                    // Its name downstream, fixed now. A second list built over this same folder
-                    // later gives the same file a different one, on purpose: they are two
-                    // arrivals of it, and a receiver must be able to hold both.
-                    publicId = newItemPublicId(
-                        fileIdentity(rootRelativePathOf(relativePath, file.relativePath)),
-                        now
-                    ),
-                    listId = listId,
-                    // Resolved, not minted: a folder can be covered by more than one List, and
-                    // both must arrive at the same Task for the same file.
-                    taskId = taskForContent(
-                        rootUri,
-                        rootRelativePathOf(relativePath, file.relativePath),
-                        now
-                    ),
-                    title = file.name,
-                    sortOrder = index,
-                    createdAt = now,
-                    sourceUri = file.uri,
-                    sourceRelativePath = file.relativePath,
-                    // The identity its decisions are stored against. Resolved once, at insert,
-                    // because a list's folder never moves after this point.
-                    rootRelativePath = rootRelativePathOf(relativePath, file.relativePath),
-                    // Measured by the scan that produced this file, so the Items header can sort
-                    // and filter on it from the moment the list exists.
-                    sourceSizeBytes = file.sizeBytes,
-                    sourceModifiedAt = file.lastModified
-                )
+                val groupPath = rootRelativePathOf(relativePath, file.relativePath)
+                val taskId = taskIdsByGroup[groupPath]
+                    ?: throw IllegalStateException("no Task for $groupPath after import")
+                listItemForTask(taskId, listId, index, now, relativePath)
             }
         )
         return listId
     }
+
+    /**
+     * Creates a List from already-normalized Tasks, one membership per Task in the order given.
+     *
+     * Resolves no files, scans nothing and calls no importer: the Task ids are the whole input, and
+     * a Task id it cannot reach fails the transaction rather than creating a partial List. The
+     * file-shaped columns are filled from each Task's Assets — the importer's name as the title,
+     * the single Asset's URI for a file Task, the groupPath as both paths, and the summed sizes and
+     * newest modified time as the measurements.
+     */
+    @Transaction
+    open suspend fun createListFromTasks(
+        title: String,
+        taskIds: List<String>,
+        webhookEnabled: Boolean,
+        webhookUrl: String,
+        now: Long
+    ): Long {
+        val listId = insertList(
+            ListEntity(
+                title = title,
+                createdAt = now,
+                webhookEnabled = webhookEnabled,
+                webhookUrl = webhookUrl
+            )
+        )
+        insertItems(
+            taskIds.mapIndexed { index, taskId ->
+                listItemForTask(taskId, listId, index, now, folderRelativePath = null)
+            }
+        )
+        return listId
+    }
+
+    /** The Source a folder-tab action works against: a covering one, or a newly registered one. */
+    private suspend fun registerOrReuseSource(
+        rootUri: String,
+        relativePath: String,
+        now: Long
+    ): SourceEntity {
+        findCoveringSource(rootUri, relativePath)?.let { return it }
+        return when (
+            val result = registerSourceInternal(rootUri, relativePath, relativePath, ImporterKind.FILE_AS_TASK, now)
+        ) {
+            is RegisterSourceResult.Registered -> result.source
+            is RegisterSourceResult.Overlaps ->
+                throw IllegalStateException("Source overlaps ${result.covering.relativePath}")
+        }
+    }
+
+    private fun fileAsTaskPlan(importRoot: String, files: List<ScannedFile>) =
+        com.example.listea.plan(
+            ImporterKind.FILE_AS_TASK,
+            importRoot,
+            com.example.listea.FolderSnapshot(files, emptyList())
+        )
+
+    /** One membership row for a Task, its file-shaped columns read from the Task's Assets. */
+    private suspend fun listItemForTask(
+        taskId: String,
+        listId: Long,
+        sortOrder: Int,
+        now: Long,
+        folderRelativePath: String?
+    ): ListItemEntity {
+        val import = taskImportForTask(taskId) ?: throw IllegalStateException("no Task $taskId")
+        val assets = assetsForTask(taskId)
+        val groupPath = import.groupPath
+        return ListItemEntity(
+            publicId = newItemPublicId(fileIdentity(groupPath), now),
+            listId = listId,
+            taskId = taskId,
+            title = import.displayName,
+            sortOrder = sortOrder,
+            createdAt = now,
+            // A file Task's single Asset carries the document URI; a folder Task's Assets are
+            // under its groupPath, so its entry carries no single source.
+            sourceUri = assets.singleOrNull()?.takeIf { it.relativePath == groupPath }?.sourceUri,
+            sourceRelativePath = folderRelativePath?.let { relativeToFolder(groupPath, it) } ?: groupPath,
+            rootRelativePath = groupPath,
+            sourceSizeBytes = assets.mapNotNull { it.sizeBytes }.takeIf { it.isNotEmpty() }?.sum(),
+            sourceModifiedAt = assets.mapNotNull { it.lastModified }.maxOrNull()
+        )
+    }
+
+    private fun relativeToFolder(groupPath: String, folder: String): String =
+        if (folder.isEmpty()) groupPath else groupPath.removePrefix("$folder/")
 
     /** The same resolution as [observeItems], for the one-shot reads a webhook payload needs. */
     @Query(
@@ -610,32 +684,29 @@ abstract class ListsDao {
         val list = getList(listId)
         val listPath = list?.sourceRelativePath.orEmpty()
 
+        // A covered file-as-Task import creates or reconciles the Tasks for what the scan saw, so
+        // an appended file's Task is resolved rather than minted on the write path. The only thing
+        // that can stop it is a folder-as-Task Source covering this folder, which would fold the
+        // files into groups rather than append them as their own Tasks.
+        val rootUri = list?.sourceRootUri
+        val taskIdsByGroup = if (rootUri != null) {
+            val source = registerOrReuseSource(rootUri, listPath, now)
+            if (source.importerKind != ImporterKind.FILE_AS_TASK.key) {
+                throw IllegalStateException("List folder is inside a folder-as-Task Source")
+            }
+            runImportInternal(source.id, listPath, fileAsTaskPlan(listPath, files), now)
+            taskImportsForSource(source.id).associate { it.groupPath to it.taskId }
+        } else {
+            emptyMap()
+        }
+
         val appendFrom = maxSortOrder(listId) + 1
         insertItems(
             diff.addedPaths.mapIndexedNotNull { index, path ->
                 val file = files.firstOrNull { it.relativePath == path } ?: return@mapIndexedNotNull null
-                ListItemEntity(
-                    publicId = newItemPublicId(
-                        fileIdentity(rootRelativePathOf(listPath, file.relativePath)),
-                        now
-                    ),
-                    listId = listId,
-                    // The same resolution a fresh list makes, and for the same reason: a file
-                    // appended here may already be under review somewhere else.
-                    taskId = taskForContent(
-                        list?.sourceRootUri,
-                        rootRelativePathOf(listPath, file.relativePath),
-                        now
-                    ),
-                    title = file.name,
-                    sortOrder = appendFrom + index,
-                    createdAt = now,
-                    sourceUri = file.uri,
-                    sourceRelativePath = file.relativePath,
-                    rootRelativePath = rootRelativePathOf(listPath, file.relativePath),
-                    sourceSizeBytes = file.sizeBytes,
-                    sourceModifiedAt = file.lastModified
-                )
+                val groupPath = rootRelativePathOf(listPath, file.relativePath)
+                val taskId = taskIdsByGroup[groupPath] ?: return@mapIndexedNotNull null
+                listItemForTask(taskId, listId, appendFrom + index, now, listPath)
             }
         )
 
@@ -1353,6 +1424,18 @@ abstract class ListsDao {
         displayName: String,
         importerKind: ImporterKind,
         now: Long
+    ): RegisterSourceResult = registerSourceInternal(rootUri, relativePath, displayName, importerKind, now)
+
+    /**
+     * The body of [registerSource], split out so a composed operation such as [createFolderList] can
+     * register or reuse a Source inside its own transaction rather than nesting one.
+     */
+    protected open suspend fun registerSourceInternal(
+        rootUri: String,
+        relativePath: String,
+        displayName: String,
+        importerKind: ImporterKind,
+        now: Long
     ): RegisterSourceResult {
         sourceAt(rootUri, relativePath)?.let { return RegisterSourceResult.Registered(it) }
         sourcesForRoot(rootUri)
@@ -1463,6 +1546,12 @@ abstract class ListsDao {
             }
         }
 
+        // A file registered before this run is owed its wire name; naming catches up once the Asset
+        // exists, whichever arrived first. A fresh import with no registrations is a no-op.
+        if (plannedPaths.isNotEmpty()) {
+            assignLegacyItemIds(source.rootUri, plannedPaths.toList())
+        }
+
         updateSourceStatus(sourceId, now, if (conflicts.isEmpty()) ImportOutcome.COMPLETE.key else ImportOutcome.PARTIAL.key)
 
         return ImportResult(
@@ -1498,9 +1587,6 @@ abstract class ListsDao {
 
     @Query("UPDATE task_imports SET lastSeenAt = :lastSeenAt WHERE taskId = :taskId")
     protected abstract suspend fun updateTaskImportLastSeen(taskId: String, lastSeenAt: Long)
-
-    @Query("SELECT COUNT(*) FROM legacy_source_tasks WHERE taskId = :taskId")
-    protected abstract suspend fun legacyClaimCount(taskId: String): Int
 
     @Query("DELETE FROM legacy_source_tasks WHERE taskId = :taskId")
     protected abstract suspend fun deleteLegacyClaim(taskId: String)
@@ -1659,24 +1745,26 @@ abstract class ListsDao {
         for (asset in task.assets) {
             val existing = assetByLocator(source.rootUri, asset.rootRelativePath) ?: continue
             val ownerTaskId = existing.taskId
-            if (legacyClaimCount(ownerTaskId) > 0) {
-                // A file-as-Task run planning exactly this one file can adopt it; a folder-as-Task
-                // run would fold it into a group and take a reviewed Task's identity with it.
-                if (importer == ImporterKind.FILE_AS_TASK && task.assets.size == 1) {
-                    adoptTaskId = ownerTaskId
-                } else {
-                    return NewTaskDelta(
-                        conflict = ImportConflict(asset.rootRelativePath, "a legacy Task", ownerTaskId)
-                    )
-                }
-            } else {
-                val owner = taskImportForTask(ownerTaskId)
+            val owner = taskImportForTask(ownerTaskId)
+            if (owner != null) {
+                // Owned by a Source. A locator already claimed is never silently moved.
                 return NewTaskDelta(
                     conflict = ImportConflict(
                         relativePath = asset.rootRelativePath,
-                        ownerLabel = if (owner?.sourceId == source.id) "this Source" else "another Source",
+                        ownerLabel = if (owner.sourceId == source.id) "this Source" else "another Source",
                         taskId = ownerTaskId
                     )
+                )
+            }
+            // A free file-backed Task: legacy-claimed, or minted by an older migration before the
+            // claim set existed. A file-as-Task run planning exactly this one file can adopt it; a
+            // folder-as-Task run would fold it into a group and take a reviewed Task's identity
+            // with it.
+            if (importer == ImporterKind.FILE_AS_TASK && task.assets.size == 1) {
+                adoptTaskId = ownerTaskId
+            } else {
+                return NewTaskDelta(
+                    conflict = ImportConflict(asset.rootRelativePath, "a legacy Task", ownerTaskId)
                 )
             }
         }
