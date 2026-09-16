@@ -2,15 +2,20 @@ package com.example.listea
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
@@ -48,7 +53,10 @@ fun QuickReviewScreen(
     target: QuickReviewTarget,
     onExit: () -> Unit
 ) {
-    val reviewFlow = remember(target) {
+    // Bumped when a consent is accepted, so the flow re-collects and finds the Source that was just
+    // registered rather than answering "nothing imported here" forever.
+    var importVersion by remember { mutableStateOf(0) }
+    val reviewFlow = remember(target, importVersion) {
         viewModel.observeFolderReview(target.rootUri, target.folderPath)
     }
     val review by reviewFlow.collectAsStateWithLifecycle(initialValue = FolderReview.Resolving)
@@ -81,6 +89,36 @@ fun QuickReviewScreen(
                 detail = folderName,
                 onExit = onExit
             )
+        }
+
+        is FolderReview.NotImported -> {
+            BackHandler { onExit() }
+            ReviewFrame(modifier, "Quick Review", onBack = onExit) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        "Nothing imported here yet",
+                        style = MaterialTheme.typography.bodyLarge,
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(Modifier.height(ListeaDimens.RowGap))
+                    Text(
+                        "Quick Review needs an import first. Import this folder as " +
+                            current.importer + " at " + current.sourceRoot + "?",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(Modifier.height(ListeaDimens.SectionGap))
+                    Row {
+                        TextButton(onClick = onExit) { Text("Not now") }
+                        Spacer(Modifier.width(ListeaDimens.RowGap))
+                        Button(onClick = {
+                            viewModel.importFolderForReview(target.rootUri, target.folderPath)
+                            importVersion++
+                        }) { Text("Import") }
+                    }
+                }
+            }
         }
 
         is FolderReview.Ready -> QuickReviewQueue(

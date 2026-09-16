@@ -1413,6 +1413,9 @@ abstract class ListsDao {
     @Query("SELECT * FROM sources WHERE id = :id")
     abstract suspend fun getSource(id: String): SourceEntity?
 
+    @Query("SELECT * FROM sources ORDER BY createdAt DESC, id DESC")
+    abstract fun observeSources(): Flow<List<SourceEntity>>
+
     @Query("SELECT * FROM sources WHERE rootUri = :rootUri")
     protected abstract suspend fun sourcesForRoot(rootUri: String): List<SourceEntity>
 

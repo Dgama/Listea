@@ -11,6 +11,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -63,6 +64,7 @@ object ListeaDimens {
 enum class TopLevelDestination(val label: String, val title: String, val icon: ImageVector) {
     Folder("Folder", "Listea", Icons.Filled.Folder),
     Lists("Lists", "Lists", Icons.AutoMirrored.Filled.List),
+    Sources("Sources", "Sources", Icons.Filled.Refresh),
     Settings("Settings", "Settings", Icons.Filled.Settings)
 }
 

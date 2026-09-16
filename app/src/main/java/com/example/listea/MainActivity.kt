@@ -166,6 +166,11 @@ fun ListeaApp(
                     onReviewListChange = { reviewListId = it }
                 )
 
+                TopLevelDestination.Sources -> SourcesScreen(
+                    modifier = contentModifier,
+                    viewModel = listsViewModel
+                )
+
                 TopLevelDestination.Settings -> SettingsScreen(
                     modifier = contentModifier,
                     viewModel = listsViewModel,
@@ -994,6 +999,33 @@ fun FolderScreen(
             text = { Text(request.message) },
             confirmButton = {
                 TextButton(onClick = { listsViewModel.dismissFolderListRequest() }) { Text("OK") }
+            }
+        )
+
+        is FolderListRequest.ImportConsent -> AlertDialog(
+            onDismissRequest = { listsViewModel.dismissFolderListRequest() },
+            title = { Text("Import folder?") },
+            text = {
+                Column {
+                    Text(
+                        "Creating a list for " + request.folderName +
+                            " (" + countLabel(request.fileCount, "file") + ") means importing it " +
+                            "first. Listea will register " + request.sourceRoot + " as " +
+                            request.importer + " and create the Tasks."
+                    )
+                    Spacer(Modifier.height(ListeaDimens.RowGap))
+                    Text(
+                        "Nothing is written until you import.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { listsViewModel.confirmImportForFolder() }) { Text("Import") }
+            },
+            dismissButton = {
+                TextButton(onClick = { listsViewModel.dismissFolderListRequest() }) { Text("Not now") }
             }
         )
     }

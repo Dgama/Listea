@@ -35,8 +35,10 @@ import com.example.listea.data.ListItemEntity
 import com.example.listea.data.ListSummary
 import com.example.listea.data.ListeaDatabase
 import com.example.listea.data.newItemPublicId
+import com.example.listea.data.RegisterSourceResult
 import com.example.listea.data.ReviewItem
 import com.example.listea.data.ScannedFile
+import com.example.listea.data.SourceEntity
 import com.example.listea.data.decisions
 import com.example.listea.data.encodeActionIds
 import com.example.listea.data.rootRelativePathOf
@@ -62,6 +64,18 @@ sealed interface FolderListRequest {
         val fileCount: Int,
         val replacedTitles: List<String>,
         val replacesExact: Boolean
+    ) : FolderListRequest
+
+    /**
+     * The folder is not yet imported, so creating a List over it would register a Source. Nothing
+     * is written until the user accepts; the confirmation names the root and the importer it
+     * proposes, and a decline leaves the database exactly as it was.
+     */
+    data class ImportConsent(
+        val folderName: String,
+        val fileCount: Int,
+        val sourceRoot: String,
+        val importer: String
     ) : FolderListRequest
 
     data class Error(val message: String) : FolderListRequest
@@ -143,6 +157,13 @@ sealed interface FolderReview {
      * screen's decision, not this one's.
      */
     data class Ready(val items: List<ReviewItem>) : FolderReview
+
+    /**
+     * Nothing imported here: no Source covers this folder, so Quick Review would be reviewing
+     * material that was never brought in. The consent dialog is the answer, not a silent empty
+     * round; nothing is written until it is accepted.
+     */
+    data class NotImported(val sourceRoot: String, val importer: String) : FolderReview
 }
 
 /**
@@ -295,6 +316,10 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), FolderArrangements())
 
     val summaries: StateFlow<List<ListSummary>> = dao.observeSummaries()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** The registered Sources, for the Sources surface. */
+    val sources: StateFlow<List<SourceEntity>> = dao.observeSources()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     private val _folderListRequest = MutableStateFlow<FolderListRequest?>(null)
@@ -509,6 +534,14 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
             return@flow
         }
 
+        // Nothing imported here: the consent dialog, not a silent empty round. Once a Source covers
+        // the folder the question is never asked again, which is why it is a per-folder check.
+        val source = dao.findCoveringSource(rootUri, folderPath)
+        if (source == null) {
+            emit(FolderReview.NotImported(folderPath.ifEmpty { "the selected folder" }, "file-as-Task"))
+            return@flow
+        }
+
         val paths = files.map { it.rootRelativePath }
         dao.registerFiles(
             paths.map {
@@ -525,13 +558,9 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         )
         // Reading them is proof they are there, which un-flags anything deleted and put back.
         dao.markFilesPresent(rootUri, paths)
-        // The queue is built from catalog Tasks, not minted here: a scope no Source covers, or one
-        // whose Tasks are partial or ineligible, resolves to whatever is eligible and nothing more.
-        // Registration is a browse concern and stays; creating a Task is an import's job and does
-        // not happen on this path.
-        val rows = dao.findCoveringSource(rootUri, folderPath)
-            ?.let { dao.getCatalogTasks(it.id) }
-            .orEmpty()
+        // The queue is built from catalog Tasks, not minted here. Registration is a browse concern
+        // and stays; creating a Task is an import's job and does not happen on this path.
+        val rows = dao.getCatalogTasks(source.id)
         val states = dao.getFileStates(rootUri, paths)
         emit(FolderReview.Ready(folderReviewQueue(rootUri, folderPath, files, rows, states)))
     }
@@ -877,6 +906,19 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
             replacedIds = conflicts.map { it.id }
         )
 
+        // The first Create List on material no Source covers asks before it writes: the
+        // confirmation names the root it proposes and the importer it will use, and nothing is
+        // registered, imported or created until it is accepted.
+        if (dao.findCoveringSource(rootUri, relativePath) == null) {
+            _folderListRequest.value = FolderListRequest.ImportConsent(
+                folderName = folderName,
+                fileCount = files.size,
+                sourceRoot = relativePath.ifEmpty { "the selected folder" },
+                importer = "file-as-Task"
+            )
+            return@launchDb
+        }
+
         if (conflicts.isEmpty()) {
             commitPendingFolderList()
         } else {
@@ -891,6 +933,35 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Step 2: the user accepted replacing the overlapping lists. */
     fun confirmListForFolder() = launchDb { commitPendingFolderList() }
+
+    /** Step 2 for the import consent: accepted, so the import and List creation proceed. */
+    fun confirmImportForFolder() = launchDb { commitPendingFolderList() }
+
+    /**
+     * The write a Quick Review consent accepted: register a file-as-Task Source over the folder and
+     * run the import. Once it has run, entering Quick Review is immediate again.
+     */
+    fun importFolderForReview(rootUri: String, folderPath: String) = launchDb {
+        val tree = withContext(Dispatchers.IO) {
+            resolveLinkedFolder(getApplication(), rootUri.toUri(), folderPath)
+                ?.let { scanFolderTree(getApplication(), it.uri) }
+        }
+        val source = when (
+            val result = dao.registerSource(
+                rootUri,
+                folderPath,
+                folderPath.ifEmpty { "Root" },
+                ImporterKind.FILE_AS_TASK,
+                now()
+            )
+        ) {
+            is RegisterSourceResult.Registered -> result.source
+            is RegisterSourceResult.Overlaps -> result.covering
+        }
+        if (tree != null) {
+            dao.runImport(source.id, folderPath, plan(ImporterKind.FILE_AS_TASK, folderPath, tree), now())
+        }
+    }
 
     fun dismissFolderListRequest() {
         pendingFolderList = null
