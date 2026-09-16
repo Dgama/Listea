@@ -34,6 +34,9 @@ import org.robolectric.annotation.Config
  * genuinely was the answer, and that is precisely what this step stops being true. It is kept
  * beside the others rather than in a file of its own because it is the same question — which copy
  * of the state is trusted — asked from the other side.
+ *
+ * The writes are addressed by Task id, resolved through [taskIdOf] the way a folder review resolves
+ * one; the assertions stay about what each reader shows.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -64,8 +67,8 @@ class CurrentStateTest {
         folderList(folderPath = "", files = listOf("b.jpg", "a.jpg", "Zoo/c.jpg"))
         registerFiles("a.jpg", "b.jpg", "Zoo/c.jpg")
 
-        dao.setFileCompleted(ROOT, "b.jpg", completed = true, now = 2000)
-        dao.setFileCompleted(ROOT, "Zoo/c.jpg", completed = true, now = 2000)
+        dao.setTaskCompleted(dao.taskIdOf(ROOT, "b.jpg"), completed = true, now = 2000)
+        dao.setTaskCompleted(dao.taskIdOf(ROOT, "Zoo/c.jpg"), completed = true, now = 2000)
 
         // Case-insensitive, so a receiver that reads the list sees it in the order it was scanned.
         assertEquals(listOf("b.jpg", "Zoo/c.jpg"), dao.getCheckedFilePaths(ROOT))
@@ -75,7 +78,7 @@ class CurrentStateTest {
     fun `a file checked where no list is looking is still one the delete can take`() = runTest {
         // Quick Review over a folder no List covers. The feature that deletes checked files has to
         // see this file too, or it is lying about what "checked" means.
-        dao.setFileCompleted(ROOT, "lonely.jpg", completed = true, now = 2000)
+        dao.setTaskCompleted(dao.taskIdOf(ROOT, "lonely.jpg"), completed = true, now = 2000)
 
         assertEquals(listOf("lonely.jpg"), dao.getCheckedFilePaths(ROOT))
     }
@@ -84,9 +87,10 @@ class CurrentStateTest {
     fun `an unchecked file is not one the delete would take`() = runTest {
         folderList(folderPath = "", files = listOf("a.jpg"))
         registerFiles("a.jpg")
+        val taskId = dao.taskIdOf(ROOT, "a.jpg")
 
-        dao.setFileCompleted(ROOT, "a.jpg", completed = true, now = 2000)
-        dao.setFileCompleted(ROOT, "a.jpg", completed = false, now = 3000)
+        dao.setTaskCompleted(taskId, completed = true, now = 2000)
+        dao.setTaskCompleted(taskId, completed = false, now = 3000)
 
         assertEquals(emptyList<String>(), dao.getCheckedFilePaths(ROOT))
     }
@@ -95,8 +99,8 @@ class CurrentStateTest {
     fun `the count on the card is the number of files the delete would take`() = runTest {
         folderList(folderPath = "", files = listOf("a.jpg", "b.jpg", "c.jpg"))
         registerFiles("a.jpg", "b.jpg", "c.jpg")
-        dao.setFileCompleted(ROOT, "a.jpg", completed = true, now = 2000)
-        dao.setFileCompleted(ROOT, "c.jpg", completed = true, now = 2000)
+        dao.setTaskCompleted(dao.taskIdOf(ROOT, "a.jpg"), completed = true, now = 2000)
+        dao.setTaskCompleted(dao.taskIdOf(ROOT, "c.jpg"), completed = true, now = 2000)
 
         // The card and the confirmation dialog are built by two different queries, and a card that
         // promises three files while the dialog lists two is the worst version of this bug.
@@ -108,8 +112,8 @@ class CurrentStateTest {
     fun `deleting the checked files takes exactly them, and keeps every decision`() = runTest {
         val listId = folderList(folderPath = "", files = listOf("a.jpg", "b.jpg"))
         registerFiles("a.jpg", "b.jpg")
-        dao.setFileCompleted(ROOT, "a.jpg", completed = true, now = 2000)
-        dao.setFileCompleted(ROOT, "b.jpg", completed = true, now = 2000)
+        dao.setTaskCompleted(dao.taskIdOf(ROOT, "a.jpg"), completed = true, now = 2000)
+        dao.setTaskCompleted(dao.taskIdOf(ROOT, "b.jpg"), completed = true, now = 2000)
 
         val taken = dao.getCheckedFilePaths(ROOT)
         dao.markFilesDeleted(ROOT, taken)
@@ -128,7 +132,7 @@ class CurrentStateTest {
     fun `a file that came back is offered for deletion again`() = runTest {
         folderList(folderPath = "", files = listOf("a.jpg"))
         registerFiles("a.jpg")
-        dao.setFileCompleted(ROOT, "a.jpg", completed = true, now = 2000)
+        dao.setTaskCompleted(dao.taskIdOf(ROOT, "a.jpg"), completed = true, now = 2000)
         dao.markFilesDeleted(ROOT, listOf("a.jpg"))
         assertEquals(emptyList<String>(), dao.getCheckedFilePaths(ROOT))
 
@@ -155,7 +159,7 @@ class CurrentStateTest {
     @Test
     fun `folder ticks report each registered file's own state`() = runTest {
         registerFiles("a.jpg", "b.jpg")
-        dao.setFileCompleted(ROOT, "a.jpg", completed = true, now = 2000)
+        dao.setTaskCompleted(dao.taskIdOf(ROOT, "a.jpg"), completed = true, now = 2000)
 
         assertEquals(
             mapOf("a.jpg" to true, "b.jpg" to false),
@@ -168,7 +172,7 @@ class CurrentStateTest {
         val listId = folderList(folderPath = "", files = listOf("a.jpg"))
         registerFiles("a.jpg")
 
-        dao.setFileCompleted(ROOT, "a.jpg", completed = true, now = 2000)
+        dao.setTaskCompleted(dao.taskIdOf(ROOT, "a.jpg"), completed = true, now = 2000)
 
         // Two queries over one fact. The list's page is the one that did the deciding; the browser
         // ticks are the one that has to notice without being told.
@@ -181,7 +185,7 @@ class CurrentStateTest {
     @Test
     fun `an undecided file is still in the queue, carrying nothing decided`() = runTest {
         registerFiles("a.jpg", "b.jpg")
-        dao.setFileCompleted(ROOT, "a.jpg", completed = true, now = 2000)
+        dao.setTaskCompleted(dao.taskIdOf(ROOT, "a.jpg"), completed = true, now = 2000)
 
         val states = dao.observeFileStates(ROOT, listOf("a.jpg", "b.jpg")).first()
 
@@ -208,7 +212,7 @@ class CurrentStateTest {
                 )
             )
         )
-        dao.setFileCompleted(ROOT, "a.jpg", completed = true, now = 2000)
+        dao.setTaskCompleted(dao.taskIdOf(ROOT, "a.jpg"), completed = true, now = 2000)
 
         // A path is only unique *under a grant*, and `(rootUri, relativePath)` is what the Asset's
         // uniqueness is declared on. Resolving a decision by path alone would hand one root's
@@ -230,8 +234,8 @@ class CurrentStateTest {
     @Test
     fun `the one-shot read agrees with the observed one`() = runTest {
         registerFiles("a.jpg", "b.jpg")
-        dao.setFileCompleted(ROOT, "a.jpg", completed = true, now = 2000)
-        dao.setFileAction(ROOT, "b.jpg", ItemAction.Favourite, enabled = true, now = 2000)
+        dao.setTaskCompleted(dao.taskIdOf(ROOT, "a.jpg"), completed = true, now = 2000)
+        dao.setTaskAction(dao.taskIdOf(ROOT, "b.jpg"), ItemAction.Favourite, enabled = true, now = 2000)
 
         val observed = dao.observeFileStates(ROOT, listOf("a.jpg", "b.jpg")).first()
             .associate { it.relativePath to it.decisions }
@@ -250,7 +254,7 @@ class CurrentStateTest {
     @Test
     fun `a stale column on the file's own row is never the answer`() = runTest {
         registerFiles("a.jpg")
-        dao.setFileCompleted(ROOT, "a.jpg", completed = true, now = 2000)
+        dao.setTaskCompleted(dao.taskIdOf(ROOT, "a.jpg"), completed = true, now = 2000)
 
         // A value left behind by an older version, or by a write that went somewhere else. Whichever
         // copy the reads consult, it must not be this one — a second answer that can disagree is
@@ -271,7 +275,7 @@ class CurrentStateTest {
     fun `a stale presence flag on the registration is never the answer either`() = runTest {
         folderList(folderPath = "", files = listOf("a.jpg"))
         registerFiles("a.jpg")
-        dao.setFileCompleted(ROOT, "a.jpg", completed = true, now = 2000)
+        dao.setTaskCompleted(dao.taskIdOf(ROOT, "a.jpg"), completed = true, now = 2000)
 
         // A value the migration wrote and nothing has maintained since. Reading it would report a
         // file that is sitting right there as gone, and drop it out of a deletion the user asked
@@ -287,7 +291,7 @@ class CurrentStateTest {
     fun `a file that is gone is flagged on the file, not on the registration`() = runTest {
         folderList(folderPath = "", files = listOf("a.jpg"))
         registerFiles("a.jpg")
-        dao.setFileCompleted(ROOT, "a.jpg", completed = true, now = 2000)
+        dao.setTaskCompleted(dao.taskIdOf(ROOT, "a.jpg"), completed = true, now = 2000)
 
         dao.markFilesDeleted(ROOT, listOf("a.jpg"))
 
@@ -307,7 +311,7 @@ class CurrentStateTest {
     fun `a stale column on a list row is never the answer either`() = runTest {
         val listId = folderList(folderPath = "", files = listOf("a.jpg"))
         registerFiles("a.jpg")
-        dao.setFileCompleted(ROOT, "a.jpg", completed = true, now = 2000)
+        dao.setTaskCompleted(dao.taskIdOf(ROOT, "a.jpg"), completed = true, now = 2000)
 
         rawExec("UPDATE list_items SET isCompleted = 0")
 
@@ -326,7 +330,7 @@ class CurrentStateTest {
     fun `every query that reports an item's state agrees about it`() = runTest {
         val listId = folderList(folderPath = "", files = listOf("a.jpg"))
         registerFiles("a.jpg")
-        dao.setFileCompleted(ROOT, "a.jpg", completed = true, now = 2000)
+        dao.setTaskCompleted(dao.taskIdOf(ROOT, "a.jpg"), completed = true, now = 2000)
         rawExec("UPDATE list_items SET isCompleted = 0")
 
         assertTrue(dao.observeItems(listId).first().single().decisions.isCompleted)
@@ -342,7 +346,7 @@ class CurrentStateTest {
         database.writeLegacyManualItem(listId, "Buy milk", now = 1000)
         val milk = dao.getItems(listId).single()
 
-        dao.setManualItemCompleted(listId, milk.id, completed = true, now = 2000)
+        dao.setTaskCompleted(milk.taskId, completed = true, now = 2000)
 
         // A manual item has no file, so there is nothing for it to share a decision with, and no
         // second copy to disagree with.
@@ -355,10 +359,10 @@ class CurrentStateTest {
         val listId = manualList()
         database.writeLegacyManualItem(listId, "Buy milk", now = 1000)
         val milk = dao.getItems(listId).single()
-        dao.setManualItemCompleted(listId, milk.id, completed = true, now = 2000)
+        dao.setTaskCompleted(milk.taskId, completed = true, now = 2000)
 
-        dao.setManualItemAction(milk.id, ItemAction.Favourite, enabled = true, now = 3000)
-        dao.setManualItemAction(milk.id, ItemAction.Favourite, enabled = false, now = 4000)
+        dao.setTaskAction(milk.taskId, ItemAction.Favourite, enabled = true, now = 3000)
+        dao.setTaskAction(milk.taskId, ItemAction.Favourite, enabled = false, now = 4000)
 
         val after = dao.getItems(listId).single().decisions
         assertFalse(after.isFavorite)

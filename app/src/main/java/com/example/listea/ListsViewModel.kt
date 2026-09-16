@@ -765,33 +765,20 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * Checks or unchecks one item, wherever the user is looking at it from.
      *
-     * The routing is the whole of the new model: a file's decision goes to the file and reaches
-     * every List holding it, a manual entry's stays on its row. Either way the write takes the
-     * ordering lock and the deliveries it may trigger run outside it.
+     * The write is addressed by the item's Task, not by where the item was reached from: a file's
+     * decision goes to the file's Task and reaches every List holding it, a manual entry's to its
+     * own Task. Either way the write takes the ordering lock and the deliveries it may trigger run
+     * outside it.
      */
     fun setItemCompleted(item: ReviewItem, completed: Boolean) = launchDb {
-        when (val target = item.target) {
-            is DecisionTarget.File -> {
-                // The transition and whether a round is open are read under one lock. The exit
-                // that closes the round is a separate coroutine racing this one, and only the
-                // lock guarantees it cannot close it between the write and the decision.
-                val (transitioned, inRound) = writeOrder.withLock {
-                    val ids =
-                        dao.setFileCompleted(target.rootUri, target.relativePath, completed, now())
-                    ids to ids.filterTo(mutableSetOf()) { it in openReviewRounds }
-                }
-                transitioned.forEach { onCompletionTransition(it, true, it in inRound) }
-            }
-
-            is DecisionTarget.ManualItem -> {
-                val (transitioned, inRound) = writeOrder.withLock {
-                    val done =
-                        dao.setManualItemCompleted(target.listId, target.itemId, completed, now())
-                    done to (target.listId in openReviewRounds)
-                }
-                onCompletionTransition(target.listId, transitioned, inRound)
-            }
+        // The transition and whether a round is open are read under one lock. The exit that closes
+        // the round is a separate coroutine racing this one, and only the lock guarantees it cannot
+        // close it between the write and the decision.
+        val (transitioned, inRound) = writeOrder.withLock {
+            val ids = dao.setTaskCompleted(item.taskId, completed, now())
+            ids to ids.filterTo(mutableSetOf()) { it in openReviewRounds }
         }
+        transitioned.forEach { onCompletionTransition(it, true, it in inRound) }
     }
 
     /**
@@ -818,7 +805,7 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
             customActions = item.decisions.customActions
         )
         val (transitioned, inRound) = writeOrder.withLock {
-            val ids = dao.submitReview(item.target, response, terms.template, terms.context, now())
+            val ids = dao.submitReview(item.taskId, response, terms.template, terms.context, now())
             ids to ids.filterTo(mutableSetOf()) { it in openReviewRounds }
         }
         transitioned.forEach { onCompletionTransition(it, true, it in inRound) }
@@ -831,13 +818,7 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun setItemAction(item: ReviewItem, action: ItemAction, enabled: Boolean) = launchDb {
         writeOrder.withLock {
-            when (val target = item.target) {
-                is DecisionTarget.File ->
-                    dao.setFileAction(target.rootUri, target.relativePath, action, enabled, now())
-
-                is DecisionTarget.ManualItem ->
-                    dao.setManualItemAction(target.itemId, action, enabled, now())
-            }
+            dao.setTaskAction(item.taskId, action, enabled, now())
         }
     }
 

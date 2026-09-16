@@ -137,61 +137,33 @@ abstract class ListsDao {
     protected abstract suspend fun deleteListRowsForRoot(rootUri: String): Int
 
     /**
-     * Checks or unchecks a *manual* item, whose state really is its own.
+     * Checks or unchecks a Task, from wherever it was reached.
      *
-     * Manual items cannot be created any more, but the ones an older database already holds are
-     * still reviewable and editable exactly as they were, so this path stays until its last row
-     * does. It is the compatibility case, not a live feature: nothing in v0.2 reaches it except a
-     * row that predates v0.2.
-     *
-     * A manual entry has no file to share a decision with, so this reaches its Task directly and
-     * can only ever affect the list the row is in. It writes to the Task like every other
-     * completion write: what makes an item manual is the shape of its Task — one with no Asset —
-     * and not a second place for its state to live.
-     *
-     * A row that has gone from underneath this call writes nothing and still recomputes, which is
-     * what the previous version did too: the update matched no rows and the list was re-evaluated
-     * regardless.
-     */
-    @Transaction
-    open suspend fun setManualItemCompleted(
-        listId: Long,
-        itemId: Long,
-        completed: Boolean,
-        now: Long
-    ): Boolean {
-        val wasComplete = isComplete(listId) == true
-        taskIdForItem(itemId)?.let { taskId ->
-            writeTaskState(taskId, now) { it.copy(isCompleted = completed) }
-        }
-        refreshCompletion(listId, now)
-        return !wasComplete && isComplete(listId) == true
-    }
-
-    /**
-     * Checks or unchecks a *file*, from wherever it was reached.
-     *
-     * One write, and then every list that happens to contain that file is re-evaluated — which is
-     * the point of moving the state onto the file. Checking the last unreviewed file of a folder
+     * The one completion write, and the reason it is addressed by a Task's id rather than by a
+     * file's location: what is being judged is the Task, and a Task reached from two Lists, from a
+     * folder Quick Review and from nowhere any List covers is still one Task. One write
+     * re-evaluates every List that contains it, so checking the last unreviewed file of a folder
      * from a Quick Review that knows nothing about any List still completes the List covering it,
-     * and still fires that List's webhook, because completion is recomputed here for every list
-     * the file belongs to.
+     * and still fires that List's webhook.
      *
-     * Returns the lists that moved from incomplete to complete, so the caller fires exactly one
-     * completion action per list that actually transitioned. Non-overlap means that is at most
-     * one today; nothing here assumes it.
+     * A Task that has gone — a membership removed, taking a manual Task with it — has no Lists left
+     * to re-evaluate, and the state write is a silent no-op: nothing is minted to stand in for it,
+     * and no completion is reported.
+     *
+     * Returns the Lists that moved from incomplete to complete, so the caller fires exactly one
+     * completion action per List that actually transitioned. Non-overlap means that is at most one
+     * today; nothing here assumes it.
      */
     @Transaction
-    open suspend fun setFileCompleted(
-        rootUri: String,
-        relativePath: String,
+    open suspend fun setTaskCompleted(
+        taskId: String,
         completed: Boolean,
         now: Long
     ): List<Long> {
-        val affected = listsContainingFile(rootUri, relativePath)
+        val affected = listsContainingTask(taskId)
         val wasComplete = affected.filter { isComplete(it) == true }.toSet()
 
-        writeFileState(rootUri, relativePath, now) { it.copy(isCompleted = completed) }
+        writeTaskState(taskId, now) { it.copy(isCompleted = completed) }
 
         return refreshAffected(affected, wasComplete, now)
     }
@@ -201,11 +173,15 @@ abstract class ListsDao {
      * committed a response to it.
      *
      * The other half of the fork §5 turns on, and the only method here that appends a
-     * [ReviewEventEntity]. [setFileCompleted] and [setManualItemCompleted] write the same
-     * [TaskStateEntity] field and record nothing, because every other reason a Task's completion
-     * moves — a checkbox on the List's own page, a bulk edit, a migration backfill — is not
-     * somebody's verdict. No caller inherits event-writing by asking for "completed": a submission
-     * has to say so.
+     * [ReviewEventEntity]. [setTaskCompleted] writes the same [TaskStateEntity] field and records
+     * nothing, because every other reason a Task's completion moves — a checkbox on the List's own
+     * page, a bulk edit, a migration backfill — is not somebody's verdict. No caller inherits
+     * event-writing by asking for "completed": a submission has to say so.
+     *
+     * Addressed by the Task's id like every Task-level write: the Task was resolved long before the
+     * review surface showed it, so a submission can never be a reason to mint one. A submission
+     * about a Task that has gone writes nothing — neither state nor event — because a judgment
+     * filed against a Task nobody can reach would be a judgment against nothing.
      *
      * The state and the event are written in one transaction, so a judgment and the state it
      * committed cannot be observed apart. The response is written as given rather than recomputed
@@ -214,42 +190,40 @@ abstract class ListsDao {
      * answer nothing.
      *
      * Returns the Lists that this moved from incomplete to complete, on the same terms as
-     * [setFileCompleted], so whoever called it fires the completion action exactly as before.
+     * [setTaskCompleted], so whoever called it fires the completion action exactly as before.
      */
     @Transaction
     open suspend fun submitReview(
-        target: DecisionTarget,
+        taskId: String,
         response: ReviewResponse,
         template: TemplateVersionRef,
         context: ReviewContext?,
         now: Long
     ): List<Long> {
-        val taskId = when (target) {
-            is DecisionTarget.File -> taskForContent(target.rootUri, target.relativePath, now)
-            is DecisionTarget.ManualItem -> taskIdForItem(target.itemId) ?: return emptyList()
-        }
-        val affected = when (target) {
-            is DecisionTarget.File -> listsContainingFile(target.rootUri, target.relativePath)
-            is DecisionTarget.ManualItem -> listOf(target.listId)
-        }
+        val affected = listsContainingTask(taskId)
         val wasComplete = affected.filter { isComplete(it) == true }.toSet()
 
-        writeTaskState(taskId, now) { it.copy(isCompleted = response.completesTask) }
+        val written = writeTaskState(taskId, now) { it.copy(isCompleted = response.completesTask) }
 
-        val (kind, ref) = reviewContextColumns(context)
-        insertReviewEvent(
-            ReviewEventEntity(
-                id = ReviewEventId.new().value,
-                taskId = taskId,
-                at = now,
-                kind = ReviewEventKind.SUBMITTED.key,
-                templateId = template.templateId.value,
-                templateVersion = template.version,
-                response = response.encode(),
-                contextKind = kind,
-                contextRef = ref
+        // A write that found no state row is a submission about a Task that no longer exists, and
+        // nothing is recorded against it: an event naming a Task nobody can reach would be a
+        // judgment filed against nothing.
+        if (written != null) {
+            val (kind, ref) = reviewContextColumns(context)
+            insertReviewEvent(
+                ReviewEventEntity(
+                    id = ReviewEventId.new().value,
+                    taskId = taskId,
+                    at = now,
+                    kind = ReviewEventKind.SUBMITTED.key,
+                    templateId = template.templateId.value,
+                    templateVersion = template.version,
+                    response = response.encode(),
+                    contextKind = kind,
+                    contextRef = ref
+                )
             )
-        )
+        }
 
         return refreshAffected(affected, wasComplete, now)
     }
@@ -725,7 +699,7 @@ abstract class ListsDao {
     }
 
     /**
-     * Sets one review action on a manual item. Action metadata only: it deliberately does not call
+     * Sets one review action on a Task. Action metadata only: it deliberately does not call
      * [refreshCompletion] and returns nothing, so it can never report a completion transition and
      * therefore can never cause a webhook to be delivered.
      *
@@ -735,62 +709,13 @@ abstract class ListsDao {
      * two actions toggled at once cannot each write a set that never saw the other.
      */
     @Transaction
-    open suspend fun setManualItemAction(
-        itemId: Long,
+    open suspend fun setTaskAction(
+        taskId: String,
         action: ItemAction,
         enabled: Boolean,
         now: Long
     ) {
-        val taskId = taskIdForItem(itemId) ?: return
         writeTaskState(taskId, now) { action.setOn(it, enabled) }
-    }
-
-    /** The same, on a file, so every list holding it sees the action. Still never completes. */
-    @Transaction
-    open suspend fun setFileAction(
-        rootUri: String,
-        relativePath: String,
-        action: ItemAction,
-        enabled: Boolean,
-        now: Long
-    ) {
-        writeFileState(rootUri, relativePath, now) { action.setOn(it, enabled) }
-    }
-
-    /**
-     * Read-modify-write of one file's decisions, registering the file and minting its Task on the
-     * first decision anybody makes about it.
-     *
-     * Three things have to exist before a decision about a file is visible from every screen that
-     * asks about it, and they are made together: the registration row a folder review resolves the
-     * file through, the Task that owns the decision, and the state row the decision is actually
-     * written into. (A fourth follows from it: the name the file goes onto the wire under, which is
-     * [assignLegacyItemIds] copying the registration's id across once the Asset above exists.)
-     * Registration is IGNORE-inserted, so
-     * a file already known is left exactly as it was; [taskForContent] resolves by `(rootUri,
-     * relativePath)`, so a file another List has already decided about lands on the same Task
-     * rather than a rival one.
-     *
-     * Callers are already inside a transaction, so none of this can interleave with another
-     * decision about the same file.
-     */
-    protected open suspend fun writeFileState(
-        rootUri: String,
-        relativePath: String,
-        now: Long,
-        change: (ReviewDecisions) -> ReviewDecisions
-    ) {
-        registerFiles(
-            listOf(
-                FileReviewStateEntity(
-                    publicId = newItemPublicId(fileIdentity(relativePath), now),
-                    rootUri = rootUri,
-                    relativePath = relativePath,
-                    updatedAt = now
-                )
-            )
-        )
-        writeTaskState(taskForContent(rootUri, relativePath, now), now, change)
     }
 
     /**
@@ -910,19 +835,21 @@ abstract class ListsDao {
         relativePaths: List<String>
     ): List<FileReviewStateEntity>
 
-    /** Every list holding this file, so a decision about it can reach all of them. */
+    /**
+     * Every list containing this Task, so a decision about it can reach all of them.
+     *
+     * Index-backed by `index_list_items_taskId`: a file in two Lists returns both, a Task no List
+     * covers returns empty, and two Lists over one folder share one Task so still name it together.
+     */
     @Query(
         """
         SELECT DISTINCT l.id
         FROM list_items i
         JOIN lists l ON l.id = i.listId
-        WHERE l.sourceRootUri = :rootUri AND i.rootRelativePath = :relativePath
+        WHERE i.taskId = :taskId
         """
     )
-    protected abstract suspend fun listsContainingFile(
-        rootUri: String,
-        relativePath: String
-    ): List<Long>
+    protected abstract suspend fun listsContainingTask(taskId: String): List<Long>
 
     /**
      * Gives each of these files a Task if it has none, and answers with every one it now has.
@@ -934,9 +861,9 @@ abstract class ListsDao {
      * about it yet — "every Task has exactly one state" is what the whole read model rests on, and
      * a registration is not a Task.
      *
-     * Minting here rather than at registration is the same choice [writeFileState] makes: what
-     * creates a Task is a reason to have one. Looking at a folder is a reason. [ListsDao.registerFiles]
-     * is not, and it stays the cheap idempotent insert it was.
+     * Minting here rather than at registration is the same choice every resolution path makes:
+     * what creates a Task is a reason to have one. Looking at a folder is a reason.
+     * [ListsDao.registerFiles] is not, and it stays the cheap idempotent insert it was.
      *
      * One transaction for the whole listing, because it is one answer to one question and a folder
      * half-resolved would hand its queue a mixture of new Tasks and none.
@@ -1234,42 +1161,29 @@ abstract class ListsDao {
      * caller's transaction, so two actions toggled at once cannot each write a set that never saw
      * the other.
      *
-     * The row is upserted by hand rather than with `@Upsert` for the reason [taskForContent] gives:
-     * the key here is the Task, and a Task's state is created with the Task. An absent row means
-     * this call is the first thing to touch the Task, not that something is wrong.
+     * Update-only, deliberately. A Task's state row is created with the Task — [taskForContent]
+     * inserts it, the migration inserts it — so an absent row does not mean "this is the first
+     * thing to touch the Task", it means the Task has gone. A write addressed at a vanished Task is
+     * therefore a silent no-op (zero rows updated) rather than a mint or a foreign-key violation:
+     * nothing on a write path is allowed to conjure a replacement Task because an address missed.
      *
-     * Returns what was written rather than nothing, because a caller that has to record *what it
-     * committed* — [submitReview] — must record the state as it stood after the write and not as
-     * the caller guessed before it. Returning the value is what keeps that from being a second read
-     * that could see something else.
+     * Returns null when there was no row to update, so [submitReview] can tell a no-op from a
+     * write and decline to record an event against a Task that no longer exists.
      */
     protected open suspend fun writeTaskState(
         taskId: String,
         now: Long,
         change: (ReviewDecisions) -> ReviewDecisions
-    ): ReviewDecisions {
-        val existing = getTaskState(taskId)
-        val next = change(existing?.decisions ?: ReviewDecisions())
-        val encoded = encodeActionIds(next.customActions)
-        if (existing == null) {
-            insertTaskState(
-                TaskStateEntity(
-                    taskId = taskId,
-                    isCompleted = next.isCompleted,
-                    isFavorite = next.isFavorite,
-                    customActions = encoded,
-                    updatedAt = now
-                )
-            )
-        } else {
-            updateTaskState(
-                taskId = taskId,
-                isCompleted = next.isCompleted,
-                isFavorite = next.isFavorite,
-                customActions = encoded,
-                updatedAt = now
-            )
-        }
+    ): ReviewDecisions? {
+        val existing = getTaskState(taskId) ?: return null
+        val next = change(existing.decisions)
+        updateTaskState(
+            taskId = taskId,
+            isCompleted = next.isCompleted,
+            isFavorite = next.isFavorite,
+            customActions = encodeActionIds(next.customActions),
+            updatedAt = now
+        )
         return next
     }
 
@@ -1350,10 +1264,6 @@ abstract class ListsDao {
     @Query("DELETE FROM list_items WHERE id = :id")
     protected abstract suspend fun deleteItem(id: Long)
 
-    /** The Task a membership row is of. Null only if the row has already gone. */
-    @Query("SELECT taskId FROM list_items WHERE id = :itemId")
-    protected abstract suspend fun taskIdForItem(itemId: Long): String?
-
     @Query("SELECT COALESCE(MAX(sortOrder), -1) FROM list_items WHERE listId = :listId")
     protected abstract suspend fun maxSortOrder(listId: Long): Int
 
@@ -1367,13 +1277,19 @@ abstract class ListsDao {
      * the Task's, which is also what a folder's Quick Review writes. Reading the row's own column
      * here would leave a list permanently incomplete the moment its files were checked from
      * somewhere other than the list.
+     *
+     * Left-joined with a `COALESCE` so it agrees with [itemCount], which counts `list_items`
+     * outright: a membership whose Task somehow lacked state would otherwise vanish from this
+     * count and mark a list complete on the rows that remain. Unreachable in practice — a Task's
+     * state is created with it — but the count that decides completion should not silently drop a
+     * row on an invariant rather than failing it.
      */
     @Query(
         """
         SELECT COUNT(*)
         FROM list_items i
-        JOIN task_state ts ON ts.taskId = i.taskId
-        WHERE i.listId = :listId AND ts.isCompleted = 0
+        LEFT JOIN task_state ts ON ts.taskId = i.taskId
+        WHERE i.listId = :listId AND COALESCE(ts.isCompleted, 0) = 0
         """
     )
     protected abstract suspend fun unfinishedItemCount(listId: Long): Int

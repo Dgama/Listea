@@ -19,13 +19,16 @@ import org.robolectric.annotation.Config
 /**
  * The three facts v0.2 must not change while it rebuilds everything underneath them.
  *
- * A decision about a file lives on the file, so every list holding it sees it; progress is counted
- * from that resolved decision rather than from any row's own column; and a list completes when its
- * last unresolved item resolves, from whichever screen did the resolving.
+ * A decision about a file lives on the file's Task, so every list holding it sees it; progress is
+ * counted from that resolved decision rather than from any row's own column; and a list completes
+ * when its last unresolved item resolves, from whichever screen did the resolving.
  *
  * Real SQLite through Room rather than a fake, because all three are properties of the SQL: the
  * projection is a CASE over a LEFT JOIN, and a test that mocked the DAO would be asserting the
  * mock instead.
+ *
+ * The completion write is addressed by Task id, the way the app writes it: a test below resolves a
+ * file's Task once and then writes about that Task, never about the file's location.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -56,7 +59,7 @@ class ListsDaoTest {
         val listId = folderList(folderPath = "2026-07-11", files = listOf("a.jpg"))
         dao.registerFiles(listOf(fileState("2026-07-11/a.jpg")))
 
-        dao.setFileCompleted(ROOT, "2026-07-11/a.jpg", completed = true, now = 2000)
+        dao.setTaskCompleted(taskId(listId, "a.jpg"), completed = true, now = 2000)
 
         // One file in this fixture, so one Task and one state row: no subquery needed to name it.
         assertEquals(1, rawInt("SELECT isCompleted FROM task_state"))
@@ -73,12 +76,13 @@ class ListsDaoTest {
     fun `every list holding a file sees one decision about it`() = runTest {
         // Two scopes that overlap: one over the root, one over the folder the file sits in. Both
         // resolve the same file to the same root-relative path, which is the whole point of
-        // storing a decision against a path rather than against a row.
+        // storing a decision against a Task rather than against a row.
         val overRoot = folderList(folderPath = "", files = listOf("2026-07-11/a.jpg"), title = "All")
         val overFolder = folderList(folderPath = "2026-07-11", files = listOf("a.jpg"), title = "Day")
         dao.registerFiles(listOf(fileState("2026-07-11/a.jpg")))
 
-        val transitioned = dao.setFileCompleted(ROOT, "2026-07-11/a.jpg", completed = true, now = 2000)
+        val transitioned =
+            dao.setTaskCompleted(taskId(overRoot, "2026-07-11/a.jpg"), completed = true, now = 2000)
 
         assertEquals(true, dao.getItems(overRoot).single().isCompleted)
         assertEquals(true, dao.getItems(overFolder).single().isCompleted)
@@ -92,7 +96,7 @@ class ListsDaoTest {
         val listId = folderList(folderPath = "2026-07-11", files = listOf("a.jpg"))
         dao.registerFiles(listOf(fileState("2026-07-11/a.jpg")))
 
-        dao.setFileCompleted(ROOT, "2026-07-11/a.jpg", completed = true, now = 2000)
+        dao.setTaskCompleted(taskId(listId, "a.jpg"), completed = true, now = 2000)
 
         // The list the folder belongs to was told, without the folder review knowing it exists.
         assertEquals(true, dao.getItems(listId).single().isCompleted)
@@ -101,7 +105,7 @@ class ListsDaoTest {
     @Test
     fun `registering a file asserts nothing about it`() = runTest {
         val listId = folderList(folderPath = "2026-07-11", files = listOf("a.jpg"))
-        dao.setFileCompleted(ROOT, "2026-07-11/a.jpg", completed = true, now = 2000)
+        dao.setTaskCompleted(taskId(listId, "a.jpg"), completed = true, now = 2000)
 
         // IGNORE, not REPLACE: resolving the folder for review must never undo last month's work.
         dao.registerFiles(listOf(fileState("2026-07-11/a.jpg")))
@@ -116,7 +120,7 @@ class ListsDaoTest {
         val listId = folderList(folderPath = "2026-07-11", files = listOf("a.jpg", "b.jpg"))
         dao.registerFiles(listOf(fileState("2026-07-11/a.jpg"), fileState("2026-07-11/b.jpg")))
 
-        dao.setFileCompleted(ROOT, "2026-07-11/a.jpg", completed = true, now = 2000)
+        dao.setTaskCompleted(taskId(listId, "a.jpg"), completed = true, now = 2000)
 
         val summary = dao.observeSummaries().first().single()
         assertEquals(listId, summary.id)
@@ -143,7 +147,7 @@ class ListsDaoTest {
         database.writeLegacyManualItem(listId, "Buy milk", now = 1000)
 
         val manual = dao.getItems(listId).single { it.sourceRelativePath == null }
-        dao.setManualItemCompleted(listId, manual.id, completed = true, now = 2000)
+        dao.setTaskCompleted(manual.taskId, completed = true, now = 2000)
 
         val summary = dao.observeSummaries().first().single()
         assertEquals(2, summary.totalItems)
@@ -154,7 +158,7 @@ class ListsDaoTest {
     fun `folder scope progress resolves the same way`() = runTest {
         val listId = folderList(folderPath = "2026-07-11", files = listOf("a.jpg", "b.jpg"))
         dao.registerFiles(listOf(fileState("2026-07-11/a.jpg")))
-        dao.setFileCompleted(ROOT, "2026-07-11/a.jpg", completed = true, now = 2000)
+        dao.setTaskCompleted(taskId(listId, "a.jpg"), completed = true, now = 2000)
 
         val scope = dao.observeFolderScopes(ROOT).first().single()
 
@@ -171,7 +175,8 @@ class ListsDaoTest {
         val listId = folderList(folderPath = "2026-07-11", files = listOf("a.jpg"))
         dao.registerFiles(listOf(fileState("2026-07-11/a.jpg")))
 
-        val transitioned = dao.setFileCompleted(ROOT, "2026-07-11/a.jpg", completed = true, now = 2000)
+        val transitioned =
+            dao.setTaskCompleted(taskId(listId, "a.jpg"), completed = true, now = 2000)
 
         assertEquals(listOf(listId), transitioned)
         assertNotNull(dao.getList(listId)?.completedAt)
@@ -181,12 +186,15 @@ class ListsDaoTest {
     fun `a transition is reported once, and only on the way up`() = runTest {
         val listId = folderList(folderPath = "2026-07-11", files = listOf("a.jpg", "b.jpg"))
         dao.registerFiles(listOf(fileState("2026-07-11/a.jpg"), fileState("2026-07-11/b.jpg")))
-        dao.setFileCompleted(ROOT, "2026-07-11/a.jpg", completed = true, now = 2000)
+        dao.setTaskCompleted(taskId(listId, "a.jpg"), completed = true, now = 2000)
 
-        val whenItCompletes = dao.setFileCompleted(ROOT, "2026-07-11/b.jpg", completed = true, now = 3000)
+        val whenItCompletes =
+            dao.setTaskCompleted(taskId(listId, "b.jpg"), completed = true, now = 3000)
         // Unchecking and rechecking is not a second completion: the webhook fires on the way up.
-        val whenItIsUndone = dao.setFileCompleted(ROOT, "2026-07-11/b.jpg", completed = false, now = 4000)
-        val whenItCompletesAgain = dao.setFileCompleted(ROOT, "2026-07-11/b.jpg", completed = true, now = 5000)
+        val whenItIsUndone =
+            dao.setTaskCompleted(taskId(listId, "b.jpg"), completed = false, now = 4000)
+        val whenItCompletesAgain =
+            dao.setTaskCompleted(taskId(listId, "b.jpg"), completed = true, now = 5000)
 
         assertEquals(listOf(listId), whenItCompletes)
         assertTrue(whenItIsUndone.isEmpty())
@@ -197,11 +205,11 @@ class ListsDaoTest {
     fun `the original completion time survives an edit that does not break completion`() = runTest {
         val listId = folderList(folderPath = "2026-07-11", files = listOf("a.jpg", "b.jpg"))
         dao.registerFiles(listOf(fileState("2026-07-11/a.jpg"), fileState("2026-07-11/b.jpg")))
-        dao.setFileCompleted(ROOT, "2026-07-11/b.jpg", completed = true, now = 2000)
-        dao.setFileCompleted(ROOT, "2026-07-11/a.jpg", completed = true, now = 3000)
+        dao.setTaskCompleted(taskId(listId, "b.jpg"), completed = true, now = 2000)
+        dao.setTaskCompleted(taskId(listId, "a.jpg"), completed = true, now = 3000)
 
         // A second write that leaves the list complete must not restamp it.
-        dao.setFileCompleted(ROOT, "2026-07-11/a.jpg", completed = true, now = 9000)
+        dao.setTaskCompleted(taskId(listId, "a.jpg"), completed = true, now = 9000)
 
         assertEquals(3000L, dao.getList(listId)?.completedAt ?: 0L)
     }
@@ -217,9 +225,9 @@ class ListsDaoTest {
         database.writeLegacyManualItem(listId, "Buy bread", now = 1000)
 
         val milk = dao.getItems(listId).first { it.title == "Buy milk" }
-        assertEquals(false, dao.setManualItemCompleted(listId, milk.id, true, now = 2000))
+        assertTrue(dao.setTaskCompleted(milk.taskId, true, now = 2000).isEmpty())
         val bread = dao.getItems(listId).first { it.title == "Buy bread" }
-        assertEquals(true, dao.setManualItemCompleted(listId, bread.id, true, now = 3000))
+        assertEquals(listOf(listId), dao.setTaskCompleted(bread.taskId, true, now = 3000))
 
         assertNotNull(dao.getList(listId)?.completedAt)
     }
@@ -229,7 +237,7 @@ class ListsDaoTest {
         val listId = manualList()
         database.writeLegacyManualItem(listId, "Buy milk", now = 1000)
         val milk = dao.getItems(listId).single()
-        dao.setManualItemCompleted(listId, milk.id, true, now = 2000)
+        dao.setTaskCompleted(milk.taskId, true, now = 2000)
         assertNotNull(dao.getList(listId)?.completedAt)
 
         // Vacuously all of nothing is checked; removing the last item is not a completion.
@@ -261,21 +269,20 @@ class ListsDaoTest {
 
     @Test
     fun `a file already decided about keeps the Task that decision was recorded against`() = runTest {
-        // Decided from a List first, then met again in a folder review. A second Task here would
-        // put one file in two queues under two identities, and leave the user's existing checkmark
-        // answering for the one they are not looking at.
-        dao.setFileCompleted(ROOT, "2026-07-11/a.jpg", completed = true, now = 2000)
-        val decided = dao.ensureTasksForFiles(ROOT, listOf("2026-07-11/a.jpg"), now = 3000).single()
+        // Decided first, then met again in a folder review. A second Task here would put one file
+        // in two queues under two identities, and leave the user's existing checkmark answering for
+        // the one they are not looking at.
+        val decided = dao.taskIdOf(ROOT, "2026-07-11/a.jpg")
+        dao.setTaskCompleted(decided, completed = true, now = 2000)
 
-        // Looking again answers the same thing...
-        val again = dao.ensureTasksForFiles(ROOT, listOf("2026-07-11/a.jpg"), now = 4000).single()
+        val again = dao.ensureTasksForFiles(ROOT, listOf("2026-07-11/a.jpg"), now = 3000).single()
 
-        assertEquals(decided.taskId, again.taskId)
+        assertEquals(decided, again.taskId)
         assertEquals(1, rawInt("SELECT COUNT(*) FROM tasks"))
         // ...and opening a folder says nothing about what is in it.
         assertEquals(
             1,
-            rawInt("SELECT isCompleted FROM task_state WHERE taskId = '${decided.taskId}'")
+            rawInt("SELECT isCompleted FROM task_state WHERE taskId = '$decided'")
         )
     }
 
@@ -291,6 +298,10 @@ class ListsDaoTest {
     }
 
     // --- helpers ---------------------------------------------------------------------------------
+
+    /** The Task id of one item of [listId], by its stored title (a file's name for source rows). */
+    private suspend fun taskId(listId: Long, title: String): String =
+        dao.getItems(listId).first { it.title == title }.taskId
 
     private suspend fun folderList(
         folderPath: String,

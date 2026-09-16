@@ -26,6 +26,10 @@ import org.robolectric.annotation.Config
  * *missing distinction*: an app that appends an event for a checkbox claims somebody reviewed work
  * they only tidied, and one that appends for a swipe claims a judgment nobody made.
  *
+ * Every write below is addressed by the Task's id, as production writes are: the Task was resolved
+ * long before the surface showed it, so none of these paths can mint a Task the way the
+ * file-addressed path they replaced once could.
+ *
  * The two halves are deliberately tested together and from the same fixture. A test that only
  * proved submissions write events would pass on an implementation that wrote them everywhere.
  */
@@ -57,9 +61,10 @@ class ReviewSubmissionTest {
     fun `a submission moves the state and records the judgment together`() = runTest {
         val listId = folderList(folderPath = "", files = listOf("a.jpg"))
         registerFiles("a.jpg")
+        val taskId = dao.getItems(listId).single().taskId
 
         val transitioned = dao.submitReview(
-            target = DecisionTarget.File(ROOT, "a.jpg"),
+            taskId = taskId,
             response = media(completed = true),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InFolder(ROOT, ""),
@@ -90,12 +95,13 @@ class ReviewSubmissionTest {
 
     @Test
     fun `the event says what was committed, not only that it was completed`() = runTest {
-        folderList(folderPath = "", files = listOf("a.jpg"))
+        val listId = folderList(folderPath = "", files = listOf("a.jpg"))
         registerFiles("a.jpg")
-        dao.setFileAction(ROOT, "a.jpg", ItemAction.Favourite, enabled = true, now = 1500)
+        val taskId = dao.getItems(listId).single().taskId
+        dao.setTaskAction(taskId, ItemAction.Favourite, enabled = true, now = 1500)
 
         dao.submitReview(
-            target = DecisionTarget.File(ROOT, "a.jpg"),
+            taskId = taskId,
             // What the review surface was showing when the person committed.
             response = media(completed = true, favorite = true, actions = setOf("custom1")),
             template = Templates.MediaRapidReview.ref,
@@ -114,11 +120,12 @@ class ReviewSubmissionTest {
 
     @Test
     fun `the state follows the response rather than assuming every submission completes`() = runTest {
-        folderList(folderPath = "", files = listOf("a.jpg"))
+        val listId = folderList(folderPath = "", files = listOf("a.jpg"))
         registerFiles("a.jpg")
+        val taskId = dao.getItems(listId).single().taskId
 
         dao.submitReview(
-            target = DecisionTarget.File(ROOT, "a.jpg"),
+            taskId = taskId,
             // What a template that offers something other than "deal with this" would commit, and
             // the reason the response leads the write: a submission is a judgment being recorded,
             // and whether that judgment leaves the Task complete is the response's to say. Hard-
@@ -142,9 +149,10 @@ class ReviewSubmissionTest {
     fun `a submission from a list names the list it was conducted under`() = runTest {
         val listId = folderList(folderPath = "", files = listOf("a.jpg"))
         registerFiles("a.jpg")
+        val taskId = dao.getItems(listId).single().taskId
 
         dao.submitReview(
-            target = DecisionTarget.File(ROOT, "a.jpg"),
+            taskId = taskId,
             response = media(completed = true),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InList(ListId(listId)),
@@ -158,9 +166,10 @@ class ReviewSubmissionTest {
     @Test
     fun `a submission from a folder names the folder, and belongs to no list`() = runTest {
         registerFiles("holiday/a.jpg")
+        val taskId = dao.taskIdOf(ROOT, "holiday/a.jpg")
 
         dao.submitReview(
-            target = DecisionTarget.File(ROOT, "holiday/a.jpg"),
+            taskId = taskId,
             response = media(completed = true),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InFolder(ROOT, "holiday"),
@@ -182,7 +191,7 @@ class ReviewSubmissionTest {
         val milk = dao.getItems(listId).single()
 
         dao.submitReview(
-            target = DecisionTarget.ManualItem(listId, milk.id),
+            taskId = milk.taskId,
             response = media(completed = true),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InList(ListId(listId)),
@@ -204,8 +213,9 @@ class ReviewSubmissionTest {
     fun `a checkbox on the list's own page moves the state and records nothing`() = runTest {
         val listId = folderList(folderPath = "", files = listOf("a.jpg"))
         registerFiles("a.jpg")
+        val taskId = dao.getItems(listId).single().taskId
 
-        dao.setFileCompleted(ROOT, "a.jpg", completed = true, now = 2000)
+        dao.setTaskCompleted(taskId, completed = true, now = 2000)
 
         assertEquals(1, rawInt("SELECT isCompleted FROM task_state"))
         assertEquals(true, dao.getItems(listId).single().isCompleted)
@@ -220,24 +230,25 @@ class ReviewSubmissionTest {
         database.writeLegacyManualItem(listId, "Buy milk", now = 1000)
         val milk = dao.getItems(listId).single()
 
-        dao.setManualItemCompleted(listId, milk.id, completed = true, now = 2000)
+        dao.setTaskCompleted(milk.taskId, completed = true, now = 2000)
 
         assertEquals(0, rawInt("SELECT COUNT(*) FROM review_events"))
     }
 
     @Test
     fun `unchecking records nothing, and takes back no event either`() = runTest {
-        folderList(folderPath = "", files = listOf("a.jpg"))
+        val listId = folderList(folderPath = "", files = listOf("a.jpg"))
         registerFiles("a.jpg")
+        val taskId = dao.getItems(listId).single().taskId
         dao.submitReview(
-            target = DecisionTarget.File(ROOT, "a.jpg"),
+            taskId = taskId,
             response = media(completed = true),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InFolder(ROOT, ""),
             now = 2000
         )
 
-        dao.setFileCompleted(ROOT, "a.jpg", completed = false, now = 3000)
+        dao.setTaskCompleted(taskId, completed = false, now = 3000)
 
         assertEquals(0, rawInt("SELECT isCompleted FROM task_state"))
         // Retracting a decision is not committing one, and the judgment that *was* committed
@@ -248,11 +259,12 @@ class ReviewSubmissionTest {
 
     @Test
     fun `marking a favourite or an action records nothing`() = runTest {
-        folderList(folderPath = "", files = listOf("a.jpg"))
+        val listId = folderList(folderPath = "", files = listOf("a.jpg"))
         registerFiles("a.jpg")
+        val taskId = dao.getItems(listId).single().taskId
 
-        dao.setFileAction(ROOT, "a.jpg", ItemAction.Favourite, enabled = true, now = 2000)
-        dao.setFileAction(ROOT, "a.jpg", ItemAction.Custom("custom1"), enabled = true, now = 2100)
+        dao.setTaskAction(taskId, ItemAction.Favourite, enabled = true, now = 2000)
+        dao.setTaskAction(taskId, ItemAction.Custom("custom1"), enabled = true, now = 2100)
 
         assertEquals(1, rawInt("SELECT isFavorite FROM task_state"))
         // A mark is metadata a submission carries a snapshot of, never a submission in itself.
@@ -263,11 +275,12 @@ class ReviewSubmissionTest {
 
     @Test
     fun `re-reviewing an already complete task appends, and leaves the state where it was`() = runTest {
-        folderList(folderPath = "", files = listOf("a.jpg"))
+        val listId = folderList(folderPath = "", files = listOf("a.jpg"))
         registerFiles("a.jpg")
-        dao.setFileAction(ROOT, "a.jpg", ItemAction.Favourite, enabled = true, now = 1500)
+        val taskId = dao.getItems(listId).single().taskId
+        dao.setTaskAction(taskId, ItemAction.Favourite, enabled = true, now = 1500)
         dao.submitReview(
-            target = DecisionTarget.File(ROOT, "a.jpg"),
+            taskId = taskId,
             response = media(completed = true, favorite = true),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InFolder(ROOT, ""),
@@ -275,7 +288,7 @@ class ReviewSubmissionTest {
         )
 
         val second = dao.submitReview(
-            target = DecisionTarget.File(ROOT, "a.jpg"),
+            taskId = taskId,
             response = media(completed = true, favorite = true),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InFolder(ROOT, ""),
@@ -303,7 +316,7 @@ class ReviewSubmissionTest {
         dao.removeItem(listId, milk.id, now = 1500)
 
         val transitioned = dao.submitReview(
-            target = DecisionTarget.ManualItem(listId, milk.id),
+            taskId = taskId,
             response = media(completed = true),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InList(ListId(listId)),
@@ -319,6 +332,40 @@ class ReviewSubmissionTest {
         // source-backed Task is left alone by the same path, which the cleanup tests pin.
         assertEquals(0, rawInt("SELECT COUNT(*) FROM tasks WHERE id = '$taskId'"))
         assertEquals(0, rawInt("SELECT COUNT(*) FROM task_state WHERE taskId = '$taskId'"))
+    }
+
+    // --- the snapshot contract ----------------------------------------------------------------------
+
+    @Test
+    fun `a submission snapshots favourite and actions without mutating them`() = runTest {
+        // The submission's own contract: `completed` is written to state, while `favorite` and
+        // `customActions` ride along as a snapshot of what was true at the moment of judgment. A
+        // submission that wrote those back would turn a record of a judgment into a second way to
+        // make one — and a caller that passes a snapshot disagreeing with current state must get
+        // the disagreement on the record, not have it silently corrected.
+        val listId = folderList(folderPath = "", files = listOf("a.jpg"))
+        registerFiles("a.jpg")
+        val taskId = dao.getItems(listId).single().taskId
+        dao.setTaskAction(taskId, ItemAction.Favourite, enabled = true, now = 1500)
+        dao.setTaskAction(taskId, ItemAction.Custom("kept"), enabled = true, now = 1500)
+
+        dao.submitReview(
+            taskId = taskId,
+            response = media(completed = true, favorite = false, actions = setOf("stale")),
+            template = Templates.MediaRapidReview.ref,
+            context = ReviewContext.InFolder(ROOT, ""),
+            now = 2000
+        )
+
+        // The event holds exactly what was passed — the snapshot, not a recomputed state.
+        assertEquals(
+            "completed=true;favorite=false;actions=stale",
+            rawString("SELECT response FROM review_events")
+        )
+        // The write moved completion and nothing else: the marks on the Task are untouched.
+        assertEquals(1, rawInt("SELECT isCompleted FROM task_state"))
+        assertEquals(1, rawInt("SELECT isFavorite FROM task_state"))
+        assertEquals("kept", rawString("SELECT customActions FROM task_state"))
     }
 
     // --- helpers -----------------------------------------------------------------------------------

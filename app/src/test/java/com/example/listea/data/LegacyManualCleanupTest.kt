@@ -77,8 +77,8 @@ class LegacyManualCleanupTest {
     @Test
     fun `a List going leaves the Tasks of the files it showed`() = runTest {
         val listId = folderList(folderPath = "2026-07-11", files = listOf("a.jpg"))
-        dao.setFileCompleted(ROOT, "2026-07-11/a.jpg", completed = true, now = 2000)
         val fileTask = dao.getItems(listId).single().taskId
+        dao.setTaskCompleted(fileTask, completed = true, now = 2000)
 
         dao.deleteList(listId)
 
@@ -130,8 +130,8 @@ class LegacyManualCleanupTest {
     @Test
     fun `removing a file's row takes the row and leaves the Task`() = runTest {
         val listId = folderList(folderPath = "2026-07-11", files = listOf("a.jpg"))
-        dao.setFileCompleted(ROOT, "2026-07-11/a.jpg", completed = true, now = 2000)
         val item = dao.getItems(listId).single()
+        dao.setTaskCompleted(item.taskId, completed = true, now = 2000)
 
         dao.removeItem(listId, item.id, now = 3000)
 
@@ -150,8 +150,8 @@ class LegacyManualCleanupTest {
         // A folder-backed List, because that is the one that can be reached by a root at all - and
         // the one a cleanup written for manual Lists alone would walk straight past.
         val onRoot = folderList(folderPath = "2026-07-11", files = listOf("a.jpg"))
-        dao.setFileCompleted(ROOT, "2026-07-11/a.jpg", completed = true, now = 2000)
         val onRootFileTask = dao.getItems(onRoot).single().taskId
+        dao.setTaskCompleted(onRootFileTask, completed = true, now = 2000)
         val onRootManual = database.writeLegacyManualItem(onRoot, "Buy milk", now = 1000)
         val elsewhere = folderList(
             rootUri = OTHER_ROOT,

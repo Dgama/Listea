@@ -54,10 +54,10 @@ class CheckedFileReaderTest {
     @Test
     fun `a review submission on a folder list is seen by the delete path with no registration`() =
         runTest {
-            folderList(files = listOf("a.jpg"))
+            val listId = folderList(files = listOf("a.jpg"))
 
             dao.submitReview(
-                target = DecisionTarget.File(ROOT, "a.jpg"),
+                taskId = dao.getItems(listId).single().taskId,
                 response = media(completed = true),
                 template = Templates.MediaRapidReview.ref,
                 context = ReviewContext.InFolder(ROOT, ""),
@@ -78,10 +78,10 @@ class CheckedFileReaderTest {
         // rather than through createFolderList so the fixture is the migration's and not the live
         // write path's.
         val listId = manualList()
-        writeMigratedSourceItem(listId, "a.jpg")
+        val taskId = writeMigratedSourceItem(listId, "a.jpg")
 
         dao.submitReview(
-            target = DecisionTarget.File(ROOT, "a.jpg"),
+            taskId = taskId,
             response = media(completed = true),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InList(com.example.listea.domain.ListId(listId)),
@@ -113,8 +113,11 @@ class CheckedFileReaderTest {
         ListEntity(title = "Trip", createdAt = 1000)
     )
 
-    /** A source-backed membership of the shape the migration produces, with no registration row. */
-    private fun writeMigratedSourceItem(listId: Long, relativePath: String) {
+    /**
+     * A source-backed membership of the shape the migration produces, with no registration row.
+     * Returns the Task id it minted, so a test can address the review submission by it.
+     */
+    private fun writeMigratedSourceItem(listId: Long, relativePath: String): String {
         val taskId = UUID.randomUUID().toString()
         val assetId = UUID.randomUUID().toString()
         val db = database.openHelper.writableDatabase
@@ -146,6 +149,7 @@ class CheckedFileReaderTest {
                 relativePath
             )
         )
+        return taskId
     }
 
     private fun rawInt(sql: String): Int =
