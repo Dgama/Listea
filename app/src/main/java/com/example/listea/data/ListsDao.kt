@@ -1591,6 +1591,14 @@ abstract class ListsDao {
                 assetViewerAvailable(asset.relativePath?.substringAfterLast('/').orEmpty())
         }
 
+    /**
+     * The current state of several Tasks, for a payload built right now. A folder round re-reads its
+     * decisions by Task id rather than by a registration row, so a Task without a registration —
+     * a multi-Asset Task, or one no List ever touched — does not silently drop out of the payload.
+     */
+    @Query("SELECT * FROM task_state WHERE taskId IN (:taskIds)")
+    abstract suspend fun getTaskStates(taskIds: List<String>): List<TaskStateEntity>
+
     private class ReconcileDelta(val created: Int, val updated: Int)
 
     /** A Task this Source already owns: update it in place, adding new Assets and measuring old ones. */

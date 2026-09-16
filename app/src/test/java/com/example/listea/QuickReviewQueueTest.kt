@@ -1,22 +1,23 @@
 package com.example.listea
 
+import com.example.listea.data.CatalogRow
 import com.example.listea.data.DecisionTarget
 import com.example.listea.data.FileReviewStateEntity
-import com.example.listea.data.fileIdentity
-import com.example.listea.data.newItemPublicId
+import com.example.listea.data.ReviewDecisions
 import com.example.listea.data.ReviewItem
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * What Quick Review resolves out of a folder, now that it resolves a folder rather than a List.
+ * What Quick Review resolves out of a scope, now that it resolves catalog Tasks rather than minting
+ * them.
  *
- * These used to be tests about filtering a List's rows down to one folder level. That filtering is
- * gone: the folder listing decides what the queue is, and the only thing a List contributes is
- * nothing at all. What is worth pinning down instead is the identity — a queued file must be
- * addressed by its path under the root, because that is what every List holding it also reads, and
- * an item addressed any other way would make a decision that nothing else could see.
+ * The queue is built by walking the browsed listing — where there is one — and mapping each entry to
+ * its catalog Task, dropping entries with no Task. A scope with only part of a Task, or with Tasks
+ * whose content cannot be presented, resolves to what is eligible and nothing more. What is worth
+ * pinning is the identity and the order, because both are what make a decision reach every List
+ * that holds the same Task.
  */
 class QuickReviewQueueTest {
 
@@ -35,39 +36,45 @@ class QuickReviewQueueTest {
         lastModified = lastModified
     )
 
-    private fun state(
-        id: Long,
-        path: String,
+    private fun catalogRow(
+        taskId: String,
+        groupPath: String,
+        displayName: String,
         completed: Boolean = false,
-        favorite: Boolean = false
-    ) = FileReviewStateEntity(
-        id = id,
-        publicId = newItemPublicId(fileIdentity(path), now = id),
-        rootUri = root,
-        relativePath = path,
+        favorite: Boolean = false,
+        missingAssets: Int = 0,
+        unviewable: Boolean = false,
+        sizeBytes: Long? = null,
+        lastModified: Long? = null
+    ) = CatalogRow(
+        taskId = taskId,
+        groupPath = groupPath,
+        displayName = displayName,
         isCompleted = completed,
         isFavorite = favorite,
+        customActions = "",
+        assetCount = 1,
+        missingAssets = missingAssets,
+        sizeBytes = sizeBytes,
+        lastModified = lastModified,
+        hasUnviewableAsset = unviewable
+    )
+
+    private fun state(id: Long, path: String) = FileReviewStateEntity(
+        id = id,
+        publicId = "FILE-$path",
+        rootUri = root,
+        relativePath = path,
         updatedAt = 0
     )
 
-    /**
-     * The Tasks the same files resolve to, which the review resolves a step before this and hands
-     * in. Per path and not per row id: two files are two Tasks whatever their registrations are
-     * numbered, and here the two numbers differ so that one standing for the other cannot pass.
-     */
-    private fun tasksOf(states: List<FileReviewStateEntity>): Map<String, String> =
-        states.associate { it.relativePath to "task-${it.relativePath}" }
-
     private fun pathOf(item: ReviewItem) = (item.target as DecisionTarget.File).relativePath
-
 
     @Test
     fun `a queued file is addressed by its path under the root`() {
-        // The identity every List over this folder reads too. Addressing it by anything narrower
-        // — the file name, an id — would make a decision only this queue could see.
         val files = listOf(file("2026-07-11/bilibili", "a.jpg"))
-        val states = listOf(state(1, "2026-07-11/bilibili/a.jpg"))
-        val queue = folderReviewQueue(root, files, states, tasksOf(states))
+        val rows = listOf(catalogRow("task-a", "2026-07-11/bilibili/a.jpg", "a.jpg"))
+        val queue = folderReviewQueue(root, "2026-07-11/bilibili", files, rows, listOf(state(1, "2026-07-11/bilibili/a.jpg")))
 
         assertEquals("2026-07-11/bilibili/a.jpg", pathOf(queue.single()))
         assertEquals(root, (queue.single().target as DecisionTarget.File).rootUri)
@@ -75,31 +82,32 @@ class QuickReviewQueueTest {
 
     @Test
     fun `a file directly in the root is addressed by its bare name`() {
-        val states = listOf(state(1, "a.jpg"))
-        val queue = folderReviewQueue(root, listOf(file("", "a.jpg")), states, tasksOf(states))
+        val queue = folderReviewQueue(
+            root,
+            "",
+            listOf(file("", "a.jpg")),
+            listOf(catalogRow("task-a", "a.jpg", "a.jpg")),
+            listOf(state(1, "a.jpg"))
+        )
         assertEquals("a.jpg", pathOf(queue.single()))
     }
 
     @Test
-    fun `decisions already held about a file come back with it`() {
-        // The point of the whole refactor: reviewing a folder shows what is already known, from
-        // wherever it was decided, and creating or deleting a List has nothing to do with it.
-        val states = listOf(
-            state(1, "sub/a.jpg", completed = true, favorite = true),
-            state(2, "sub/b.jpg")
-        )
+    fun `decisions already held about a Task come back with it`() {
         val queue = folderReviewQueue(
             root,
+            "sub",
             listOf(file("sub", "a.jpg"), file("sub", "b.jpg")),
-            states,
-            tasksOf(states)
+            listOf(
+                catalogRow("task-a", "sub/a.jpg", "a.jpg", completed = true, favorite = true),
+                catalogRow("task-b", "sub/b.jpg", "b.jpg")
+            ),
+            listOf(state(1, "sub/a.jpg"), state(2, "sub/b.jpg"))
         )
 
         assertTrue(queue[0].decisions.isCompleted)
         assertTrue(queue[0].decisions.isFavorite)
         assertEquals(false, queue[1].decisions.isCompleted)
-        // The same answer reaches the filter, so "Checked" means something in a folder no List
-        // covers rather than degrading to "nobody knows, keep everything".
         assertEquals(true, reviewFacts(queue[0]).isChecked)
         assertEquals(false, reviewFacts(queue[1]).isChecked)
     }
@@ -107,51 +115,75 @@ class QuickReviewQueueTest {
     @Test
     fun `the queue keeps the folder's own order`() {
         val files = listOf(file("", "c.jpg"), file("", "a.jpg"), file("", "b.jpg"))
+        val rows = listOf(
+            catalogRow("task-a", "a.jpg", "a.jpg"),
+            catalogRow("task-b", "b.jpg", "b.jpg"),
+            catalogRow("task-c", "c.jpg", "c.jpg")
+        )
         val states = listOf(state(3, "b.jpg"), state(1, "c.jpg"), state(2, "a.jpg"))
-        val queue = folderReviewQueue(root, files, states, tasksOf(states))
+        val queue = folderReviewQueue(root, "", files, rows, states)
 
-        // Stored state arrives in whatever order the database returns; the folder decides.
         assertEquals(listOf("c.jpg", "a.jpg", "b.jpg"), queue.map { it.title })
     }
 
     @Test
     fun `a queued file is identified by its Task, not by its registration row`() {
-        // The registration's own number is a handle onto a relationship with a file; the Task is
-        // what a session walks and what a judgment is recorded against. They are different numbers
-        // here so that either one standing in for the other cannot pass unnoticed.
-        val states = listOf(state(42, "a.jpg"))
-        val queue = folderReviewQueue(root, listOf(file("", "a.jpg")), states, tasksOf(states))
-
-        assertEquals(42L, queue.single().id)
-        assertEquals("task-a.jpg", queue.single().taskId)
-    }
-
-    @Test
-    fun `a file whose state vanished is dropped rather than shown undecided`() {
-        val states = listOf(state(1, "a.jpg"))
         val queue = folderReviewQueue(
             root,
-            listOf(file("", "a.jpg"), file("", "b.jpg")),
-            states,
-            tasksOf(states)
+            "",
+            listOf(file("", "a.jpg")),
+            listOf(catalogRow("task-a", "a.jpg", "a.jpg")),
+            listOf(state(42, "a.jpg"))
+        )
+
+        assertEquals(42L, queue.single().id)
+        assertEquals("task-a", queue.single().taskId)
+    }
+
+    // §6.4, §7
+    @Test
+    fun `a file with no Task is dropped rather than minted`() {
+        val files = listOf(file("", "a.jpg"), file("", "b.jpg"))
+        val queue = folderReviewQueue(
+            root,
+            "",
+            files,
+            listOf(catalogRow("task-a", "a.jpg", "a.jpg")),
+            listOf(state(1, "a.jpg"), state(2, "b.jpg"))
         )
 
         assertEquals(listOf("a.jpg"), queue.map { it.title })
     }
 
+    // §6.4, §7 — test 16
     @Test
-    fun `a folder of nothing but subfolders resolves to an empty queue`() {
-        // Directories are filtered out before this, so an empty file list is the honest result:
-        // nothing is pulled up from the folders below to make the queue look less empty.
-        assertTrue(
-            folderReviewQueue(root, emptyList(), listOf(state(1, "a.jpg")), emptyMap()).isEmpty()
+    fun `Quick Review excludes partial and ineligible Tasks and includes the eligible ones`() {
+        val rows = listOf(
+            // The scope itself, not a direct child of the scope.
+            catalogRow("task-alice", "alice", "alice"),
+            // A direct child whose Asset is unviewable.
+            catalogRow("task-pdf", "alice/papers", "papers", unviewable = true),
+            // A direct child whose Asset is missing.
+            catalogRow("task-missing", "alice/missing", "missing", missingAssets = 1),
+            // A direct child, everything present and viewable.
+            catalogRow("task-ok", "alice/ok", "ok")
         )
-        // A file dropped for want of a Task is the same answer as one dropped for want of a
-        // registration: there is nothing to review, rather than a card with nothing behind it.
-        val states = listOf(state(1, "a.jpg"))
-        assertTrue(
-            folderReviewQueue(root, listOf(file("", "a.jpg")), states, emptyMap()).isEmpty()
-        )
+        val queue = folderReviewQueue(root, "alice", emptyList(), rows)
+
+        assertEquals(listOf("ok"), queue.map { it.title })
+    }
+
+    // §7 — test 23
+    @Test
+    fun `a folder of files produces the same order as the v13 registration queue did`() {
+        // The listing order is the queue order, exactly as it was when the queue walked
+        // registrations; the catalog only supplies the Task, never a new order.
+        val files = listOf(file("", "c.jpg"), file("", "a.jpg"), file("", "b.jpg"))
+        val rows = files.map { catalogRow("task-${it.name}", it.rootRelativePath, it.name) }
+        val queue = folderReviewQueue(root, "", files, rows)
+
+        assertEquals(listOf("c.jpg", "a.jpg", "b.jpg"), queue.map { it.title })
+        assertEquals(listOf("c.jpg", "a.jpg", "b.jpg"), queue.map { it.rootRelativePath })
     }
 
     @Test
@@ -167,33 +199,34 @@ class QuickReviewQueueTest {
     /** A day's worth of milliseconds back from [now], for the freshness cases. */
     private fun daysAgo(days: Int) = now - days * 24L * 60L * 60L * 1000L
 
-    /**
-     * A folder resolved the way the screen resolves one: files, their state rows, paired up.
-     * [checked] names the files that are already done.
-     */
-    private fun folder(
-        vararg files: FolderFile,
-        checked: Set<String> = emptySet()
-    ): List<ReviewItem> {
-        val states = files.mapIndexed { index, file ->
-            state(index + 1L, file.rootRelativePath, completed = file.name in checked)
+    /** A folder resolved the way the screen resolves one, for the [reviewRound] narrowing tests. */
+    private fun folder(vararg files: FolderFile, checked: Set<String> = emptySet()): List<ReviewItem> =
+        files.mapIndexed { index, file ->
+            ReviewItem(
+                id = index + 1L,
+                taskId = "task-${file.rootRelativePath}",
+                publicId = "FILE-${file.rootRelativePath}",
+                title = file.name,
+                sourceUri = file.uri,
+                relativePath = file.name,
+                sourceMissing = false,
+                target = DecisionTarget.File(root, file.rootRelativePath),
+                decisions = ReviewDecisions(isCompleted = file.name in checked),
+                sizeBytes = file.sizeBytes,
+                lastModified = file.lastModified
+            )
         }
-        return folderReviewQueue(root, files.toList(), states, tasksOf(states))
-    }
 
     private fun names(items: List<ReviewItem>) = items.map { it.title }
 
     @Test
     fun `an unfiltered round is the whole folder, in the order the folder page shows it`() {
-        // The default sort is not a sort: the listing's own order survives it untouched. A folder
-        // arrives already in name order, so this looks alphabetical and is not.
         val files = folder(file("", "c.jpg"), file("", "a.jpg"), file("", "b.jpg"))
 
         assertEquals(
             listOf("c.jpg", "a.jpg", "b.jpg"),
             names(reviewRound(files, FileArrangement.Default, uncheckedOnly = false, now = now))
         )
-        // Asked for by name, it really does sort.
         assertEquals(
             listOf("a.jpg", "b.jpg", "c.jpg"),
             names(
@@ -237,8 +270,6 @@ class QuickReviewQueueTest {
 
     @Test
     fun `filtering to checked while the setting says unchecked only leaves nothing`() {
-        // The two narrowings are an AND and neither overrides the other, so the honest answer to
-        // a contradiction is an empty round rather than one of them quietly winning.
         val round = reviewRound(
             folder(file("", "a.jpg"), file("", "b.jpg"), checked = setOf("a.jpg")),
             FileArrangement(checked = setOf(CheckedState.CHECKED)),
@@ -292,8 +323,6 @@ class QuickReviewQueueTest {
 
     @Test
     fun `a file the provider gave no timestamp for survives a freshness filter`() {
-        // The unknown rule, reaching the round intact: a fact nobody knows never excludes a file,
-        // because a file hidden for an invisible reason is the one thing a filter must not do.
         val round = reviewRound(
             folder(
                 file("", "a.jpg", lastModified = daysAgo(40)),

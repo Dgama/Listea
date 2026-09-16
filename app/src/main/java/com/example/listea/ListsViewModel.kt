@@ -514,17 +514,15 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         )
         // Reading them is proof they are there, which un-flags anything deleted and put back.
         dao.markFilesPresent(rootUri, paths)
-        // Every file in the listing gets a Task, so that every card in the queue has something to
-        // be identified by and something for a judgment to land on. A file decided about from
-        // another List or another folder already has one, and keeps it.
-        val tasks = dao.ensureTasksForFiles(rootUri, paths, now()).associate {
-            it.relativePath to it.taskId
-        }
-        emitAll(
-            dao.observeFileStates(rootUri, paths).map { states ->
-                FolderReview.Ready(folderReviewQueue(rootUri, files, states, tasks))
-            }
-        )
+        // The queue is built from catalog Tasks, not minted here: a scope no Source covers, or one
+        // whose Tasks are partial or ineligible, resolves to whatever is eligible and nothing more.
+        // Registration is a browse concern and stays; creating a Task is an import's job and does
+        // not happen on this path.
+        val rows = dao.findCoveringSource(rootUri, folderPath)
+            ?.let { dao.getCatalogTasks(it.id) }
+            .orEmpty()
+        val states = dao.getFileStates(rootUri, paths)
+        emit(FolderReview.Ready(folderReviewQueue(rootUri, folderPath, files, rows, states)))
     }
 
     /**
@@ -1224,16 +1222,16 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         items: List<ReviewItem>,
         event: String
     ) {
-        val paths = items.mapNotNull { (it.target as? DecisionTarget.File)?.relativePath }
-        if (paths.isEmpty()) return
+        val taskIds = items.map { it.taskId }
+        if (taskIds.isEmpty()) return
 
-        val fresh = writeOrder.withLock { dao.getFileStates(rootUri, paths) }
-            .associateBy { it.relativePath }
+        // Re-read decisions by Task id rather than by a registration row: a Task without one — a
+        // multi-Asset Task, or one no List ever touched — must not silently drop out of the payload.
+        val fresh = writeOrder.withLock { dao.getTaskStates(taskIds) }
+            .associateBy { it.taskId }
 
         val rows = items.mapIndexedNotNull { index, item ->
-            val path = (item.target as? DecisionTarget.File)?.relativePath
-                ?: return@mapIndexedNotNull null
-            item.copy(decisions = fresh[path]?.decisions ?: item.decisions)
+            item.copy(decisions = fresh[item.taskId]?.decisions ?: item.decisions)
                 .toPayloadRow(index)
         }
 

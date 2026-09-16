@@ -425,7 +425,28 @@ data class ReviewItem(
      * review — renaming and removing an entry from a List. Null for a folder-resolved file, which
      * belongs to no List and has no membership to edit.
      */
-    val rowId: Long? = null
+    val rowId: Long? = null,
+
+    /**
+     * The Assets this Task is presented through, resolved once when the queue was built and carried
+     * here so the viewer boundary reads a collection rather than inventing one from the one-Asset
+     * shape. Empty for a Task with nothing to present — a manual item — and one-per-Asset for a
+     * multi-Asset Task.
+     */
+    val assets: List<ReviewAsset> = emptyList(),
+
+    /**
+     * The Task's position in the source tree, as `task_imports.groupPath`. Null for a Task that is
+     * not catalogued — a legacy Task nobody has imported, or a manual item.
+     */
+    val rootRelativePath: String? = null,
+
+    /**
+     * Why this Task cannot be review-submitted, or null when it can be. Derived at queue build time
+     * and carried rather than re-derived on the surface, so a list screen and a review surface agree
+     * about what is blocked and why.
+     */
+    val reviewBlocked: ReviewBlock? = null
 )
 
 /**

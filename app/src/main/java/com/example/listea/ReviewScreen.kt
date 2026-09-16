@@ -41,6 +41,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.exoplayer.ExoPlayer
 import coil3.ImageLoader
 import com.example.listea.data.ItemAction
+import com.example.listea.data.ReviewAsset
 import com.example.listea.data.ReviewItem
 import com.example.listea.domain.ListId
 import com.example.listea.domain.ReviewContext
@@ -984,42 +985,14 @@ private fun ReviewFinished(
 }
 
 /**
- * One piece of content a Task is presented through, reduced to what the presentation needs.
- *
- * The Asset-shaped value the viewer boundary is handed. It carries the source location, a display
- * name, whether the file is still there, and the cached size/modified measurements the Info sheet
- * and the arrangement already read — and nothing else. There is deliberately no persisted kind: the
- * media classifier stays the one that decides image/GIF/video behaviour, and a stored kind arrives
- * only when a second viewer actually needs one.
- */
-data class ReviewAsset(
-    val sourceUri: String,
-    val name: String,
-    val sourceMissing: Boolean,
-    val sizeBytes: Long? = null,
-    val lastModified: Long? = null
-)
-
-/**
  * The Assets a Task is presented through, for the viewer boundary.
  *
- * Zero for a Task with nothing to present — a manual item — and one for everything v0.2 can create,
- * since the media workflow is one Asset per Task. In v0.4 this becomes a DAO-backed read of
- * `assets WHERE taskId = ?`; everything above it already speaks in a collection, so it compiles
- * untouched.
+ * A read of the collection the queue already resolved onto the [ReviewItem], rather than a
+ * reconstruction from the item's own fields. That is the seam v0.2 left for a multi-Asset Task: the
+ * viewer boundary has always spoken in a collection, and now the collection is carried rather than
+ * invented from the one-Asset shape.
  */
-fun assetsOf(item: ReviewItem): List<ReviewAsset> =
-    item.sourceUri?.let { uri ->
-        listOf(
-            ReviewAsset(
-                sourceUri = uri,
-                name = item.title,
-                sourceMissing = item.sourceMissing,
-                sizeBytes = item.sizeBytes,
-                lastModified = item.lastModified
-            )
-        )
-    } ?: emptyList()
+fun assetsOf(item: ReviewItem): List<ReviewAsset> = item.assets
 
 /**
  * Places one Asset in front of the shared [MediaPreview].
