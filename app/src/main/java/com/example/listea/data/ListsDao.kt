@@ -470,31 +470,25 @@ abstract class ListsDao {
      * from a List, and the feature that deletes checked files has to see both or it is lying about
      * what "checked" means.
      *
-     * The registration row drives it, because that is where a file's path under the root and its
-     * presence flag live; the state itself comes from the Task. Both joins are inner, and can be,
-     * because a file is only ever checked *because* somebody decided about it, and deciding mints
-     * the Task and writes its state in the same transaction. A file that could be marked checked
-     * without those rows existing is not a shape this code can produce.
+     * Checked state is a fact about the Task, reached through the Asset that names the file. The
+     * delete path deliberately does **not** join `file_review_state` to establish that a file is one
+     * Listea knows as a file: a review *submission* writes a Task's state without registering the
+     * file, and the set this feature may delete must not shrink to the subset that has happened to
+     * pass through a folder browse. Registration is a browse and public-id concern, not a
+     * precondition for a decision being real, so that join would silently under-report every file
+     * that was checked by a swipe and never registered — which is exactly how a completed round
+     * could leave Settings claiming nothing is checked.
      *
      * A file already flagged missing is excluded — there is nothing left to delete — and so is an
      * unchecked one, which is exactly the thing the user did not mark.
      *
-     * Presence is read off the Asset rather than off the registration. It was the registration's
-     * flag until v0.2 finished moving it: the Asset is what a decision is attached to and what a
-     * path under the root names, so it is the row that can say the file behind it is gone without
-     * a second copy to keep in step. The registrations still carry the old flag, written once by
-     * the migration and never again, and nothing reads it.
-     *
-     * The join to the registration stays even though it is now redundant — a decision is what
-     * makes a file checked, and every decision goes through [writeFileState], which registers — and
-     * it is kept for that exact reason. It is the delete path's own statement that it only takes
-     * files Listea knows as files, and stating it here costs an indexed lookup, where resting it on
-     * an invariant enforced three calls away costs somebody their photographs the day it slips.
+     * Presence is read off the Asset, where the write paths set it: it was the registration's flag
+     * until v0.2 finished moving it, and the registration's own copy is written once by the
+     * migration and never again.
      */
     @Query(
         """
         SELECT a.relativePath FROM assets a
-        JOIN file_review_state frs ON frs.rootUri = a.rootUri AND frs.relativePath = a.relativePath
         JOIN task_state ts ON ts.taskId = a.taskId
         WHERE a.rootUri = :rootUri AND ts.isCompleted = 1 AND a.sourceMissing = 0
         ORDER BY a.relativePath COLLATE NOCASE ASC
@@ -506,7 +500,6 @@ abstract class ListsDao {
     @Query(
         """
         SELECT COUNT(*) FROM assets a
-        JOIN file_review_state frs ON frs.rootUri = a.rootUri AND frs.relativePath = a.relativePath
         JOIN task_state ts ON ts.taskId = a.taskId
         WHERE a.rootUri = :rootUri AND ts.isCompleted = 1 AND a.sourceMissing = 0
         """
