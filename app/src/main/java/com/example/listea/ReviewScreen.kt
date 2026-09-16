@@ -44,6 +44,7 @@ import com.example.listea.data.ItemAction
 import com.example.listea.data.ReviewItem
 import com.example.listea.domain.ListId
 import com.example.listea.domain.ReviewContext
+import com.example.listea.domain.TaskAction
 import com.example.listea.domain.TemplateId
 import com.example.listea.domain.TemplateVersionRef
 
@@ -520,6 +521,34 @@ fun ReviewSession(
 
     val navigation = taskNavigation(items, index)
 
+    // The semantic-action boundary: a gesture and an explicit control both resolve to a
+    // [TaskAction], and this is where an action becomes its Task-level operation. The viewer
+    // arbitrates raw input against its own gestures and hands back a callback; it never learns
+    // which action a swipe means, and nothing here learns which gesture produced an action.
+    fun dispatch(action: TaskAction) {
+        when (action) {
+            TaskAction.CompleteTask -> {
+                // A submission, because a review surface's completion is a judgment. Everything
+                // downstream of the write — the completion transition, the round bookkeeping, the
+                // webhook — is the same path a checkbox takes, so a list that becomes complete
+                // here still fires exactly as it always did.
+                viewModel.submitItemReview(item, terms)
+                if (index == items.lastIndex) {
+                    finished = true
+                    // Announced after the check above, so the delivery it may lead to sees
+                    // the item that was just swiped as checked.
+                    onQueueFinished?.invoke(items)
+                } else {
+                    goTo(items[index + 1])
+                }
+            }
+
+            TaskAction.PreviousTask -> navigation.previous?.let { goTo(it) }
+
+            TaskAction.NextTask -> navigation.next?.let { goTo(it) }
+        }
+    }
+
     TaskNavigator(
         modifier = modifier,
         title = item.title,
@@ -532,8 +561,8 @@ fun ReviewSession(
         // and what the swipe deliberately is not. Neither of them submits, completes or records:
         // a null on a side is that arrow drawn disabled, because there is nowhere to go.
         navigation = MediaNavigation(
-            onPrevious = navigation.previous?.let { target -> { goTo(target) } },
-            onNext = navigation.next?.let { target -> { goTo(target) } }
+            onPrevious = navigation.previous?.let { { dispatch(TaskAction.PreviousTask) } },
+            onNext = navigation.next?.let { { dispatch(TaskAction.NextTask) } }
         )
     ) {
         TaskReviewSurface(
@@ -542,24 +571,10 @@ fun ReviewSession(
             player = player,
             imageLoader = imageLoader,
             settings = settings,
-            onSwipeForward = {
-                // A submission, because this is a review surface and the swipe is a judgment.
-                // Everything downstream of the write — the completion transition, the round
-                // bookkeeping, the webhook — is the same path a checkbox takes, so a list that
-                // becomes complete here still fires exactly as it always did.
-                viewModel.submitItemReview(item, terms)
-                if (index == items.lastIndex) {
-                    finished = true
-                    // Announced after the check above, so the delivery it may lead to sees
-                    // the item that was just swiped as checked.
-                    onQueueFinished?.invoke(items)
-                } else {
-                    goTo(items[index + 1])
-                }
-            },
+            onSwipeForward = { dispatch(TaskAction.CompleteTask) },
             // Backwards is never a judgment: it steps the queue and changes nothing about the
             // Task that was left behind.
-            onSwipeBack = { navigation.previous?.let { goTo(it) } },
+            onSwipeBack = { dispatch(TaskAction.PreviousTask) },
             onTap = { chromeVisible = !chromeVisible },
             onToggleCompleted = { completed ->
                 if (completed) {
@@ -658,6 +673,7 @@ private fun TaskReviewSurface(
     Box(Modifier.fillMaxSize()) {
         AssetNavigator(
             item = item,
+            assets = assetsOf(item),
             player = player,
             imageLoader = imageLoader,
             settings = settings,
@@ -689,18 +705,21 @@ private fun TaskReviewSurface(
  * has to change is what happens *inside* this boundary. Adding it then would mean adding it to
  * every screen that shows a Task at once.
  *
- * What it draws today is the Asset itself and nothing else, because a selector for one Asset is
- * not a navigator. A Task with no Asset at all — a manually typed entry — is not an error and is
- * not hidden: [AssetViewer] renders [PreviewPlaceholder] for it, which is the same treatment a
- * file whose source has gone missing gets. There is no fake Asset standing in for the missing one.
+ * It owns the Asset collection and is the single viewer-dispatch point. A Task with no Asset — a
+ * manually typed entry — is not an error and is not hidden: it renders [PreviewPlaceholder]
+ * directly, because there is no Asset for a viewer to take. A Task with its one Asset hands it to
+ * the viewer, which is the fixed choice today; v0.3 adds `media -> MediaViewer / pdf -> PdfViewer`
+ * here as one branch, without touching the review surface, the Task navigator, the write path or
+ * the webhook boundary.
  *
- * It does not consult a template. §6 defines an `ASSET_VIEWER` kind owning zoom, pan and playback,
- * and this is where that is *chosen* — the choice is fixed for now because there is one viewer, and
- * the shape it will take is a decision about the template registry rather than about this boundary.
+ * It renders no selector while there is one Asset — a selector for one Asset is not a navigator —
+ * and holds no `selectedAssetId`; that state's semantics cannot be designed before a real
+ * multi-Asset Task exists to answer them.
  */
 @Composable
 private fun AssetNavigator(
     item: ReviewItem,
+    assets: List<ReviewAsset>,
     player: ExoPlayer,
     imageLoader: ImageLoader,
     settings: AppSettings,
@@ -711,18 +730,37 @@ private fun AssetNavigator(
     onTap: () -> Unit,
     modifier: Modifier
 ) {
-    AssetViewer(
-        item = item,
-        player = player,
-        imageLoader = imageLoader,
-        settings = settings,
-        canSwipeForward = canSwipeForward,
-        canSwipeBack = canSwipeBack,
-        onSwipeForward = onSwipeForward,
-        onSwipeBack = onSwipeBack,
-        onTap = onTap,
-        modifier = modifier
-    )
+    val asset = assets.firstOrNull()
+    if (asset == null) {
+        // No Asset, no viewer: a manual item is still a card in the queue, swipeable and
+        // completable exactly like a file's, but with nothing to render.
+        SwipeCard(
+            key = item.taskId,
+            canSwipeForward = canSwipeForward,
+            canSwipeBack = canSwipeBack,
+            onSwipeForward = onSwipeForward,
+            onSwipeBack = onSwipeBack,
+            modifier = modifier,
+            onTap = onTap
+        ) { zoom ->
+            LaunchedEffect(zoom) { zoom.contentAspect = null }
+            PreviewPlaceholder(Modifier.fillMaxSize().mediaZoom(zoom), "Manual item", item.title)
+        }
+    } else {
+        AssetViewer(
+            taskId = item.taskId,
+            asset = asset,
+            player = player,
+            imageLoader = imageLoader,
+            settings = settings,
+            canSwipeForward = canSwipeForward,
+            canSwipeBack = canSwipeBack,
+            onSwipeForward = onSwipeForward,
+            onSwipeBack = onSwipeBack,
+            onTap = onTap,
+            modifier = modifier
+        )
+    }
 }
 
 /**
@@ -733,12 +771,16 @@ private fun AssetNavigator(
  * gestures, which is why the callbacks are handed to it rather than made here: whether a swipe is
  * a judgment or just a step is a fact about the surface, not about the picture.
  *
+ * It receives a [ReviewAsset], not the Task it stands in for: the viewer's boundary is the content
+ * it renders, and nothing here reaches back into the Task for a field the Asset does not carry.
+ *
  * The key is the task id, so landing on a Task recentres the card and drops the zoom exactly as
  * landing on an item always has — that is the behaviour, and only the identity behind it moved.
  */
 @Composable
 private fun AssetViewer(
-    item: ReviewItem,
+    taskId: String,
+    asset: ReviewAsset,
     player: ExoPlayer,
     imageLoader: ImageLoader,
     settings: AppSettings,
@@ -750,7 +792,7 @@ private fun AssetViewer(
     modifier: Modifier
 ) {
     SwipeCard(
-        key = item.taskId,
+        key = taskId,
         canSwipeForward = canSwipeForward,
         canSwipeBack = canSwipeBack,
         onSwipeForward = onSwipeForward,
@@ -760,7 +802,7 @@ private fun AssetViewer(
         onTap = onTap
     ) { zoom ->
         ItemPreview(
-            item = item,
+            asset = asset,
             player = player,
             imageLoader = imageLoader,
             settings = settings,
@@ -942,16 +984,55 @@ private fun ReviewFinished(
 }
 
 /**
- * Places one list item in front of the shared [MediaPreview].
+ * One piece of content a Task is presented through, reduced to what the presentation needs.
  *
- * Every item gets a card: nothing is filtered out of the queue, so an item with no source or a
- * source that has vanished falls through to a placeholder and stays swipeable. Anything that does
- * have a readable source is handed to the same renderer the Folder browser uses.
+ * The Asset-shaped value the viewer boundary is handed. It carries the source location, a display
+ * name, whether the file is still there, and the cached size/modified measurements the Info sheet
+ * and the arrangement already read — and nothing else. There is deliberately no persisted kind: the
+ * media classifier stays the one that decides image/GIF/video behaviour, and a stored kind arrives
+ * only when a second viewer actually needs one.
+ */
+data class ReviewAsset(
+    val sourceUri: String,
+    val name: String,
+    val sourceMissing: Boolean,
+    val sizeBytes: Long? = null,
+    val lastModified: Long? = null
+)
+
+/**
+ * The Assets a Task is presented through, for the viewer boundary.
  *
- * The two placeholders take the zoom transform as well as the pictures do. They are not media and
- * there is nothing in them worth a closer look, but leaving them out would mean a pinch on one
- * silently changed a scale that nothing then honoured - and a scale above one is what decides
- * whether the next drag pages or pans.
+ * Zero for a Task with nothing to present — a manual item — and one for everything v0.2 can create,
+ * since the media workflow is one Asset per Task. In v0.4 this becomes a DAO-backed read of
+ * `assets WHERE taskId = ?`; everything above it already speaks in a collection, so it compiles
+ * untouched.
+ */
+fun assetsOf(item: ReviewItem): List<ReviewAsset> =
+    item.sourceUri?.let { uri ->
+        listOf(
+            ReviewAsset(
+                sourceUri = uri,
+                name = item.title,
+                sourceMissing = item.sourceMissing,
+                sizeBytes = item.sizeBytes,
+                lastModified = item.lastModified
+            )
+        )
+    } ?: emptyList()
+
+/**
+ * Places one Asset in front of the shared [MediaPreview].
+ *
+ * A source that has vanished falls through to a placeholder and stays swipeable; anything with a
+ * readable source is handed to the same renderer the Folder browser uses. A Task with no Asset at
+ * all never reaches here — [AssetNavigator] renders that placeholder itself, because there is no
+ * Asset for a viewer to take.
+ *
+ * The placeholder takes the zoom transform as well as the pictures do. It is not media and there is
+ * nothing in it worth a closer look, but leaving it out would mean a pinch on one silently changed
+ * a scale that nothing then honoured - and a scale above one is what decides whether the next drag
+ * pages or pans.
  *
  * Shared with [ListItemViewerScreen] so that an item looks the same wherever it is opened from.
  * It renders and nothing else — no completion, no actions, no ViewModel — which is what lets a
@@ -959,28 +1040,22 @@ private fun ReviewFinished(
  */
 @Composable
 fun ItemPreview(
-    item: ReviewItem,
+    asset: ReviewAsset,
     player: ExoPlayer,
     imageLoader: ImageLoader,
     settings: AppSettings,
     zoom: MediaZoomState,
     modifier: Modifier
 ) {
-    val uri = item.sourceUri
-    if (uri == null) {
+    if (asset.sourceMissing) {
         LaunchedEffect(zoom) { zoom.contentAspect = null }
-        PreviewPlaceholder(modifier.mediaZoom(zoom), "Manual item", item.title)
-        return
-    }
-    if (item.sourceMissing) {
-        LaunchedEffect(zoom) { zoom.contentAspect = null }
-        PreviewPlaceholder(modifier.mediaZoom(zoom), "Source missing", item.title)
+        PreviewPlaceholder(modifier.mediaZoom(zoom), "Source missing", asset.name)
         return
     }
 
     MediaPreview(
-        uri = uri,
-        name = item.title,
+        uri = asset.sourceUri,
+        name = asset.name,
         player = player,
         imageLoader = imageLoader,
         modifier = modifier,

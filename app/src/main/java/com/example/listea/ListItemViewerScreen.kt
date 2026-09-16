@@ -86,14 +86,26 @@ fun ListItemViewerScreen(
                 modifier = Modifier.fillMaxSize(),
                 onTap = { chromeVisible = !chromeVisible }
             ) { zoom ->
-                ItemPreview(
-                    item = item,
-                    player = player,
-                    imageLoader = imageLoader,
-                    settings = settings,
-                    zoom = zoom,
-                    modifier = Modifier.fillMaxSize()
-                )
+                val asset = assetsOf(item).firstOrNull()
+                if (asset == null) {
+                    // A manual item has no Asset; it still keeps its place in the sequence, with
+                    // nothing to render behind the shell.
+                    LaunchedEffect(zoom) { zoom.contentAspect = null }
+                    PreviewPlaceholder(
+                        Modifier.fillMaxSize().mediaZoom(zoom),
+                        "Manual item",
+                        item.title
+                    )
+                } else {
+                    ItemPreview(
+                        asset = asset,
+                        player = player,
+                        imageLoader = imageLoader,
+                        settings = settings,
+                        zoom = zoom,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
             }
         },
         controls = { MediaInfoBar("Item info") { infoOpen = true } }
