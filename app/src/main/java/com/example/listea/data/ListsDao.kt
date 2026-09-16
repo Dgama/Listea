@@ -5,6 +5,11 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
+import com.example.listea.ImporterKind
+import com.example.listea.ImportPlan
+import com.example.listea.PlannedTask
+import com.example.listea.isAncestorOrSame
+import com.example.listea.scopesOverlap
 import com.example.listea.domain.AssetId
 import com.example.listea.domain.ReviewContext
 import com.example.listea.domain.ReviewEventId
@@ -14,6 +19,7 @@ import com.example.listea.domain.TaskId
 import com.example.listea.domain.TemplateVersionRef
 import com.example.listea.domain.completesTask
 import com.example.listea.domain.encode
+import java.util.UUID
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -1303,4 +1309,351 @@ abstract class ListsDao {
     /** Null when the list no longer exists, e.g. it was deleted while an edit was in flight. */
     @Query("SELECT completedAt IS NOT NULL FROM lists WHERE id = :id")
     protected abstract suspend fun isComplete(id: Long): Boolean?
+
+    // --- the v14 import tables ----------------------------------------------------------------------
+    //
+    // The only thing allowed to create a Task is an import run, and this is where that rule lives.
+    // `runImport` is the sole writer of `tasks`, `task_state` and `assets`; everything else selects
+    // Tasks that already exist. A Source is registered separately, so that "bring material in" and
+    // "choose what to review" stay two operations whose failure states are not each other's.
+
+    @Query("SELECT * FROM sources WHERE id = :id")
+    abstract suspend fun getSource(id: String): SourceEntity?
+
+    @Query("SELECT * FROM sources WHERE rootUri = :rootUri")
+    protected abstract suspend fun sourcesForRoot(rootUri: String): List<SourceEntity>
+
+    @Query("SELECT * FROM sources WHERE rootUri = :rootUri AND relativePath = :relativePath")
+    protected abstract suspend fun sourceAt(rootUri: String, relativePath: String): SourceEntity?
+
+    @Insert
+    protected abstract suspend fun insertSource(source: SourceEntity)
+
+    /**
+     * Registers a folder Source, or refuses to.
+     *
+     * Registration is rejected when another real Source's import root overlaps the requested one —
+     * parent over child or child over parent, by [scopesOverlap] — with the covering Source named in
+     * the answer. Non-overlap is what makes ownership a settled question rather than a race: a Task
+     * can change owner exactly once, from the legacy claim set to the one Source that covers its
+     * file, and never back. An already-registered root is the same Source, returned rather than
+     * re-inserted, so the idempotent "reuse" path and this one agree on the object.
+     */
+    @Transaction
+    open suspend fun registerSource(
+        rootUri: String,
+        relativePath: String,
+        displayName: String,
+        importerKind: ImporterKind,
+        now: Long
+    ): RegisterSourceResult {
+        sourceAt(rootUri, relativePath)?.let { return RegisterSourceResult.Registered(it) }
+        sourcesForRoot(rootUri)
+            .firstOrNull { scopesOverlap(it.relativePath, relativePath) }
+            ?.let { return RegisterSourceResult.Overlaps(it) }
+        val source = SourceEntity(
+            id = UUID.randomUUID().toString(),
+            rootUri = rootUri,
+            relativePath = relativePath,
+            displayName = displayName,
+            importerKind = importerKind.key,
+            importerVersion = 1,
+            createdAt = now
+        )
+        insertSource(source)
+        return RegisterSourceResult.Registered(source)
+    }
+
+    /**
+     * The real Source whose import root already covers [relativePath], or null.
+     *
+     * Non-overlap guarantees at most one, so "a Folder-tab action inside a covering Source" has a
+     * single answer. A Source at the grant root (`relativePath = ''`) covers everything beneath it.
+     */
+    open suspend fun findCoveringSource(rootUri: String, relativePath: String): SourceEntity? =
+        sourcesForRoot(rootUri).firstOrNull { isAncestorOrSame(it.relativePath, relativePath) }
+
+    /**
+     * One import run: turn a [ImportPlan] into Tasks, Assets and provenance, inside one transaction.
+     *
+     * [coverage] is the root-relative path that was authoritatively scanned, passed in rather than
+     * inferred from the plan — an empty scan is exactly the case where the distinction matters, and
+     * a plan with no Tasks cannot say whether it saw an empty folder or no folder. `sourceMissing`
+     * may only be set for Assets inside [coverage]; an Asset outside it was not looked at and has
+     * nothing new said about it.
+     *
+     * Nothing is ever deleted by a run, whatever the outcome: missing material is flagged, never
+     * removed, and a conflict leaves the affected Task untouched while the rest proceeds. The Source
+     * row's `lastImportAt` / `lastImportStatus` are the durable summary; the result is returned and
+     * shown, then dropped.
+     */
+    @Transaction
+    open suspend fun runImport(
+        sourceId: String,
+        coverage: String,
+        plan: ImportPlan,
+        now: Long
+    ): ImportResult = runImportInternal(sourceId, coverage, plan, now)
+
+    /**
+     * The body of [runImport], split out so a composed operation such as [createFolderList] can run
+     * the import inside its own transaction rather than nesting one.
+     */
+    protected open suspend fun runImportInternal(
+        sourceId: String,
+        coverage: String,
+        plan: ImportPlan,
+        now: Long
+    ): ImportResult {
+        val source = getSource(sourceId) ?: return ImportResult(outcome = ImportOutcome.FAILED)
+        val importer = ImporterKind.fromKey(source.importerKind)
+
+        // A folder-as-Task Task is assembled from a whole subtree, so a half-scanned group is a
+        // group whose Asset list is wrong. Refuse a scoped refresh rather than write one. FAILED
+        // here means "nothing was written", not that the folder was unreadable.
+        if (importer == ImporterKind.FOLDER_AS_TASK && coverage != source.relativePath) {
+            return ImportResult(outcome = ImportOutcome.FAILED)
+        }
+
+        val owned = taskImportsForSource(sourceId).associateBy { it.groupPath }
+        val plannedPaths = plan.tasks.flatMap { it.assets }.map { it.rootRelativePath }.toSet()
+
+        var created = 0
+        var adopted = 0
+        var reconciled = 0
+        var assetsCreated = 0
+        var assetsUpdated = 0
+        var assetsMissing = 0
+        val conflicts = mutableListOf<ImportConflict>()
+
+        for (task in plan.tasks) {
+            val existing = owned[task.groupPath]
+            if (existing != null) {
+                reconciled++
+                val delta = reconcileTask(source, existing.taskId, task, now)
+                assetsCreated += delta.created
+                assetsUpdated += delta.updated
+            } else {
+                val delta = resolveNewTask(source, importer, task, now)
+                if (delta.conflict != null) {
+                    conflicts += delta.conflict
+                } else {
+                    if (delta.adopted) adopted++ else created++
+                    assetsCreated += delta.assetsCreated
+                    assetsUpdated += delta.assetsUpdated
+                }
+            }
+        }
+
+        // A file the plan no longer names, inside the scope that was authoritatively scanned, has
+        // gone missing. Marked, never deleted, and never for an Asset outside the coverage: a
+        // scoped refresh must not reach past the folder it scanned.
+        for (asset in assetsForSource(sourceId)) {
+            val path = asset.relativePath ?: continue
+            if (isAncestorOrSame(coverage, path) && path !in plannedPaths && !asset.sourceMissing) {
+                setAssetMissing(asset.id)
+                assetsMissing++
+            }
+        }
+
+        updateSourceStatus(sourceId, now, if (conflicts.isEmpty()) ImportOutcome.COMPLETE.key else ImportOutcome.PARTIAL.key)
+
+        return ImportResult(
+            outcome = if (conflicts.isEmpty()) ImportOutcome.COMPLETE else ImportOutcome.PARTIAL,
+            tasksCreated = created,
+            tasksAdopted = adopted,
+            tasksReconciled = reconciled,
+            assetsCreated = assetsCreated,
+            assetsUpdated = assetsUpdated,
+            assetsMarkedMissing = assetsMissing,
+            conflicts = conflicts,
+            notices = plan.notices
+        )
+    }
+
+    @Query(
+        """
+        SELECT a.* FROM assets a
+        JOIN task_imports ti ON ti.taskId = a.taskId
+        WHERE ti.sourceId = :sourceId
+        """
+    )
+    protected abstract suspend fun assetsForSource(sourceId: String): List<AssetEntity>
+
+    @Query("SELECT * FROM task_imports WHERE sourceId = :sourceId")
+    protected abstract suspend fun taskImportsForSource(sourceId: String): List<TaskImportEntity>
+
+    @Query("SELECT * FROM task_imports WHERE taskId = :taskId")
+    protected abstract suspend fun taskImportForTask(taskId: String): TaskImportEntity?
+
+    @Insert
+    protected abstract suspend fun insertTaskImport(import: TaskImportEntity)
+
+    @Query("UPDATE task_imports SET lastSeenAt = :lastSeenAt WHERE taskId = :taskId")
+    protected abstract suspend fun updateTaskImportLastSeen(taskId: String, lastSeenAt: Long)
+
+    @Query("SELECT COUNT(*) FROM legacy_source_tasks WHERE taskId = :taskId")
+    protected abstract suspend fun legacyClaimCount(taskId: String): Int
+
+    @Query("DELETE FROM legacy_source_tasks WHERE taskId = :taskId")
+    protected abstract suspend fun deleteLegacyClaim(taskId: String)
+
+    @Query("SELECT * FROM assets WHERE rootUri = :rootUri AND relativePath = :relativePath")
+    protected abstract suspend fun assetByLocator(rootUri: String, relativePath: String): AssetEntity?
+
+    @Query("SELECT * FROM assets WHERE taskId = :taskId")
+    protected abstract suspend fun assetsForTask(taskId: String): List<AssetEntity>
+
+    @Query(
+        """
+        UPDATE assets
+        SET sourceUri = :sourceUri, sizeBytes = :sizeBytes, lastModified = :lastModified,
+            sourceMissing = 0
+        WHERE id = :id
+        """
+    )
+    protected abstract suspend fun updateAssetMetrics(
+        id: String,
+        sourceUri: String,
+        sizeBytes: Long?,
+        lastModified: Long?
+    )
+
+    @Query("UPDATE assets SET sourceMissing = 1 WHERE id = :id")
+    protected abstract suspend fun setAssetMissing(id: String)
+
+    @Query("UPDATE sources SET lastImportAt = :at, lastImportStatus = :status WHERE id = :id")
+    protected abstract suspend fun updateSourceStatus(id: String, at: Long, status: String)
+
+    private class ReconcileDelta(val created: Int, val updated: Int)
+
+    /** A Task this Source already owns: update it in place, adding new Assets and measuring old ones. */
+    private suspend fun reconcileTask(
+        source: SourceEntity,
+        taskId: String,
+        task: PlannedTask,
+        now: Long
+    ): ReconcileDelta {
+        val existing = assetsForTask(taskId).associateBy { it.relativePath }
+        var created = 0
+        var updated = 0
+
+        for (asset in task.assets) {
+            val current = existing[asset.rootRelativePath]
+            if (current == null) {
+                insertAsset(
+                    AssetEntity(
+                        id = UUID.randomUUID().toString(),
+                        taskId = taskId,
+                        sortOrder = asset.sortOrder,
+                        rootUri = source.rootUri,
+                        relativePath = asset.rootRelativePath,
+                        sourceUri = asset.uri,
+                        sizeBytes = asset.sizeBytes,
+                        lastModified = asset.lastModified
+                    )
+                )
+                created++
+            } else {
+                updateAssetMetrics(current.id, asset.uri, asset.sizeBytes, asset.lastModified)
+                updated++
+            }
+        }
+
+        updateTaskImportLastSeen(taskId, now)
+        return ReconcileDelta(created, updated)
+    }
+
+    private class NewTaskDelta(
+        val adopted: Boolean = false,
+        val conflict: ImportConflict? = null,
+        val assetsCreated: Int = 0,
+        val assetsUpdated: Int = 0
+    )
+
+    /**
+     * A planned Task this Source has no row for yet. Its file locators decide whether it is brand
+     * new, adopted from the legacy claim set, or in conflict with an existing Task.
+     */
+    private suspend fun resolveNewTask(
+        source: SourceEntity,
+        importer: ImporterKind?,
+        task: PlannedTask,
+        now: Long
+    ): NewTaskDelta {
+        var adoptTaskId: String? = null
+        for (asset in task.assets) {
+            val existing = assetByLocator(source.rootUri, asset.rootRelativePath) ?: continue
+            val ownerTaskId = existing.taskId
+            if (legacyClaimCount(ownerTaskId) > 0) {
+                // A file-as-Task run planning exactly this one file can adopt it; a folder-as-Task
+                // run would fold it into a group and take a reviewed Task's identity with it.
+                if (importer == ImporterKind.FILE_AS_TASK && task.assets.size == 1) {
+                    adoptTaskId = ownerTaskId
+                } else {
+                    return NewTaskDelta(
+                        conflict = ImportConflict(asset.rootRelativePath, "a legacy Task", ownerTaskId)
+                    )
+                }
+            } else {
+                val owner = taskImportForTask(ownerTaskId)
+                return NewTaskDelta(
+                    conflict = ImportConflict(
+                        relativePath = asset.rootRelativePath,
+                        ownerLabel = if (owner?.sourceId == source.id) "this Source" else "another Source",
+                        taskId = ownerTaskId
+                    )
+                )
+            }
+        }
+
+        if (adoptTaskId != null) {
+            insertTaskImport(
+                TaskImportEntity(
+                    taskId = adoptTaskId,
+                    sourceId = source.id,
+                    groupPath = task.groupPath,
+                    displayName = task.displayName,
+                    importedAt = now,
+                    lastSeenAt = now
+                )
+            )
+            deleteLegacyClaim(adoptTaskId)
+            val asset = task.assets.single()
+            val existing = assetByLocator(source.rootUri, asset.rootRelativePath)
+            if (existing != null) {
+                updateAssetMetrics(existing.id, asset.uri, asset.sizeBytes, asset.lastModified)
+            }
+            return NewTaskDelta(adopted = true, assetsUpdated = 1)
+        }
+
+        val taskId = UUID.randomUUID().toString()
+        insertTask(TaskEntity(id = taskId, createdAt = now))
+        insertTaskState(TaskStateEntity(taskId = taskId, updatedAt = now))
+        insertTaskImport(
+            TaskImportEntity(
+                taskId = taskId,
+                sourceId = source.id,
+                groupPath = task.groupPath,
+                displayName = task.displayName,
+                importedAt = now,
+                lastSeenAt = now
+            )
+        )
+        for (asset in task.assets) {
+            insertAsset(
+                AssetEntity(
+                    id = UUID.randomUUID().toString(),
+                    taskId = taskId,
+                    sortOrder = asset.sortOrder,
+                    rootUri = source.rootUri,
+                    relativePath = asset.rootRelativePath,
+                    sourceUri = asset.uri,
+                    sizeBytes = asset.sizeBytes,
+                    lastModified = asset.lastModified
+                )
+            )
+        }
+        return NewTaskDelta(assetsCreated = task.assets.size)
+    }
 }
