@@ -1,5 +1,8 @@
 package com.example.listea
 
+import com.example.listea.data.ReviewAsset
+import com.example.listea.data.ReviewBlock
+
 /**
  * The catalog's containment algebra and the one place content viewability is classified.
  *
@@ -41,4 +44,16 @@ fun directChildOf(groupPath: String, scope: String): Boolean =
 fun assetViewerAvailable(name: String): Boolean {
     val kind = mediaKindOf(name) ?: return false
     return kind == MediaKind.PICTURE || kind == MediaKind.VIDEO
+}
+
+/**
+ * Why a Task cannot be review-submitted, from its Assets, or null when it can be.
+ *
+ * The content-presentation half of eligibility, for a Task already inside a review context: a
+ * missing Asset blocks, an Asset no viewer can render blocks, and a Task with no Assets is eligible.
+ */
+fun reviewBlockFor(assets: List<ReviewAsset>): ReviewBlock? = when {
+    assets.any { it.sourceMissing } -> ReviewBlock.MISSING
+    assets.any { !assetViewerAvailable(it.name) } -> ReviewBlock.NO_VIEWER
+    else -> null
 }

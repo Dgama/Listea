@@ -1,5 +1,6 @@
 package com.example.listea
 
+import com.example.listea.data.ReviewBlock
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -55,4 +56,22 @@ class CatalogTest {
         assertFalse(assetViewerAvailable("d.txt"))
         assertFalse(assetViewerAvailable("noextension"))
     }
+
+    // §6.4, §9.3
+    @Test
+    fun `a Task is blocked by a missing Asset or an unviewable one, and a Task with none is not`() {
+        assertEquals(
+            ReviewBlock.MISSING,
+            reviewBlockFor(listOf(reviewAsset("a.jpg", missing = true)))
+        )
+        assertEquals(
+            ReviewBlock.NO_VIEWER,
+            reviewBlockFor(listOf(reviewAsset("a.pdf", missing = false)))
+        )
+        assertEquals(null, reviewBlockFor(listOf(reviewAsset("a.jpg", missing = false))))
+        assertEquals(null, reviewBlockFor(emptyList()))
+    }
+
+    private fun reviewAsset(name: String, missing: Boolean) =
+        com.example.listea.data.ReviewAsset(sourceUri = "content://root/$name", name = name, sourceMissing = missing)
 }

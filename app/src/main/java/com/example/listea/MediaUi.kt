@@ -83,6 +83,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.example.listea.data.ItemAction
+import com.example.listea.data.ReviewBlock
 import com.example.listea.data.ReviewItem
 import com.example.listea.ui.theme.ListeaMediaChromeTheme
 
@@ -434,22 +435,36 @@ fun ReviewActionBar(
     onToggleCompleted: (Boolean) -> Unit,
     onToggleAction: (ItemAction, Boolean) -> Unit,
     onInfo: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    reviewBlocked: ReviewBlock? = null
 ) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = ListeaDimens.RowGap, vertical = ListeaDimens.CompactGap),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Checkbox(
-            checked = item.decisions.isCompleted,
-            onCheckedChange = onToggleCompleted,
-            modifier = Modifier.semantics {
-                contentDescription =
-                    if (item.decisions.isCompleted) "Checked" else "Not checked"
-            }
-        )
+    Column(modifier = modifier.fillMaxWidth()) {
+        // A blocked Task is shown and navigable but not submittable; the reason is said rather than
+        // left for the refusal to explain. Completion by other means is untouched, so the checkbox
+        // is disabled here but works from the List's own page.
+        if (reviewBlocked != null) {
+            Text(
+                reviewBlocked.label,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = ListeaDimens.RowGap)
+            )
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = ListeaDimens.RowGap, vertical = ListeaDimens.CompactGap),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Checkbox(
+                checked = item.decisions.isCompleted,
+                onCheckedChange = onToggleCompleted,
+                enabled = reviewBlocked == null,
+                modifier = Modifier.semantics {
+                    contentDescription =
+                        if (item.decisions.isCompleted) "Checked" else "Not checked"
+                }
+            )
 
         // Wraps rather than clipping: ordinary labels are one centred line, and a pair of
         // unusually long custom names costs a second line instead of an unreachable control.
@@ -498,8 +513,9 @@ fun ReviewActionBar(
             }
         }
 
-        IconButton(onClick = onInfo) {
-            Icon(Icons.Outlined.Info, contentDescription = "Item info")
+            IconButton(onClick = onInfo) {
+                Icon(Icons.Outlined.Info, contentDescription = "Item info")
+            }
         }
     }
 }

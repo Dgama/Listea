@@ -108,6 +108,7 @@ fun folderReviewQueue(
             decisions = ReviewDecisions(row.isCompleted, row.isFavorite, decodeActionIds(row.customActions)),
             sizeBytes = file?.sizeBytes ?: row.sizeBytes,
             lastModified = file?.lastModified ?: row.lastModified,
+            assets = row.assets,
             rootRelativePath = row.groupPath
         )
     }

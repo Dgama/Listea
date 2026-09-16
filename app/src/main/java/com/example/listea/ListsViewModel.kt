@@ -40,6 +40,7 @@ import com.example.listea.data.ScannedFile
 import com.example.listea.data.decisions
 import com.example.listea.data.encodeActionIds
 import com.example.listea.data.rootRelativePathOf
+import com.example.listea.data.toReviewAsset
 import com.example.listea.data.toReviewItem
 import com.example.listea.data.WebhookRecordEntity
 import com.example.listea.data.WebhookRecordSummary
@@ -463,9 +464,19 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
      * state, which is still theirs.
      */
     fun observeDetail(listId: Long): Flow<ListDetail?> =
-        combine(dao.observeList(listId), dao.observeItems(listId)) { list, items ->
+        combine(dao.observeList(listId), dao.observeItems(listId), dao.observeAssetsForList(listId)) { list, items, assets ->
             list?.let { owner ->
-                ListDetail(owner, items.map { it.toReviewItem(owner.sourceRootUri) })
+                val byTask = assets.groupBy { it.taskId }
+                ListDetail(
+                    owner,
+                    items.map { item ->
+                        val resolved = byTask[item.taskId].orEmpty().map { it.toReviewAsset() }
+                        item.toReviewItem(owner.sourceRootUri).copy(
+                            assets = resolved,
+                            reviewBlocked = reviewBlockFor(resolved)
+                        )
+                    }
+                )
             }
         }
 

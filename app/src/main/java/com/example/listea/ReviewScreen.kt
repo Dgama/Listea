@@ -1,6 +1,8 @@
 package com.example.listea
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,6 +13,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -35,6 +39,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -42,6 +47,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import coil3.ImageLoader
 import com.example.listea.data.ItemAction
 import com.example.listea.data.ReviewAsset
+import com.example.listea.data.ReviewBlock
 import com.example.listea.data.ReviewItem
 import com.example.listea.domain.ListId
 import com.example.listea.domain.ReviewContext
@@ -678,8 +684,9 @@ private fun TaskReviewSurface(
             player = player,
             imageLoader = imageLoader,
             settings = settings,
-            // Forward is never blocked: swiping the last item off checks it and ends the review.
-            canSwipeForward = true,
+            // A blocked Task cannot be swiped forward into a judgment; the end of the queue is
+            // already this exact state, so it is the same inert forward edge, not a special one.
+            canSwipeForward = item.reviewBlocked == null,
             canSwipeBack = index > 0,
             onSwipeForward = onSwipeForward,
             onSwipeBack = onSwipeBack,
@@ -689,6 +696,7 @@ private fun TaskReviewSurface(
         TaskReviewControls(
             item = item,
             settings = settings,
+            reviewBlocked = item.reviewBlocked,
             onToggleCompleted = onToggleCompleted,
             onToggleAction = onToggleAction,
             onInfo = onInfo,
@@ -714,8 +722,9 @@ private fun TaskReviewSurface(
  * the webhook boundary.
  *
  * It renders no selector while there is one Asset — a selector for one Asset is not a navigator —
- * and holds no `selectedAssetId`; that state's semantics cannot be designed before a real
- * multi-Asset Task exists to answer them.
+ * and while there are several it owns the selection, which resets to the first Asset on every Task
+ * change. The Task is the judgment unit; carrying "Asset 3" from one Task to the next is
+ * meaningless when their Assets are different things.
  */
 @Composable
 private fun AssetNavigator(
@@ -731,7 +740,11 @@ private fun AssetNavigator(
     onTap: () -> Unit,
     modifier: Modifier
 ) {
-    val asset = assets.firstOrNull()
+    // View state, not round membership: keyed by the Task so it survives rotation and process death
+    // and is dropped with the Task, which is the reset on every Task change.
+    var selectedIndex by rememberSaveable(item.taskId) { mutableStateOf(0) }
+    val asset = assets.getOrNull(selectedIndex)
+
     if (asset == null) {
         // No Asset, no viewer: a manual item is still a card in the queue, swipeable and
         // completable exactly like a file's, but with nothing to render.
@@ -748,19 +761,65 @@ private fun AssetNavigator(
             PreviewPlaceholder(Modifier.fillMaxSize().mediaZoom(zoom), "Manual item", item.title)
         }
     } else {
-        AssetViewer(
-            taskId = item.taskId,
-            asset = asset,
-            player = player,
-            imageLoader = imageLoader,
-            settings = settings,
-            canSwipeForward = canSwipeForward,
-            canSwipeBack = canSwipeBack,
-            onSwipeForward = onSwipeForward,
-            onSwipeBack = onSwipeBack,
-            onTap = onTap,
-            modifier = modifier
-        )
+        Box(modifier) {
+            AssetViewer(
+                taskId = item.taskId,
+                asset = asset,
+                player = player,
+                imageLoader = imageLoader,
+                settings = settings,
+                canSwipeForward = canSwipeForward,
+                canSwipeBack = canSwipeBack,
+                onSwipeForward = onSwipeForward,
+                onSwipeBack = onSwipeBack,
+                onTap = onTap,
+                modifier = Modifier.fillMaxSize()
+            )
+            if (assets.size > 1) {
+                AssetSelector(
+                    count = assets.size,
+                    selectedIndex = selectedIndex,
+                    onSelect = { selectedIndex = it },
+                    modifier = Modifier.align(Alignment.TopCenter)
+                )
+            }
+        }
+    }
+}
+
+/**
+ * The pages of one Task, as a row of dots.
+ *
+ * Deliberately not a `‹ N / M ›` counter: the Task Navigator owns that shape, and a selector that
+ * looked like it would be two controls meaning different things wearing one face. A dot can only
+ * mean "which page of this Task", which is all it is asked to mean.
+ */
+@Composable
+private fun AssetSelector(
+    count: Int,
+    selectedIndex: Int,
+    onSelect: (Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier.padding(ListeaDimens.RowGap),
+        horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
+    ) {
+        repeat(count) { index ->
+            Box(
+                Modifier
+                    .size(10.dp)
+                    .clip(CircleShape)
+                    .background(
+                        if (index == selectedIndex) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.outline
+                        }
+                    )
+                    .clickable { onSelect(index) }
+            )
+        }
     }
 }
 
@@ -825,6 +884,7 @@ private fun AssetViewer(
 private fun TaskReviewControls(
     item: ReviewItem,
     settings: AppSettings,
+    reviewBlocked: ReviewBlock?,
     onToggleCompleted: (Boolean) -> Unit,
     onToggleAction: (ItemAction, Boolean) -> Unit,
     onInfo: () -> Unit,
@@ -835,6 +895,7 @@ private fun TaskReviewControls(
         // Observed by the caller rather than threaded through every screen: renaming an action in
         // Settings relabels the chips immediately, with no restart and no item touched.
         settings = settings,
+        reviewBlocked = reviewBlocked,
         onToggleCompleted = onToggleCompleted,
         onToggleAction = onToggleAction,
         onInfo = onInfo,

@@ -39,5 +39,8 @@ data class CatalogRow(
     val lastModified: Long?,
 
     /** True when at least one required Asset has no viewer in this build — e.g. a PDF. */
-    val hasUnviewableAsset: Boolean
+    val hasUnviewableAsset: Boolean,
+
+    /** The Assets themselves, resolved for the viewer boundary rather than re-read per card. */
+    val assets: List<ReviewAsset> = emptyList()
 )

@@ -92,6 +92,21 @@ abstract class ListsDao {
     )
     abstract fun observeItems(listId: Long): Flow<List<ListItemEntity>>
 
+    /**
+     * The Assets of a List's Tasks, in Asset order, so the review surface can resolve a multi-Asset
+     * Task's pages without a per-card query. Joined through `list_items` rather than by Task id list
+     * so it stays a single Room query that re-emits when any Asset changes.
+     */
+    @Query(
+        """
+        SELECT a.* FROM assets a
+        JOIN list_items i ON i.taskId = a.taskId
+        WHERE i.listId = :listId
+        ORDER BY a.taskId, a.sortOrder ASC
+        """
+    )
+    abstract fun observeAssetsForList(listId: Long): Flow<List<AssetEntity>>
+
     @Insert
     abstract suspend fun insertList(list: ListEntity): Long
 
@@ -1644,10 +1659,11 @@ abstract class ListsDao {
     )
     protected abstract suspend fun catalogProjections(sourceId: String): List<CatalogProjection>
 
-    /** The catalog for one Source, with [CatalogRow.hasUnviewableAsset] resolved from its Assets. */
+    /** The catalog for one Source, with its viewability and its Assets resolved from the Task. */
     @Transaction
     open suspend fun getCatalogTasks(sourceId: String): List<CatalogRow> =
         catalogProjections(sourceId).map { projection ->
+            val assets = assetsForTask(projection.taskId).sortedBy { it.sortOrder }
             CatalogRow(
                 taskId = projection.taskId,
                 groupPath = projection.groupPath,
@@ -1659,9 +1675,10 @@ abstract class ListsDao {
                 missingAssets = projection.missingAssets,
                 sizeBytes = projection.sizeBytes,
                 lastModified = projection.lastModified,
-                hasUnviewableAsset = assetsForTask(projection.taskId).any { asset ->
+                hasUnviewableAsset = assets.any { asset ->
                     !assetViewerAvailable(asset.relativePath?.substringAfterLast('/').orEmpty())
-                }
+                },
+                assets = assets.map { it.toReviewAsset() }
             )
         }
 

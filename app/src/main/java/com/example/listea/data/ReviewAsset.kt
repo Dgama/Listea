@@ -17,6 +17,15 @@ data class ReviewAsset(
     val lastModified: Long? = null
 )
 
+/** An [AssetEntity] reduced to what the presentation needs; the name is the file's own. */
+fun AssetEntity.toReviewAsset(): ReviewAsset = ReviewAsset(
+    sourceUri = sourceUri.orEmpty(),
+    name = relativePath?.substringAfterLast('/').orEmpty(),
+    sourceMissing = sourceMissing,
+    sizeBytes = sizeBytes,
+    lastModified = lastModified
+)
+
 /**
  * Why a Task cannot be review-submitted in the scope a queue was built for.
  *
