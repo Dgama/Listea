@@ -78,7 +78,11 @@ class MigrationSmokeTest {
         // about. The assertions below survive V13 unchanged: it carries every decision column
         // across and rebuilds only the table they sit on.
         val database = Room.databaseBuilder(context, ListeaDatabase::class.java, V11_DB)
-            .addMigrations(ListeaDatabase.MIGRATION_11_12, ListeaDatabase.MIGRATION_12_13)
+            .addMigrations(
+                ListeaDatabase.MIGRATION_11_12,
+                ListeaDatabase.MIGRATION_12_13,
+                ListeaDatabase.MIGRATION_13_14
+            )
             .build()
 
         database.openHelper.writableDatabase

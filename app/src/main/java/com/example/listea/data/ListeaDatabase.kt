@@ -21,9 +21,13 @@ import java.util.UUID
         TaskStateEntity::class,
         ReviewEventEntity::class,
         LegacyItemIdEntity::class,
-        LegacyManualTaskEntity::class
+        LegacyManualTaskEntity::class,
+        SourceEntity::class,
+        TaskImportEntity::class,
+        LegacySourceTaskEntity::class,
+        LegacyTaskIdEntity::class
     ],
-    version = 13,
+    version = 14,
     exportSchema = true
 )
 abstract class ListeaDatabase : RoomDatabase() {
@@ -585,6 +589,101 @@ abstract class ListeaDatabase : RoomDatabase() {
         }
 
         /**
+         * V14 gives a Task a place to have come from, without changing what a Task is.
+         *
+         * Three things happen, and none of them redefines identity. Four new tables arrive — a
+         * registered Source, the provenance of a Task under one, and the two legacy claim sets that
+         * name what a v0.1 database already contained. Three additive columns land on `assets`, so a
+         * catalog scope has somewhere to read the document URI and the measurements that used to come
+         * off `list_items` or a live folder listing. And every file-backed Task is claimed into
+         * `legacy_source_tasks`, because a browse minted it and no Source has yet.
+         *
+         * The claim is a `SELECT DISTINCT taskId FROM assets WHERE rootUri IS NOT NULL`: a Task with
+         * no file-backed Asset is a legacy manual item, and `legacy_manual_tasks` already names it —
+         * it has no source material, so nothing could ever import it. The Asset columns are backfilled
+         * from the `list_items` row naming the same Task, which carried `sourceUri`, `sourceSizeBytes`
+         * and `sourceModifiedAt` for exactly this file; a Task that only ever existed through Quick
+         * Review keeps nulls, and the first import fills them in.
+         *
+         * Nothing else is written. No `tasks`, no `task_state`, no `review_events`, no `list_items`,
+         * no `lists`, no ids of any kind — a migration must not invent a review nobody performed, nor
+         * a Source nobody registered. `sources` and `task_imports` are left empty on purpose: nothing
+         * has yet decided that these Tasks are imported material.
+         */
+        internal val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(connection: SQLiteConnection) {
+                createImportTables(connection)
+                connection.execSQL("ALTER TABLE assets ADD COLUMN sourceUri TEXT")
+                connection.execSQL("ALTER TABLE assets ADD COLUMN sizeBytes INTEGER")
+                connection.execSQL("ALTER TABLE assets ADD COLUMN lastModified INTEGER")
+
+                // Every file-backed Task is a legacy source Task until a real import adopts it.
+                connection.execSQL(
+                    "INSERT INTO legacy_source_tasks (taskId) " +
+                        "SELECT DISTINCT taskId FROM assets WHERE rootUri IS NOT NULL"
+                )
+
+                // A file Task's cached measurements live on its list_items row today; copy them
+                // across so a catalog scope can read them without a List. A file in two Lists has two
+                // rows naming the same Task; one is taken, and they agree by construction.
+                connection.execSQL(
+                    "UPDATE assets SET " +
+                        "sourceUri = (SELECT i.sourceUri FROM list_items i " +
+                        "             WHERE i.taskId = assets.taskId AND i.sourceUri IS NOT NULL LIMIT 1), " +
+                        "sizeBytes = (SELECT i.sourceSizeBytes FROM list_items i " +
+                        "             WHERE i.taskId = assets.taskId AND i.sourceSizeBytes IS NOT NULL LIMIT 1), " +
+                        "lastModified = (SELECT i.sourceModifiedAt FROM list_items i " +
+                        "             WHERE i.taskId = assets.taskId AND i.sourceModifiedAt IS NOT NULL LIMIT 1) " +
+                        "WHERE EXISTS (SELECT 1 FROM list_items i WHERE i.taskId = assets.taskId)"
+                )
+            }
+        }
+
+        /**
+         * The four tables V14 introduces, in the shape the entities declare and `14.json` records.
+         *
+         * Written out one statement at a time, for the same reason [createTaskTables] is: a column
+         * that changes in an entity is a line that has to change here, and the two can be diffed
+         * against the exported schema by eye rather than by decoding a loop.
+         */
+        private fun createImportTables(connection: SQLiteConnection) {
+            connection.execSQL(
+                "CREATE TABLE IF NOT EXISTS sources (" +
+                    "id TEXT NOT NULL, rootUri TEXT NOT NULL, relativePath TEXT NOT NULL, " +
+                    "displayName TEXT NOT NULL, importerKind TEXT NOT NULL, " +
+                    "importerVersion INTEGER NOT NULL, createdAt INTEGER NOT NULL, " +
+                    "lastImportAt INTEGER, lastImportStatus TEXT, PRIMARY KEY(id))"
+            )
+            connection.execSQL(
+                "CREATE UNIQUE INDEX IF NOT EXISTS index_sources_rootUri_relativePath " +
+                    "ON sources (rootUri, relativePath)"
+            )
+            connection.execSQL(
+                "CREATE TABLE IF NOT EXISTS task_imports (" +
+                    "taskId TEXT NOT NULL, sourceId TEXT NOT NULL, groupPath TEXT NOT NULL, " +
+                    "displayName TEXT NOT NULL, importedAt INTEGER NOT NULL, " +
+                    "lastSeenAt INTEGER NOT NULL, PRIMARY KEY(taskId), " +
+                    "FOREIGN KEY(taskId) REFERENCES tasks(id) ON UPDATE NO ACTION ON DELETE CASCADE, " +
+                    "FOREIGN KEY(sourceId) REFERENCES sources(id) " +
+                    "ON UPDATE NO ACTION ON DELETE NO ACTION)"
+            )
+            connection.execSQL(
+                "CREATE INDEX IF NOT EXISTS index_task_imports_sourceId_groupPath " +
+                    "ON task_imports (sourceId, groupPath)"
+            )
+            connection.execSQL(
+                "CREATE TABLE IF NOT EXISTS legacy_source_tasks (" +
+                    "taskId TEXT NOT NULL, PRIMARY KEY(taskId), " +
+                    "FOREIGN KEY(taskId) REFERENCES tasks(id) ON UPDATE NO ACTION ON DELETE CASCADE)"
+            )
+            connection.execSQL(
+                "CREATE TABLE IF NOT EXISTS legacy_task_ids (" +
+                    "taskId TEXT NOT NULL, publicId TEXT NOT NULL, PRIMARY KEY(taskId), " +
+                    "FOREIGN KEY(taskId) REFERENCES tasks(id) ON UPDATE NO ACTION ON DELETE CASCADE)"
+            )
+        }
+
+        /**
          * The six tables V13 introduces, in the shape the entities declare and `13.json` records.
          *
          * Written out one statement at a time rather than driven from a list, so a column that
@@ -836,7 +935,8 @@ abstract class ListeaDatabase : RoomDatabase() {
                     MIGRATION_9_10,
                     MIGRATION_10_11,
                     MIGRATION_11_12,
-                    MIGRATION_12_13
+                    MIGRATION_12_13,
+                    MIGRATION_13_14
                 )
                     .build()
                     .also { instance = it }

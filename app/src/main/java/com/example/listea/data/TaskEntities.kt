@@ -64,6 +64,16 @@ data class TaskEntity(
  * [sortOrder] orders Assets within one Task. It is 0 for everything v0.2 creates, because v0.2 is
  * one Asset per Task; it exists so a future Task holding several does not need a migration to say
  * which comes first.
+ *
+ * [sourceUri] is the document URI to render this Asset from, and [sizeBytes] / [lastModified] are
+ * what the viewer and the arrangement filter and sort on. All three are read off `list_items` for a
+ * List and off the live folder listing for Quick Review today; a catalog scope has neither, so the
+ * import run that measured them records them here. All three are nullable, refreshed by re-import,
+ * and never identity — the same justification `list_items.sourceSizeBytes` already carries.
+ *
+ * Still no persisted kind: the importable-content policy and the viewer-availability rule both
+ * classify from the file name at the moment they need it. A stored kind arrives with the second
+ * viewer, in v0.3.
  */
 @Entity(
     tableName = "assets",
@@ -86,7 +96,10 @@ data class AssetEntity(
     val sortOrder: Int,
     val rootUri: String?,
     val relativePath: String?,
-    val sourceMissing: Boolean = false
+    val sourceMissing: Boolean = false,
+    val sourceUri: String? = null,
+    val sizeBytes: Long? = null,
+    val lastModified: Long? = null
 )
 
 /**
