@@ -8,6 +8,7 @@ import androidx.room.Transaction
 import com.example.listea.ImporterKind
 import com.example.listea.ImportPlan
 import com.example.listea.PlannedTask
+import com.example.listea.assetViewerAvailable
 import com.example.listea.isAncestorOrSame
 import com.example.listea.scopesOverlap
 import com.example.listea.domain.AssetId
@@ -206,6 +207,12 @@ abstract class ListsDao {
         context: ReviewContext?,
         now: Long
     ): List<Long> {
+        // A Task whose content cannot be presented is not reviewable: a judgment recorded against
+        // uninspectable evidence is a judgment about nothing. The refusal lives here, at the write
+        // boundary, so no path — gesture, control, or future caller — can record one. A disabled
+        // control in the UI is a courtesy; this is the guarantee.
+        if (!contentPresentable(taskId)) return emptyList()
+
         val affected = listsContainingTask(taskId)
         val wasComplete = affected.filter { isComplete(it) == true }.toSet()
 
@@ -1524,6 +1531,65 @@ abstract class ListsDao {
 
     @Query("UPDATE sources SET lastImportAt = :at, lastImportStatus = :status WHERE id = :id")
     protected abstract suspend fun updateSourceStatus(id: String, at: Long, status: String)
+
+    /**
+     * The catalog's SQL half: a Task's state and Asset measurements, aggregated per Task. The
+     * viewability flag is resolved in [getCatalogTasks], because the classification is Kotlin, not
+     * SQL.
+     */
+    @Query(
+        """
+        SELECT ti.taskId AS taskId,
+               ti.groupPath AS groupPath,
+               ti.displayName AS displayName,
+               ts.isCompleted AS isCompleted,
+               ts.isFavorite AS isFavorite,
+               ts.customActions AS customActions,
+               COUNT(a.id) AS assetCount,
+               COALESCE(SUM(a.sourceMissing), 0) AS missingAssets,
+               SUM(a.sizeBytes) AS sizeBytes,
+               MAX(a.lastModified) AS lastModified
+        FROM task_imports ti
+        JOIN task_state ts ON ts.taskId = ti.taskId
+        LEFT JOIN assets a ON a.taskId = ti.taskId
+        WHERE ti.sourceId = :sourceId
+        GROUP BY ti.taskId
+        """
+    )
+    protected abstract suspend fun catalogProjections(sourceId: String): List<CatalogProjection>
+
+    /** The catalog for one Source, with [CatalogRow.hasUnviewableAsset] resolved from its Assets. */
+    @Transaction
+    open suspend fun getCatalogTasks(sourceId: String): List<CatalogRow> =
+        catalogProjections(sourceId).map { projection ->
+            CatalogRow(
+                taskId = projection.taskId,
+                groupPath = projection.groupPath,
+                displayName = projection.displayName,
+                isCompleted = projection.isCompleted,
+                isFavorite = projection.isFavorite,
+                customActions = projection.customActions,
+                assetCount = projection.assetCount,
+                missingAssets = projection.missingAssets,
+                sizeBytes = projection.sizeBytes,
+                lastModified = projection.lastModified,
+                hasUnviewableAsset = assetsForTask(projection.taskId).any { asset ->
+                    !assetViewerAvailable(asset.relativePath?.substringAfterLast('/').orEmpty())
+                }
+            )
+        }
+
+    /**
+     * Whether a Task's content can currently be presented: every required Asset resolves and has a
+     * viewer in this build. A Task with no Assets is presentable — a legacy manual item has no
+     * content that could fail to render. This is the write-boundary half of review eligibility; the
+     * containment half is answered by the scope a queue was built from, upstream of the write.
+     */
+    protected open suspend fun contentPresentable(taskId: String): Boolean =
+        assetsForTask(taskId).all { asset ->
+            !asset.sourceMissing &&
+                assetViewerAvailable(asset.relativePath?.substringAfterLast('/').orEmpty())
+        }
 
     private class ReconcileDelta(val created: Int, val updated: Int)
 
