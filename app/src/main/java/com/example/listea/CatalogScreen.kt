@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -17,6 +18,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
@@ -547,6 +549,21 @@ private fun CatalogTaskCard(
                     } else {
                         MaterialTheme.colorScheme.error
                     }
+                )
+            }
+            // A judged Task says so here, at the trailing edge, the way a browsed file does. Only
+            // when it is judged: the catalog has never drawn an unjudged Task differently, and an
+            // empty circle on every card would be a claim this screen has not been making.
+            //
+            // Not while picking. The card's own rule is one job at a time, and in that mode the
+            // leading box is the row's state; two marks at two edges would read as one row with
+            // two answers, when one of them is about the List being assembled and not the Task.
+            if (!selecting && row.isCompleted) {
+                Icon(
+                    Icons.Filled.CheckCircle,
+                    contentDescription = "Checked",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(ListeaDimens.IconSize)
                 )
             }
         }
