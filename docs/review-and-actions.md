@@ -10,7 +10,8 @@ The Review screen: every gesture, control and behaviour, and the actions that go
 - [The Info sheet](#the-info-sheet)
 - [Zoom](#zoom)
 - [Video](#video)
-- [The four viewing surfaces](#the-four-viewing-surfaces)
+- [The viewing surfaces](#the-viewing-surfaces)
+  - [The Todo preview](#the-todo-preview)
 - [Filtering and sorting](#filtering-and-sorting)
 - [Rounds](#rounds)
 - [Resuming](#resuming)
@@ -345,7 +346,7 @@ videos, review only those.
 By default one filter and one sort are **shared by every folder and every List**. Switch *Same
 filter and sort everywhere* off in Settings and each keeps its own. Switching it discards nothing —
 both the shared arrangement and the per-listing ones are kept either way, so turning it on to sweep
-through a root and turning it back off returns everything to what it had. Up to 200 per-folder
+through several folders and turning it back off returns each to what it had. Up to 200 per-folder
 arrangements are remembered; past that the least recently set is dropped.
 
 Filtering and sorting change **what is shown and what a review walks**, and nothing else. Progress,

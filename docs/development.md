@@ -146,6 +146,12 @@ in files with no Android imports. The table is a selection by subject rather tha
 | `TodoDissolutionTest`, `ListAfterDissolutionTest`, `HistoryRecoveryTest` | Deleting a Todo: what it takes, what it leaves, what a List says afterwards, and what a later Todo can load from what was left |
 | `ContentPolicyTest` | What a changed Task means: the three tiers, the "unchanged means no policy" rule, and every rule by which an Asset counts as changed, missing, or not news |
 | `ContentPolicyRunTest` | The same tiers as *shapes of outcome* through real SQL: which of a Task's id, its judgments and its List memberships survive each one |
+| `IdentityTest`, `ReviewResponseTest`, `TaskActionTest`, `TemplateRegistryTest` | The `domain/` model: that id types are not interchangeable and never derive from a path, that a response's stored form is canonical, that only one of the three actions is a submission, and what a template version's content hash is built from |
+| `ListsDaoTest`, `TaskWriteTest`, `AssetStepTest`, `CurrentStateTest`, `EligibilityTest` | The DAO directly: what a write leaves behind, how Assets step, what "current state" resolves to, and which Tasks a List may take |
+| `ReviewSessionTest`, `ReviewSubmissionTest` | A review session's lifetime, and what submitting one records |
+| `LegacyItemIdTest`, `LegacyManualCleanupTest` | The two legacy paths: older public ids, and manual items with no file behind them |
+| `CheckedFileReaderTest` | Which files count as checked under an Upstream, and which are still on the device |
+| `WebhookBodyTest`, `WebhookCompatTest` | The payload's own shape, and the compatibility rules it must not break |
 
 There is one instrumented test (`ExampleInstrumentedTest`), which is the template's and is not load
 bearing.
@@ -159,8 +165,9 @@ app/src/main/java/com/example/listea/
   ManagementUi.kt          shared pieces for Upstreams / Todo / Lists / List Detail
 
   UpstreamsScreen.kt       the Upstreams tab: one card per folder material comes from
-  SourcesScreen.kt         the Todo tab: one card per Upstream's Tasks
+  SourcesScreen.kt         the Todo tab: one card per Todo (the file is named for the old word)
   CatalogScreen.kt         a Todo's catalog, and selecting Tasks out of it
+  CatalogTaskPreviewScreen.kt  one Task from the catalog, presented for reading
   ListsScreen.kt           the Lists index
   ListDetailScreen.kt      one List: source, progress, items
   ListsViewModel.kt        all list, folder, freshness and webhook operations
@@ -180,12 +187,17 @@ app/src/main/java/com/example/listea/
   MediaSave.kt             copying a viewed file into the DCIM/Listea gallery album
   MediaShare.kt            staging a viewed file for Android's share chooser
 
+  Catalog.kt               the catalog's containment algebra and viewability classification
+  CatalogSelection.kt      what the catalog has picked, as scopes and excluded Tasks
+  ContentPolicy.kt         the three tiers, and the pure rule that applies one to a Task
   FileArrange.kt           filtering and sorting, as pure values and one pure function
   FileArrangeUi.kt         the filter and sort headers and dialogs
+  FolderListGate.kt        the decision table behind Create List's two confirmation gates
   FolderReader.kt          reading a SAF folder
   FolderScan.kt            walking a subtree, and diffing it against a List
-  FolderStore.kt           the persisted root grant
+  FolderSource.kt          every read of the user's folders, behind one seam
   FolderListStatus.kt      None / List / Sublist, and per-folder progress
+  Importer.kt              the grouping rule: a folder snapshot into planned Tasks
 
   Settings.kt              AppSettings, custom actions, the DataStore behind them
   SettingsScreen.kt        Settings
@@ -195,11 +207,42 @@ app/src/main/java/com/example/listea/
   WebhookHistoryScreen.kt  every kept payload, with resend and delete
 
   data/ItemId.kt           the public id an item carries onto the webhook
+  data/CatalogRow.kt       the catalog's row projections, scopes and Todo summaries
+  data/ImportEntities.kt   Room entities: sources, task_imports, dissolution, legacy links
+  data/ImportRun.kt        the run itself, and what it reports
   data/ListEntities.kt     Room entities, actions, decisions
   data/ListsDao.kt         every query
   data/ListeaDatabase.kt   the database and its migrations
+  data/ReviewAsset.kt      one Asset as the review surface reads it, and why it is missing
+  data/TaskEntities.kt     Room entities: tasks, assets, task_state, review_events
+  data/UpstreamEntities.kt Room entity: upstreams
+  domain/                  the review model as plain Kotlin — see below
   ui/theme/                colours, typography, theme
 ```
+
+### `domain/` — the model with no framework in it
+
+`domain/` holds the review model as plain Kotlin, and it is live rather than aspirational:
+`ListsDao`, `ListsViewModel`, `ReviewScreen` and `QuickReviewScreen` all read and write through it.
+
+| File | What it holds |
+|---|---|
+| `Domain.kt` | `SourceRef`, `AssetKind`, `Task`, `Asset`, `TaskState`, `ListEntry`, `ReviewEvent`, `ReviewEventKind`, `ReviewContext` |
+| `Ids.kt` | `TaskId`, `AssetId`, `ListId`, `ListEntryId`, `ReviewEventId`, `TemplateId`, `TemplateVersionRef` |
+| `ReviewResponse.kt` | What a person submitted, its canonical stored form, and what counts as completing |
+| `TaskAction.kt` | The vocabulary a gesture, a button and a keyboard shortcut all resolve into |
+| `Templates.kt` | Asset Viewer against Task Review, and what one version of one says |
+
+Nothing in it imports Room, Compose, SAF, `org.json` or any HTTP shape. That is not purity for its
+own sake — it is what lets the identity rules be pinned by tests that owe nothing to Android, and
+it is the seam the [cross-platform roadmap item](roadmap.md) would widen.
+
+The identity types are the substantive part: **several** id types rather than one, so passing a
+Task id where an Asset id belongs does not compile, and so a Task's identity cannot be derived from
+where its file sits. They are UUIDs rather than [public item ids](webhooks.md#item-ids), whose
+middle field is a fingerprint of the path under its Upstream — deliberately readable, deliberately
+different for two arrivals of one file, and disqualifying for a Task that has to survive a move.
+Both schemes stay; the adapter is where one becomes the other.
 
 ## Architectural notes
 
@@ -211,9 +254,17 @@ and webhook operations. There is no repository layer and no domain-mapping layer
 is a known cost, and it is the first thing the [roadmap](roadmap.md) work will have to address.
 
 **Pure logic is kept separable.** `FileArrange.kt`, `ReviewArrange.kt`, `QuickReview.kt`,
-`FolderListStatus.kt`, `ItemId.kt` and the payload helpers in `Webhook.kt` have no Compose and
-little or no Android dependency. That is what makes 561 JVM tests possible, and it is the seam the
-cross-platform roadmap item would widen.
+`FolderListStatus.kt`, `ItemId.kt`, `Catalog.kt`, `CatalogSelection.kt`, `ContentPolicy.kt`,
+`FolderListGate.kt`, `Importer.kt`, the payload helpers in `Webhook.kt`, and the whole of `domain/`
+have no Compose and little or no Android dependency. That is what makes 561 JVM tests possible, and
+it is the seam the cross-platform roadmap item would widen.
+
+The rule the newest of these follow: **the decision is a pure function, and the DAO acts on its
+answer.** `Importer.kt` plans Tasks from a `FolderSnapshot` and writes nothing;
+`decideContentDecision` in `ContentPolicy.kt` says what one policy means for one Task's shape;
+`FolderListGate.kt` is the decision table behind Create List's two confirmation gates. Each is
+pinned by tests that owe nothing to Android, SAF or Room, which is why "which files are one Task"
+and "what a changed Task means" are the two questions this codebase can answer precisely.
 
 **State belongs to the Task, not to the List.** Checked, favourite and custom actions are stored in
 `task_state`, keyed by `taskId` and cascading from `tasks`; a List stores membership and projects
@@ -246,13 +297,19 @@ sent or stored, and is marked in the source as temporary.
 ## Database and migrations
 
 Room, schema **version 19**, database file `listea.db`, and `exportSchema` is on. Sixteen entities
-across three files:
+across four files:
 
 | File | Entities |
 |---|---|
-| `ListEntities.kt` | `ListEntity`, `ListItemEntity`, `WebhookRecordEntity`, `FileReviewStateEntity` |
-| `TaskEntities.kt` | `TaskEntity`, `AssetEntity`, `TaskStateEntity`, `ReviewEventEntity`, and the legacy id and manual-item tables |
-| `ImportEntities.kt` | `SourceEntity`, `TaskImportEntity`, `DissolvedTaskStateEntity`, and the legacy source and task links |
+| `ListEntities.kt` | `ListEntity`, `ListItemEntity`, `FileReviewStateEntity`, `WebhookRecordEntity` |
+| `TaskEntities.kt` | `TaskEntity`, `AssetEntity`, `TaskStateEntity`, `ReviewEventEntity`, `LegacyItemIdEntity`, `LegacyManualTaskEntity` |
+| `ImportEntities.kt` | `SourceEntity`, `TaskImportEntity`, `DissolvedTaskStateEntity`, `LegacySourceTaskEntity`, `LegacyTaskIdEntity` |
+| `UpstreamEntities.kt` | `UpstreamEntity` |
+
+**`SourceEntity` is a Todo, not a Source.** The model name is the pre-v0.3.0 one, kept deliberately
+rather than renamed — see the note on `TopLevelDestination` in `AppShell.kt`, and
+[the naming conflict](ARCHITECTURE.md#file-source-and-upstream) it leaves open. Read every `source`
+identifier in `data/` as "the Todo this run wrote".
 
 **Every version step from 1 has a written migration** and they are all registered; there is no
 destructive fallback. Upgrading in place is expected to keep existing data.

@@ -51,6 +51,9 @@ More detail — dependencies, project layout, what the tests cover — is in
 
 ## First launch: add an Upstream
 
+<!-- screenshot: upstreams-tab — the Upstreams tab with two or three Upstream cards, each showing
+     the folder inside it and its folder/file/size counts -->
+
 On first launch the **Upstreams** tab has nothing to show, because Listea has not been given
 anywhere to look. Folders are added in Settings.
 
@@ -90,20 +93,43 @@ parts of its tree, and a folder you never import produces none.
 > decisions. The dialog names the Todos already there so you know what you are making a second of,
 > and then goes ahead.
 
-The dialog asks three things:
+<!-- screenshot: create-tasks-dialog — the Create tasks? dialog open on a folder, showing the Name
+     field, both grouping rows, the keep-folder-tree box and the three content-policy rows -->
+
+The dialog asks four things, in this order:
 
 | Field | What it decides |
 |---|---|
-| **Importer** | Whether each **file** becomes a Task, or each **folder** does |
 | **Name** | What the Todo is called. Defaults to the folder's own name |
+| **Importer** | Whether each **file** becomes a Task, or each **folder** does |
 | **Keep folder tree** | Whether the Todo shows the folder structure, or one flat list of Tasks |
+| **When a Task's content changes** | What later happens to a Task whose files changed or disappeared outside Listea — see [What a changed Task means](core-concepts.md#what-a-changed-task-means) |
 
 **One Task per folder** forces the tree off: a folder-as-Task run builds Tasks from the folders
 themselves and they are flat by construction, so the control is hidden rather than offered and then
 taken away. [Core concepts](core-concepts.md) says what the two importers produce.
 
+The content policy is the one answer here that is about *later* rather than about this run, and it
+is the only one whose third option removes anything. It defaults to **Keep it**, which changes
+nothing, and Settings holds the same chooser as the default a new Todo starts with — see
+[Settings → Todos](settings.md#todos).
+
+<!-- screenshot: history-recovery — the "Decisions left behind" block in the Create tasks? dialog,
+     with a Start fresh row and one kept history under it -->
+
+**A fifth question appears only sometimes.** If a Todo was deleted at this folder and chose to keep
+its decisions, the dialog offers them under **Decisions left behind**, with a **Start fresh** row
+beside them. Loading one is optional and is a copy, not a resurrection — see
+[Deleting a Todo](core-concepts.md#deleting-a-todo).
+
+<!-- screenshot: import-report — the "Import complete" report, listing what the run created,
+     adopted, updated and flagged missing, with the "started over" and "replaced" lines under the
+     Task counts -->
+
 The Tasks appear on the **Todo** tab, under the name you gave them. Running Create Tasks again over
-the same folder reads it afresh and records the answers given this time, a new name included.
+the same folder reads it afresh and records the answers given this time, a new name included. The
+Todo's card also carries **Refresh Import**, which re-runs the import that produced it and asks the
+same questions with the refresh wording.
 
 ## Browse an Upstream
 
@@ -120,6 +146,9 @@ decision belongs to the Tasks a Todo holds.
 
 ## Open a Todo
 
+<!-- screenshot: todo-card — one Todo card on the Todo tab, with its folder-as-Task line, the
+     "When a Task's content changes:" line, Refresh Import and the overflow menu -->
+
 Opening a Todo is how you get at its Tasks. On the **Todo** tab, tap the Todo's card — the card is
 the way in, and the only button left on it is **Refresh Import**, which re-runs the import that
 produced it.
@@ -127,7 +156,8 @@ produced it.
 A Todo opens as a tree of folders, or as one flat list of Tasks if the run was told not to keep the
 folder tree. Tapping a folder descends into it; the breadcrumb walks back up, and from the Todo's
 top level Back returns to the Todo tab. That top level is the folder the run was started on — for a
-Todo made over a subfolder of an Upstream, the Todo opens there rather than at the Upstream's root.
+Todo made over a subfolder of an Upstream, the Todo opens there rather than at the Upstream's own
+folder.
 
 Tapping a Task opens it to be looked at, and nothing more: no checkbox, no chips, no Save or Share.
 `‹` and `›` step sideways through the other Tasks in the folder you were standing in, so you can
@@ -152,6 +182,9 @@ Quick Review always starts at the first unchecked item and does not remember whe
 For work that will take more than one sitting, or that covers a whole subtree.
 
 There are two ways in, and they end in the same place.
+
+<!-- screenshot: catalog-selecting — a Todo's catalog in selection mode, with a folder ticked, one
+     Task inside it unticked, and the selection bar reading "N Tasks selected" -->
 
 **From inside a Todo.** Tap **Select**. A checkbox appears on every row; tick the Tasks to include —
 the bar along the bottom counts them — and tap **Create List**. The dialog asks for a title, already

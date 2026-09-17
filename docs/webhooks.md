@@ -96,13 +96,13 @@ is 10 seconds on both connect and read.
 | Field | Meaning |
 |---|---|
 | `event` | One of the four above. |
-| `list.id` | The List's id, or **`0`** for a folder round, which has no List. |
-| `list.title` | The List's title, or the **folder's name** for a folder round. |
+| `list.id` | The List's id, or **`0`** for a Quick Review round, which has no List. |
+| `list.title` | The List's title, or the **folder's name** for a Quick Review round. |
 | `list.completedAt` | When the List completed, or `null`. |
 | `items[].id` | The item's [public id](#item-ids). Stable, never the database row number. |
 | `items[].title` | The file name. |
 | `items[].isCompleted` | Whether the item was processed in Listea. |
-| `items[].relativePath` | The item's **folder**, relative to the root, without the file name. |
+| `items[].relativePath` | The item's **folder**, relative to the Upstream's folder, without the file name. |
 | `items[].actions` | The wire values of the actions the item carries, in bar order. |
 
 **`isCompleted` and `actions` mean different things and neither implies the other.** `isCompleted`
@@ -110,7 +110,7 @@ says the item was processed in Listea. `actions` says what downstream automation
 Checking something off is not an action.
 
 **`relativePath`** is the folder only — `title` already carries the file name, so join the two for
-the whole path. It is empty (`""`) for an item sitting directly in the root, and `null` for a manual
+the whole path. It is empty (`""`) for an item sitting directly in the Upstream's folder, and `null` for a manual
 item with no source file, because a fake path would be worse than none.
 
 **`actions`** carries the **webhook value** of each action as configured *right now*, resolved at
@@ -217,7 +217,7 @@ against two different configurations. Each is announced in turn rather than over
 except that two webhooks found switched off in the same moment are reported once.
 
 A List's **Last delivery** line records what that List's own webhook did — `list.completed`,
-`list.webhook.test`, and `review.exited` from a full Review. A **folder round** has no List to
+`list.webhook.test`, and `review.exited` from a full Review. A **Quick Review round** has no List to
 record against, so a Quick Review delivery does not appear on any List's *Last delivery* line. It is
 still announced, and still kept in the history.
 

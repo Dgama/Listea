@@ -12,10 +12,15 @@ see [Webhooks](webhooks.md#the-two-configurations).
 - [Upstreams](#upstreams)
 - [Review](#review)
 - [Media and review behaviour](#media-and-review-behaviour)
+- [Todos](#todos)
 - [Webhook](#webhook)
 - [File management](#file-management)
-- [Todo contents](#todo-contents)
 - [Todo deletion](#todo-deletion)
+- [A Todo's own two policies](#a-todos-own-two-policies)
+
+The sections below are in the order the Settings screen draws them. The last two are **not on that
+screen** — both describe per-Todo controls, recorded here because this is where defaults are written
+down.
 
 ## Upstreams
 
@@ -31,8 +36,8 @@ add one would be two places for the wording to drift apart.
 **Adding a folder does not disturb the ones already there.** Each Upstream holds its own grant, and
 a new one is registered beside them. Nothing is rebound, and nothing already registered is affected.
 
-**Each row reports its own folder.** The counts under a row are that folder's, not one root's, which
-is what makes several Upstreams readable side by side.
+**Each row reports its own folder.** The counts under a row are that folder's alone, which is what
+makes several Upstreams readable side by side.
 
 See [Core concepts → Folders you grant](core-concepts.md#folders-you-grant).
 
@@ -70,6 +75,32 @@ keeps being recorded either way.
 See [Review and actions](review-and-actions.md#video) for the video behaviour, and
 [Rounds](review-and-actions.md#rounds) for what *unchecked items only* does to a queue.
 
+## Todos
+
+**Headed "Todos" on the screen, with "What new Todos start with" above the rows.** The two app-wide
+defaults a new Todo is created with. Both are also held per Todo, and a new Todo takes these only at
+the moment it is created.
+
+| Control | Default | What it does |
+|---|---|---|
+| **When a Task's content changes** | Keep it | The answer a new Todo starts with when a file it imported changes or disappears outside Listea. **Keep it** flags what has gone and changes nothing else; **Start it over** keeps the Task and clears its ticks, so moved content is judged again; **Replace the Task** deletes a Task that changed and mints a new one, taking it out of every List that held it. See [What a changed Task means](core-concepts.md#what-a-changed-task-means). |
+| **Follow the upstream on new Todos** | Off | On, a new Todo is created following its upstream: opening it scans the folder and brings in material that appeared since, without asking. Off, opening a Todo never writes. |
+
+**This is the same three-row chooser the Create Tasks dialog asks with**, drawn from the same
+`ContentPolicyChoice` composable and the same `ContentPolicy` labels, so the default and the
+per-run answer cannot call a tier two things. A Todo set here remembers whatever the dialog is told
+instead.
+
+**The three answers are written on the choice itself, not just its name**, and the third is the only
+one that removes anything — which is why it is the third. A user setting it is stating an intention
+about a Task they own, and that is the whole of its licence: nothing in Listea infers this tier from
+a Task's shape. See [Task lifetime](core-concepts.md#task-lifetime).
+
+Both defaults follow the rule at the top of this page, and both are the behaviour-preserving answer.
+Before this release a re-import changed no Task's state, and no run ever started by itself; a Todo
+that arrived already starting Tasks over would have begun clearing judgments the user never asked it
+to touch.
+
 ## Webhook
 
 | Control | Default | What it does |
@@ -96,25 +127,17 @@ Full behaviour, the event table and the payload format: [Webhooks](webhooks.md).
 | **Checked files** | — | Counts every checked file under that folder that is still on the device. Not a List's progress and not a round's tally. |
 | **Delete checked files** | — | Deletes all of them, permanently, after showing you the full named listing. |
 
-## Todo contents
+Filtering and sorting only change what is shown, and which items a review then walks. Progress,
+completion and webhooks always count the whole folder or the whole List.
 
-The two app-wide defaults a new Todo is created with. Both are also held per Todo, and a new Todo
-takes these only at the moment it is created.
+> **Two different scopes, deliberately.** *Ask to delete after webhook* offers exactly the checked
+> items in the payload that just went out. *Delete checked files* covers every checked file under
+> the chosen Upstream, however and whenever it was checked. The dialogs say which one you are
+> looking at.
 
-| Control | Default | What it does |
-|---|---|---|
-| **When a Task's content changes** | Keep it | The answer a new Todo starts with when a file it imported changes or disappears outside Listea. **Keep it** flags what has gone and changes nothing else; **Start it over** keeps the Task and clears its ticks, so moved content is judged again; **Replace the Task** deletes a Task that changed and mints a new one, taking it out of every List that held it. See [What a changed Task means](core-concepts.md#what-a-changed-task-means). |
-| **Follow the upstream on new Todos** | Off | On, a new Todo is created following its upstream: opening it scans the folder and brings in material that appeared since, without asking. Off, opening a Todo never writes. |
-
-**The three answers are written on the choice itself, not just its name**, and the third is the only
-one that removes anything — which is why it is the third. A user setting it is stating an intention
-about a Task they own, and that is the whole of its licence: nothing in Listea infers this tier from
-a Task's shape. See [Task lifetime](core-concepts.md#task-lifetime).
-
-Both defaults follow the rule at the top of this page, and both are the behaviour-preserving answer.
-Before this release a re-import changed no Task's state, and no run ever started by itself; a Todo
-that arrived already starting Tasks over would have begun clearing judgments the user never asked it
-to touch.
+Full behaviour, including write access and what happens to deleted files' decisions:
+[File management](file-management.md). The filter and sort options themselves:
+[Review and actions → Filtering and sorting](review-and-actions.md#filtering-and-sorting).
 
 ## Todo deletion
 
@@ -160,18 +183,6 @@ following the upstream writes on a later day without being asked, and keeping de
 only matters at a delete that has not happened yet. The row is the target rather than the thumb, and
 tapping one leaves the menu open — a policy is set without the menu closing, so both can be read and
 changed in one visit.
-
-Filtering and sorting only change what is shown, and which items a review then walks. Progress,
-completion and webhooks always count the whole folder or the whole List.
-
-> **Two different scopes, deliberately.** *Ask to delete after webhook* offers exactly the checked
-> items in the payload that just went out. *Delete checked files* covers every checked file under
-> the chosen Upstream, however and whenever it was checked. The dialogs say which one you are
-> looking at.
-
-Full behaviour, including write access and what happens to deleted files' decisions:
-[File management](file-management.md). The filter and sort options themselves:
-[Review and actions → Filtering and sorting](review-and-actions.md#filtering-and-sorting).
 
 ---
 

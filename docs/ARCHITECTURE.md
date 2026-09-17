@@ -2,7 +2,7 @@
 
 > **Status:** Normative architectural direction  
 > **Scope:** Long-lived product and domain boundaries  
-> **Last updated:** 2026-09-17 (revised: an Upstream is the registered origin, and Source is retired as a name for anything inside the system)
+> **Last updated:** 2026-09-17 (revised: an Upstream is the registered origin; Source is retired as a user-facing name, with the implementation's remaining uses of the word recorded as an open item in [File, Source, and Upstream](#file-source-and-upstream); and missing material erases nothing *by default*, with the two named policies that are the exception set out in [Re-import and reconciliation](#re-import-and-reconciliation))
 
 Listea is a lightweight human-judgment layer between structured inputs and workflow outputs. It turns a collection of reviewable tasks into a fast, resumable feed, records what a person decided, and leaves upstream ingestion and downstream consequences to other systems.
 
@@ -381,7 +381,29 @@ The interface may present several of these stages as one convenient motion. The 
 
 A **file** is raw external material. It may be discovered through a local folder, document provider, cloud service, archive, or another source. A file is not a Task merely because Listea can open it, and it is not an Asset until an importer deliberately attaches a representation of it to a Task. It has no List membership, TaskState, completion, or review history of its own.
 
-A **Source** is a file *outside* the system: an objective thing that exists whether or not Listea has ever heard of it. Source is therefore not a domain concept Core owns and not a name for anything stored. It is the word for what an Upstream was before someone chose it — the reason the app says "add an Upstream" rather than "add a Source", and the reason no screen, table or query names a Source.
+A **Source** is a file *outside* the system: an objective thing that exists whether or not Listea has ever heard of it. Source is therefore not a domain concept Core owns and not a name for anything stored. It is the word for what an Upstream was before someone chose it — the reason the app says "add an Upstream" rather than "add a Source", and the reason **no user-facing surface names a Source**.
+
+> **The retirement of the word is incomplete in the implementation, and this is an open item.**
+> No screen *shown to a user* offers a thing called a Source — the tab is **Todo**, the dialog says
+> **Create tasks?**, and the noun on every card is Todo. But the identifier survives in three
+> places, and the third is user-visible:
+>
+> 1. **The storage and query layer.** `sources` is a live table (`SourceEntity`), and it holds
+>    **Todos**, not Sources. `SourceSummary`, `SourceFreshness`, `sourceStatusLabel` and
+>    `SourcesScreen.kt` follow it. `AppShell.kt` records the divergence as deliberate: renaming the
+>    model "would touch every query, migration and wire value for no behavioural gain".
+> 2. **Messages that reach a user.** `"Could not read this Source's folder. Nothing was changed."`,
+>    `"This Source is no longer registered."` — written in the Todo's own dialogs, using the word
+>    this section retires.
+> 3. **Two unrelated live senses of the same word.** A folder-backed List's detail page has a card
+>    headed **"Source"**, meaning *the folder that List came from*, and its freshness line reads
+>    *"Source unavailable"*; the Info sheet has a row labelled **"Source"**, meaning *where this
+>    file lives*, and a missing file reads *"Source missing"*. Neither is the retired sense.
+>
+> So the word is doing three jobs at once and one of them contradicts this section. Which way to
+> resolve it — rename the model, rename the List card and the Info row, or accept both — is a
+> decision this document has not yet taken, and it is deliberately left open here rather than
+> settled by an edit to a sentence.
 
 An **Upstream** is a Source that has been chosen: the point where external material enters the system. A folder is one Upstream kind, not a universal container in Core, and a device may hold several at once — each with its own access grant, because granting a second folder must not cost the first. An Upstream retains a stable internal identity, external root locator and access information, display name, and enough provenance to reconcile later imports.
 
@@ -492,7 +514,23 @@ An interface may offer **Import and create List** as a composed workflow. Intern
 
 Re-import is the routine operation allowed to reconsider imported material. It must be explicit and use stored Upstream and importer provenance. It is started from inside the Upstream, on the folder it is to be run over, so that reading part of an Upstream is an ordinary thing to do rather than one that registers anything.
 
-It must distinguish unchanged material, newly discovered material, changed content or metadata at an existing source locator, material no longer resolvable, and a requested change of importer/grouping rule. Unchanged material should reconcile to the same Task and Asset identities. Missing material must not erase review state or history.
+It must distinguish unchanged material, newly discovered material, changed content or metadata at an existing source locator, material no longer resolvable, and a requested change of importer/grouping rule. Unchanged material should reconcile to the same Task and Asset identities. Missing material must not erase review state or history by default.
+
+> **"By default" is load-bearing, and it came in with v0.4.0.** As written, this sentence was
+> absolute, and the shipped content policies make it false in two of their three tiers: `reset`
+> clears a Task's *current state* when its Assets change or go missing, and `drop` deletes the Task
+> and its decisions — including when the change is purely a disappearance, on a Task holding more
+> than one Asset. Neither is an inference: both are a user having named a policy for that Todo, in
+> advance, in writing, which is the distinction
+> [Asset structure ⟂ Task lifecycle](#asset-structure--task-lifecycle) rests on and the one this
+> sentence did not anticipate.
+>
+> The invariant that survives, and the one that was actually load-bearing, is this: **a change
+> nobody has named a policy for erases nothing.** `keep` — the default for every Todo that has not
+> chosen otherwise, and the behaviour of every version before v0.4.0 — flags what has gone and
+> changes nothing else, so an upgraded install behaves exactly as it did. The two sections should
+> be read together; this one is the rule, and that one is the single, bounded, user-named exception
+> to it.
 
 Changing from file-as-Task to folder-as-Task can merge or split Task identity and is therefore not an ordinary refresh. It requires an explicit migration policy; until one exists, the system must create a separate import or reject the change rather than silently rewriting reviewed Tasks. Since v0.4.0 the *first* of those two is always available and no longer needs a reason: a folder may carry any number of Todos, so "make a separate import" is an ordinary thing to do rather than a fallback, and nothing is rejected on the ground that a folder already has one.
 

@@ -67,15 +67,21 @@ covers them.
 
 ### Lists
 
-For work that outlives one sitting. A List covers a folder and everything beneath it, keeps its own
-progress, and can be reopened, re-synced with the folder, and wired to a webhook.
+For work that outlives one sitting. A List keeps its own progress and can be reopened and wired to
+a webhook. There are two kinds:
+
+- **Built from a folder**, the way v0.2.x made them: the List covers that folder and everything
+  beneath it, and can be re-synced against it when the folder changes.
+- **Built from Tasks**, by opening a Todo, tapping **Select**, picking the Tasks you want and
+  pressing **Create List**. This kind has no folder behind it, so there is nothing for it to drift
+  from and no **Source** card on its detail page.
 
 <p align="center">
   <img src="docs/assets/screenshots/list-detail.jpg" width="300" alt="A List's detail page showing its source folder, progress and item checklist">
 </p>
 
-Either way the decisions are the same decisions: checking a file in Quick Review and checking it
-from a List are one act, because state belongs to the file rather than to the queue you reached it
+Either way the decisions are the same decisions: checking a Task in Quick Review and checking it
+from a List are one act, because state belongs to the Task rather than to the queue you reached it
 from. See [Core concepts](docs/core-concepts.md).
 
 ## Custom actions
@@ -120,15 +126,17 @@ Everything in this table works today.
 
 | | |
 |---|---|
-| **Upstreams** | Any folder you grant, through Android's Storage Access Framework, added in Settings and listed one card each. Opening one browses its files with the ones already checked marked. |
-| **Create Tasks** | Turns a folder's material into Tasks — one Task per file or one per folder, under a name you choose, keeping the folder tree or flattening it. |
-| **Todo** | The Tasks one Create Tasks run produced, one card each. Opening one browses them and offers Quick Review and Select there. |
+| **Upstreams** | Any folder you grant, through Android's Storage Access Framework, added in Settings and listed one card each. Opening one browses its files with the ones already checked marked. An Upstream is material, not work: it outlives every Todo made from it. |
+| **Create Tasks** | Turns a folder's material into Tasks — one Task per file or one per folder, under a name you choose, keeping the folder tree or flattening it. It asks, in the same dialog, what should happen when a Task's content later changes. What it produces is a Todo. |
+| **Todo** | The Tasks one Create Tasks run produced, one card each. Opening one browses them and offers Quick Review and Select there. A Todo says on its card which content policy it is on, and its overflow menu carries its own *Follow the upstream* and *Keep decisions when deleted* switches. |
+| **Task lifetime** | A Task's content can change or disappear outside Listea. The Todo's content policy decides what that means: **Keep it** flags what has gone and changes nothing else, **Start it over** keeps the Task and clears its ticks so moved content is judged again, **Replace the Task** deletes the Task and mints a new one, taking it out of every List that held it. |
 | **Dissolution** | Deleting a Todo takes its Tasks and their decisions with it, leaves the files' own identity alone, and tells every List what it lost. A per-Todo switch can write the decisions down first, so a Todo created at the same folder later can load one history from them. |
+| **Catalog** | Every Task a Todo holds, browsable at its own scope, with the ones you have judged marked. Where **Select** and **Create List** are reached from. |
 | **Review** | Full-screen images, animated GIFs and video. Swipe to check and advance, swipe back to reconsider, pinch to 5×, per-item Info sheet. |
 | **Video** | Its own transport strip: play/pause, scrubber, 0.5×–2× speed, mute. Autoplay and start-muted are settings. |
 | **Quick Review** | Any folder holding Tasks, instantly, without creating anything. |
-| **Lists** | Persistent queues over a folder and its subfolders, with progress, source-change detection and manual re-sync. Manual, file-less Lists too. |
-| **Checked state** | Belongs to the file, not to the queue. Shared by every List and Quick Review that reaches the same file. |
+| **Lists** | Persistent queues, either over a folder and its subfolders — with progress, source-change detection and manual re-sync — or over Tasks you picked out of a Todo, which have no folder behind them. |
+| **Checked state** | Belongs to the Task, not to the queue. Shared by every List and Quick Review that reaches the same Task. |
 | **Custom actions** | User-defined chips with their own display names and wire values, plus a built-in favourite. |
 | **Filter and sort** | By media type, checked status and freshness; sort by name, time, size, type or unchecked-first. Applies to browsing *and* to the review queue. Shared globally or kept per folder. |
 | **Review rounds** | Optionally queue only unchecked items, so each pass through a folder is its own round. |
@@ -156,9 +164,10 @@ check-ins are the point, but because building one forces task data, state, actio
 to stop being welded to image and video files.
 
 **Almost none of this is implemented.** v0.2.5 gave a reviewable item an identity of its own — a
-Task, whose state hangs off that id rather than off a file path — which is the start of the third
-piece and no more: every Task still holds files. The rest describes where the project is going, not
-what it does. The full version is in [docs/roadmap.md](docs/roadmap.md).
+Task, whose state hangs off that id rather than off a file path — and v0.3.0 and v0.4.0 separated
+the Upstream from the Todo and gave a Task a lifetime. That is the start of the third piece and no
+more: every Task still holds files. The rest describes where the project is going, not what it
+does. The full version is in [docs/roadmap.md](docs/roadmap.md).
 
 ## Documentation
 

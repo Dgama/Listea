@@ -218,9 +218,13 @@ another's, so creating one where an existing List already reached asked for conf
 Create List now builds from Tasks you pick, and Tasks have no folder to overlap with, so that
 question no longer arises.
 
-There is still no "New list" control, and no way to make an empty List and fill it in by hand: a
-List is made from Tasks, and a List with no Tasks has nothing to hold. Lists from earlier versions
-are kept as they are, with their items, and are never converted, migrated or deleted.
+**New list** on the Lists tab reaches the same place from the other end: it asks *"Take Tasks from
+which Todo?"*, then drops you into that Todo's catalog already in selection mode. It names a Todo
+rather than a folder because the Tasks have to come from somewhere, and a Todo is where they are.
+
+Either way there is no way to make an empty List and fill it in by hand: a List is made from Tasks,
+and a List with no Tasks has nothing to hold. Lists from earlier versions are kept as they are, with
+their items, and are never converted, migrated or deleted.
 
 <p align="center">
   <img src="assets/screenshots/list-detail.jpg" width="300" alt="A List's detail page, showing the Source card with its folder and freshness, the Progress card with a count and the Review button, and the item checklist below">
@@ -262,9 +266,12 @@ It appears once the folder you are looking at has Tasks in it, and it reviews th
 A Todo holds nothing but Tasks, so unlike a browsed folder there is no listing to reconcile against
 the catalog: what is reviewed is exactly what the run put there.
 
-**A Todo round has no folder behind it**, which has one visible consequence on the wire: its items
-carry no public id and nothing on this path sends a webhook. Decisions are still saved, and are
-still visible everywhere else, because of [where state lives](#where-state-lives).
+**A Todo round has no List behind it**, which has two visible consequences. On the wire, the round
+posts through the app-default webhook rather than a List's own, with `list.id` set to `0` and the
+folder's name standing in as the title — see [Webhooks](webhooks.md#the-payload). And its Tasks have
+no registration row of their own, so an item arrives with no public id until the payload builder
+mints one on the first delivery. Decisions are saved either way, and are visible everywhere else,
+because of [where state lives](#where-state-lives).
 
 Quick Review can be switched off in Settings. Off takes the action out of a Todo and stops the
 Upstreams browser drawing what has already been decided. Switching it off is presentation only:
@@ -330,41 +337,42 @@ carry it alone — invisible and unsent, but not rewritten.
 
 ## Where state lives
 
-> **This section predates v0.2.5 and is being revised.** The rule it states — a decision belongs to
-> the file — still describes what the user sees, but not where the row lives. Imported material is
-> now a **Task** (one file, or a folder's worth of them under the folder-as-Task importer), and a
-> decision is stored against the Task: `task_state`, keyed by `taskId`, cascading from `tasks`.
-> The columns that once held it on the review-state and list-item tables are dead. The consequences
-> listed below all still hold, because a folder-as-Task Task keeps its own state as one unit.
+**A decision belongs to the Task, not to the file.** Checked, ★ and whichever custom actions a Task
+carries are stored against the Task's own id in `task_state`, a table keyed by `taskId` and
+cascading from `tasks`. A List stores **membership**: which Tasks it covers, in what order. It
+*projects* the shared state rather than owning a copy, and the same is true of a catalog, a folder
+listing and a review queue.
 
-This one rule explains most of Listea's behaviour. Checked, ★ and whichever custom actions an item
-carries are stored against the file's identity — the root it is under, plus its path beneath that
-root — in a table of their own. A List stores **membership**: which files it covers, in what order.
-It *projects* the shared state rather than owning a copy.
-
-That is what makes all of these true at once:
+That one rule is what makes all of these true at once:
 
 - Quick Review needs no List, because it has somewhere to put a decision either way.
-- Checking a file in a Quick Review completes the List that covers it, and fires that List's
+- Checking a Task in a Quick Review completes the List that covers it, and fires that List's
   webhook, without Quick Review knowing the List exists.
-- Building a second List over the same files shows the same ticks. Nothing is copied, so nothing
+- The same Task reachable from two Lists shows the same tick in both. Nothing is copied, so nothing
   can diverge.
-- Deleting a List discards its membership, not its decisions. Rebuilding it brings them back.
+- The same *file* behind two Todos is two Tasks with two independent decisions — the case
+  [Tasks and Todos](#tasks-and-todos) turns on. Sharing happens at the Task, not at the file.
+- Deleting a List discards its membership, not its decisions.
 - Deleting a **Todo** does take its Tasks' decisions, because a Task is the intention and the
   decision is what the intention meant — see [Deleting a Todo](#deleting-a-todo). That is the one
   operation here that discards state rather than projecting it, which is why it is behind a
   confirmation and why the confirmation offers to write the decisions down first.
-- The Upstreams browser can show a file as checked even when no List has ever heard of it.
 - Nothing resets state as a side effect. Creating a List or opening a Quick Review never clears a
   tick. Re-reviewing checked files is what *Review unchecked items only* is for, and a genuine
-  "start fresh" would have to be its own explicit action.
+  "start fresh" would have to be its own explicit action — *Start it over* is exactly that action,
+  made explicit and scoped to one Todo.
 
-**Manual items are the exception, deliberately.** They have no file behind them, so there is no
-other row for a decision about one to be shared with: it belongs to that item alone, and it goes
-when the item does.
+**Two exceptions, both deliberate.** A **manual item** has no file behind it and no Task, so its
+decision belongs to the item alone and goes when the item does. And a **folder listing** — the
+Upstreams browser — has no Tasks in it at all, so the tick it draws comes from somewhere else: a
+separate `file_review_state` row, written only by the folder-Quick-Review path, keyed by the grant
+and the path rather than by any Task. That is why the browser can show a file as checked when no
+List has ever heard of it.
 
-A file's identity is **its path under the root**. Replacing a file with a different one of the same
-name, outside the app, hands the new file the old one's checked state.
+A file's identity to the rest of the app is **the Upstream it is under plus its path beneath it** —
+which is what a folder listing, a scan and a re-import all match on. It is not what a decision hangs
+off. Replacing a file with a different one of the same name hands the *Task* the new file and keeps
+the Task's tick, because the Task is the judgment target and it did not change.
 
 ## Item identity
 
@@ -380,7 +388,7 @@ receiving side.
 
 - **time** — milliseconds since the epoch, base32, fixed width. Sorting the ids **as strings**
   sorts them by when the item arrived; no parsing needed.
-- **file** — a fingerprint of what the row is about: a file's path under the root, or a manual
+- **file** — a fingerprint of what the row is about: a file's path under its Upstream, or a manual
   item's List and title. Deterministic, so two arrivals of the same file share this field. A hint
   for grouping, not a guarantee.
 - **random** — 30 bits, and what actually makes the id unique.

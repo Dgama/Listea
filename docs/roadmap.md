@@ -14,20 +14,22 @@
 
 ## The current system
 
-Listea today is a **media triage app**. It reviews images and videos that exist as files under one
-granted folder on one Android device.
+Listea today is a **media triage app**. It reviews images and videos that exist as files under
+folders the user has granted, on one Android device — as many folders as they care to add, each on
+its own grant.
 
 Concretely, and as a baseline for everything below:
 
 - A reviewable item **is a Task**, and a Task is files: one file, or a folder's worth of them. Its
-  files have a path under the root, a size, a modified time, and a media type inferred from the
-  extension.
+  files have a path under the Upstream they came from, a size, a modified time, and a media type
+  inferred from the extension.
 - Review **is a media screen**. One renderer, one swipe gesture, one action bar, one zoom
   implementation, one video transport.
 - State **is checked plus actions**, keyed by the Task's own id.
 - A queue **comes from a Todo** — the Tasks one Create Tasks run produced — or from a List built
   out of Tasks picked from one.
-- The output **is a webhook**, describing a List and its items.
+- The output **is a webhook**, describing a List and its items. A Quick Review round posts the same
+  shape with no List behind it, standing the folder in as the subject.
 
 That is a coherent product and it works. The limitation is not quality; it is that every one of
 those five sentences still ends at *file*, *media* or *folder*. A Task has an identity of its own
@@ -75,10 +77,17 @@ organise project structure, domain boundaries, naming, models and reusable logic
 can evolve toward a clean multi-platform architecture instead of having to be excavated later.
 
 Some of this already exists by habit — `FileArrange.kt`, `ReviewArrange.kt`, `QuickReview.kt`,
-`ItemId.kt` and the webhook payload helpers are deliberately free of Compose and mostly free of
-Android, which is why they are covered by JVM tests. The work is to make that a property of the
-project rather than a coincidence, and to draw the line between *domain* and *platform* somewhere
-explicit.
+`ItemId.kt`, `Catalog.kt`, `ContentPolicy.kt`, `Importer.kt` and the webhook payload helpers are
+deliberately free of Compose and mostly free of Android, which is why they are covered by JVM tests.
+The work is to make that a property of the project rather than a coincidence, and to draw the line
+between *domain* and *platform* somewhere explicit.
+
+**The `domain/` package is the first real move in this direction** — see
+[Development → `domain/`](development.md#domain--the-model-with-no-framework-in-it). It is more than
+a convention: several id types rather than one, so a Task id cannot be passed where an Asset id
+belongs, and an opaque identity that no path, filename or row number can be read back out of. What
+it is not yet is finished: the app still persists through the Room entities in `data/`, and a great
+deal of behaviour still reaches Android APIs directly from the screens.
 
 **No framework has been chosen.** Kotlin Multiplatform is an obvious candidate and so are several
 alternatives, including a plain second implementation against a shared specification. Committing to
@@ -91,18 +100,26 @@ question.
 
 **Prepare Listea to review tasks that are not files.**
 
-Today a `ReviewItem` is a Task, and its state is keyed by the Task's own id rather than by a path.
-What a Task *holds* is still files. A general task model would let a review item represent something
-broader — content that does not have to be bytes on disk, and a source that does not have to be a
-folder.
+Today the thing a queue walks is a **Task**, and its state is keyed by the Task's own id rather than
+by a path. What a Task *holds* is still files. A general task model would let a Task represent
+something broader — content that does not have to be bytes on disk, and an origin that does not have
+to be a folder.
 
 This is the deepest of the three. It reaches the database schema, the identity scheme, the queue
 builders and the webhook payload, and it is the one that makes the other two worth doing.
 
-**Status: half done, by way of v0.2.5.** The identity half landed — a review item is a Task with an
-id of its own, and state hangs off that id, so the model no longer assumes a filesystem path is the
-thing decisions belong to. The other half is untouched: every Task is files, so there is still no
-way to review something that is not on disk.
+**Status: the identity half is done; the content half is untouched.**
+
+- **v0.2.5** gave a reviewable item an id of its own, so the model no longer assumes a filesystem
+  path is the thing decisions belong to. `ReviewItem` — the queue row the screens actually walk —
+  carries a `taskId`, and `task_state` hangs off it.
+- **v0.3.0 and v0.4.0** separated the Upstream from the Todo and gave a Task a lifetime: a Task can
+  now be flagged, reset or replaced when its content changes, and the decision is a named per-Todo
+  policy rather than something inferred. That is the "identity survives a change" half, which a
+  general task model needs.
+- What is still missing is the other half: **every Task is files**, so there is still no way to
+  review something that is not on disk. `AssetKind` has an `OTHER` member for content no viewer
+  claims, but nothing creates one.
 
 ## Next milestone: a check-in task workflow
 
@@ -146,7 +163,9 @@ committed to** — they are here to show what the architecture above is *for*.
 
 Currently out of scope, and not being worked on:
 
-- Automatic List updating
+- **Automatic List updating.** A Todo can follow its upstream (v0.4.0) but a *List* cannot: a
+  folder-backed List re-syncs when you ask it to, and following a folder on a schedule is a
+  different feature with a different failure mode
 - Search
 - Moving or renaming files
 - Choosing *which* checked files a deletion takes

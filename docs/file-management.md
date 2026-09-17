@@ -12,7 +12,7 @@ Everything Listea does that touches storage.
 - [Save to Listea](#save-to-listea)
 - [Share](#share)
 - [Permissions](#permissions)
-- [Root boundaries](#root-boundaries)
+- [What bounds all of this](#what-bounds-all-of-this)
 
 ## What Listea does not do
 
@@ -24,7 +24,7 @@ Exactly three things write to storage, and every one of them is something you as
 
 | | What it writes | Touches the original? |
 |---|---|---|
-| [Delete checked files](#delete-checked-files) | Deletes files under the root, permanently | Yes — deletes it |
+| [Delete checked files](#delete-checked-files) | Deletes files under the chosen Upstream, permanently | Yes — deletes it |
 | [Save to Listea](#save-to-listea) | Copies a file into `DCIM/Listea` | No |
 | [Share](#share) | Copies a file into Listea's own cache | No |
 
@@ -77,16 +77,17 @@ would not delete keeps its decision and its List rows exactly as they were.
 
 ## Write access
 
-Deleting needs **write access to the root**. Android hands that over through the folder picker and
-nowhere else — there is no separate "allow file changes" prompt to ask for — so a root granted
-before this feature existed can only be read.
+Deleting needs **write access to the Upstream's folder**. Android hands that over through the folder
+picker and nowhere else — there is no separate "allow file changes" prompt to ask for — so a folder
+granted before this feature existed can only be read.
 
 Listea asks for it in place rather than sending you to look for it. The delete pauses on **Allow
 Listea to delete files?**; *Grant access* opens the picker already inside the folder in use, and
 confirming it resumes the delete where it left off.
 
-**Choosing a different folder there is refused rather than acted on**, so this can never turn into a
-root change and can never delete a List.
+**Choosing a different folder there is refused rather than acted on.** The re-grant is about the
+folder already in use, not about picking a new one, and accepting a different folder would silently
+repoint every Task and List that resolves through that grant. Nothing is rebound.
 
 ## Ask to delete after webhook
 
@@ -101,9 +102,9 @@ what the round walked, *Send checked items only* decided what the payload carrie
 is exactly the checked items in the payload that went out, and nothing else.
 
 That makes it **narrower** than *Delete checked files* above, which covers every checked file under
-the root however and whenever it was checked. The dialog says which of the two it is rather than
-leaving them to be confused, and lists every file by name, grouped by folder, exactly as the other
-one does.
+the chosen Upstream however and whenever it was checked. The dialog says which of the two it is
+rather than leaving them to be confused, and lists every file by name, grouped by folder, exactly as
+the other one does.
 
 **A delivery that did not go out deletes nothing and offers nothing.** Instead it says so, and says
 where the round went: it is kept in [Webhook history](webhooks.md#webhook-history), to be resent
@@ -122,7 +123,7 @@ It is also silent when the payload came from a List with no folder behind it, wh
 delete, and when nothing in it was both checked and still on the device.
 
 Deleting from the offer is the same permanent operation as above, with the same
-[write-access](#write-access) requirement. If the root can only be read, the offer says so and
+[write-access](#write-access) requirement. If the folder can only be read, the offer says so and
 points at File management, which is the only place that can ask Android for the grant.
 
 ## Save to Listea
@@ -170,18 +171,24 @@ Listea declares two, and neither is asked for at launch.
 picker, and it persists across restarts. Write access to that folder comes from the same picker —
 see [Write access](#write-access).
 
-## Root boundaries
+## What bounds all of this
 
-Everything on this page is bounded by the root you granted. Listea cannot see, read or delete
-anything outside it.
+**Each Upstream is its own boundary.** A grant covers the folder you picked and nothing above,
+below or beside it, and one grant is held per folder — so adding a second Upstream neither widens
+nor narrows the first. Listea cannot see, read or delete anything outside the folder a grant was
+made for, and there is no single folder the whole app is scoped to.
 
 Two consequences:
 
-- **Changing the root deletes the Lists linked to the old one.** You are shown which ones first.
-  Lists with no folder behind them are always kept, and nothing is rebound to the new root.
-- **A file's identity is its path under the root.** Replacing a file with a different one of the
-  same name, outside the app, hands the new file the old one's checked state — and therefore its
-  place in a deletion.
+- **There is no way to change an Upstream's folder, and no operation that rebinds one.** A grant
+  that has gone is re-established through Android's picker for the same folder or not at all; the
+  delete's [write-access](#write-access) prompt refuses a different folder for exactly this reason.
+  So nothing on this page can repoint Tasks and Lists at material they were never about.
+- **A file's identity is the Upstream it is under plus its path beneath it** — which is what a scan,
+  a folder listing and a re-import all match on. Deleting a file outside the app does not disturb
+  the Task that was made from it: the Task keeps its decision and its List memberships, and the file
+  is flagged missing. That is also why the new file that later takes the same path lands under the
+  same Task, and therefore under its decisions.
 
 ---
 
