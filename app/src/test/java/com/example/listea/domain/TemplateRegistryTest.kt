@@ -40,6 +40,30 @@ class TemplateRegistryTest {
     }
 
     @Test
+    fun `the media asset control is exactly this definition`() {
+        assertEquals(
+            "34b23eec98b81a41cf4debbfe1c65b1e1e3f14cd84aa075bcc1580d5cc4538a6",
+            Templates.MediaAssetControl.contentHash
+        )
+    }
+
+    @Test
+    fun `adding the asset control did not move the two hashes that already had reviews`() {
+        // The two golden hashes above are asserted by name, so this would fail anyway — but it says
+        // something those do not: that a third definition was added to the registry without the
+        // canonical text of the first two changing. `Templates.all` is iterated by nothing that
+        // hashes, so the risk is a shared helper edited for the new arm and quietly reused.
+        assertEquals(
+            "dda1048958f4fdcee634f36e4ccfd993d910cf5a56883c40f6b4379c7f0c47fd",
+            Templates.MediaViewer.contentHash
+        )
+        assertEquals(
+            "96c4349da11514f3f6fe4a389511593673d8b96020c4b7cdadd20c04f52e5ce2",
+            Templates.MediaRapidReview.contentHash
+        )
+    }
+
+    @Test
     fun `the hash covers every part of a definition, so no edit slips through`() {
         val base = Templates.MediaRapidReview
         val review = base.definition as TemplateDefinition.TaskReview
@@ -90,16 +114,57 @@ class TemplateRegistryTest {
     }
 
     @Test
-    fun `the two kinds are genuinely different templates`() {
+    fun `the three kinds are genuinely different templates`() {
         val viewer = Templates.MediaViewer
         val review = Templates.MediaRapidReview
+        val control = Templates.MediaAssetControl
 
-        // One presents content, the other judges it. Nothing is shared but the idea of a version,
-        // which is what keeps media assumptions out of the review model and review assumptions out
-        // of a future PDF viewer.
+        // One presents content, one judges it, one records what is worth saying about it. Nothing is
+        // shared but the idea of a version, which is what keeps media assumptions out of the review
+        // model and review assumptions out of a future PDF viewer.
         assertEquals(TemplateKind.ASSET_VIEWER, viewer.definition.kind)
         assertEquals(TemplateKind.TASK_REVIEW, review.definition.kind)
-        assertNotEquals(viewer.ref, review.ref)
+        assertEquals(TemplateKind.ASSET_CONTROL, control.definition.kind)
+        assertEquals(3, setOf(viewer.ref, review.ref, control.ref).size)
+    }
+
+    @Test
+    fun `the asset control claims exactly the kinds a configuration may be attached to`() {
+        val control = Templates.MediaAssetControl.definition as TemplateDefinition.AssetControl
+
+        // Images and video share one control in this release, which is what the app already did —
+        // and `OTHER` is absent, so a file no control governs cannot be given a configuration for
+        // one. That is the same fact `assetViewerAvailable` states from the other side.
+        assertEquals(setOf(AssetKind.IMAGE, AssetKind.VIDEO), control.compatibleKinds)
+        assertTrue(control.favourite)
+    }
+
+    @Test
+    fun `the asset control's hash covers both of its fields`() {
+        // The arm added to `canonicalText` for this definition is the only thing standing between
+        // two controls that differ in a compatible kind, or in whether they carry `★`, hashing
+        // alike — and a review event names one of them forever.
+        val base = Templates.MediaAssetControl
+        val control = base.definition as TemplateDefinition.AssetControl
+
+        val edits = mapOf(
+            "a compatible kind" to base.copy(
+                definition = control.copy(compatibleKinds = setOf(AssetKind.IMAGE))
+            ),
+            "the favourite flag" to base.copy(
+                definition = control.copy(favourite = false)
+            ),
+            "the display name" to base.copy(displayName = "${base.displayName} II"),
+            "the version" to base.copy(ref = base.ref.copy(version = 2))
+        )
+
+        edits.forEach { (part, edited) ->
+            assertNotEquals(
+                "editing $part left the hash alone, so a review could be reinterpreted",
+                base.contentHash,
+                edited.contentHash
+            )
+        }
     }
 
     @Test
@@ -140,7 +205,7 @@ class TemplateRegistryTest {
         Templates.all.forEach { version ->
             assertEquals(version, Templates.byRef(version.ref))
         }
-        assertEquals(2, Templates.all.map { it.ref }.toSet().size)
+        assertEquals(3, Templates.all.map { it.ref }.toSet().size)
     }
 
     @Test

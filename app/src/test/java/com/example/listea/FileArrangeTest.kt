@@ -1,5 +1,6 @@
 package com.example.listea
 
+import com.example.listea.domain.AssetKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -60,6 +61,73 @@ class FileArrangeTest {
         assertEquals(MediaKind.PICTURE, mediaKindOf("Holiday.JPG"))
         assertEquals(MediaKind.VIDEO, mediaKindOf("clip.mp4"))
         assertEquals(MediaKind.TEXT, mediaKindOf("notes.TXT"))
+    }
+
+    @Test
+    fun `the kind a file is controlled by is the kind it is viewed as`() {
+        // The two vocabularies do not line up by name — the classifier says PICTURE/VIDEO/TEXT and
+        // the control says IMAGE/VIDEO/OTHER — so this table is the only thing holding them
+        // together. Walked rather than listed, because what is being asserted is that the
+        // derivation is *total*: every extension either kind knows has an answer, and no extension
+        // reaches a third.
+        MediaKind.entries.forEach { media ->
+            val expected = when (media) {
+                MediaKind.PICTURE -> AssetKind.IMAGE
+                MediaKind.VIDEO -> AssetKind.VIDEO
+                MediaKind.TEXT -> AssetKind.OTHER
+            }
+            media.extensions.forEach { extension ->
+                assertEquals(
+                    "$extension is a ${media.label} file",
+                    expected,
+                    assetKindOf("file.$extension")
+                )
+            }
+        }
+        // And it is case-insensitive for the same reason the filter is.
+        assertEquals(AssetKind.IMAGE, assetKindOf("Holiday.JPG"))
+    }
+
+    @Test
+    fun `a file no control governs is exactly a file no viewer can open`() {
+        // The pin on `assetKindsPresent` and on the dialog: what can be tagged and what can be shown
+        // have to be the same set, or a Task is offered a chip row for a file it cannot open. The
+        // two are computed from different places, so the agreement is asserted rather than assumed.
+        val names = listOf("a.jpg", "clip.mp4", "notes.txt", "report.pdf", "README", "archive.zip")
+
+        assertEquals(
+            names.filter { assetViewerAvailable(it) },
+            names.filter { assetKindOf(it) != AssetKind.OTHER }
+        )
+        // Text has a `MediaKind` and no viewer, which is the trap: it is a kind the filter knows
+        // and a kind no control may be configured for.
+        assertEquals(MediaKind.TEXT, mediaKindOf("notes.txt"))
+        assertEquals(AssetKind.OTHER, assetKindOf("notes.txt"))
+        assertFalse(assetViewerAvailable("notes.txt"))
+        assertFalse(assetViewerAvailable("report.pdf"))
+        assertFalse(assetViewerAvailable("README"))
+    }
+
+    @Test
+    fun `a folder is asked about exactly the kinds it holds`() {
+        // What the Create Tasks dialog iterates, so a folder of photographs is never asked about
+        // video — and `OTHER` cannot arrive from a folder of PDFs, so the heading for a kind nothing
+        // may be configured for cannot appear either.
+        assertEquals(
+            listOf(AssetKind.IMAGE),
+            assetKindsPresent(listOf("a.jpg", "b.png"))
+        )
+        assertEquals(
+            listOf(AssetKind.IMAGE, AssetKind.VIDEO),
+            assetKindsPresent(listOf("a.jpg", "clip.mp4"))
+        )
+        // Declaration order rather than the order the files were scanned in.
+        assertEquals(
+            listOf(AssetKind.IMAGE, AssetKind.VIDEO),
+            assetKindsPresent(listOf("clip.mp4", "a.jpg"))
+        )
+        assertEquals(emptyList<AssetKind>(), assetKindsPresent(listOf("report.pdf", "README")))
+        assertEquals(emptyList<AssetKind>(), assetKindsPresent(emptyList()))
     }
 
     @Test

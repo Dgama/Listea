@@ -2,6 +2,7 @@ package com.example.listea
 
 import com.example.listea.data.ItemAction
 import com.example.listea.data.ReviewDecisions
+import com.example.listea.domain.AssetKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
@@ -28,19 +29,32 @@ class SettingsTest {
         c2Name: String = "C2",
         c2Value: String = "cust2"
     ) = AppSettings(
-        customActions = listOf(
-            CustomAction(id = "custom1", displayName = c1Name, webhookValue = c1Value),
-            CustomAction(id = "custom2", displayName = c2Name, webhookValue = c2Value)
+        assetControlTags = mapOf(
+            AssetKind.IMAGE to listOf(
+                CustomAction(id = "custom1", displayName = c1Name, webhookValue = c1Value),
+                CustomAction(id = "custom2", displayName = c2Name, webhookValue = c2Value)
+            )
         )
     )
 
+    /**
+     * The control an image is offered, over whatever the app's tags are.
+     *
+     * An empty record, deliberately: `""` is what every Todo and Task that predates v0.5.0 holds,
+     * and what it has to resolve to is this app's own tags. So this is not a way of dodging the
+     * recorded-column path — it *is* that path, and the case it covers is the one the whole upgrade
+     * rests on.
+     */
+    private fun imageControl(settings: AppSettings = AppSettings()): ResolvedAssetControl =
+        settings.controlFor("", AssetKind.IMAGE)
+
     @Test
     fun `defaults are the factory labels and values`() {
-        val settings = AppSettings()
-        assertEquals("C1", settings.labelOf(custom1))
-        assertEquals("C2", settings.labelOf(custom2))
-        assertEquals("cust1", settings.wireOf(custom1))
-        assertEquals("cust2", settings.wireOf(custom2))
+        val control = imageControl()
+        assertEquals("C1", control.labelOf(custom1))
+        assertEquals("C2", control.labelOf(custom2))
+        assertEquals("cust1", control.wireOf(custom1))
+        assertEquals("cust2", control.wireOf(custom2))
     }
 
     @Test
@@ -56,54 +70,67 @@ class SettingsTest {
 
     @Test
     fun `configured display names are what the review chips show`() {
-        val settings = settings(c1Name = "Save", c2Name = "Later")
-        assertEquals("Save", settings.labelOf(custom1))
-        assertEquals("Later", settings.labelOf(custom2))
+        val control = imageControl(settings(c1Name = "Save", c2Name = "Later"))
+        assertEquals("Save", control.labelOf(custom1))
+        assertEquals("Later", control.labelOf(custom2))
     }
 
     @Test
     fun `favorite keeps its own label and value whatever the actions are called`() {
-        val settings = settings(c1Name = "Favorite", c1Value = "favorite")
-        assertEquals("★", settings.labelOf(ItemAction.Favourite))
-        assertEquals("favorite", settings.wireOf(ItemAction.Favourite))
+        val control = imageControl(settings(c1Name = "Favorite", c1Value = "favorite"))
+        assertEquals("★", control.labelOf(ItemAction.Favourite))
+        assertEquals("favorite", control.wireOf(ItemAction.Favourite))
     }
 
     @Test
     fun `display name and webhook value are independent of each other`() {
-        val settings = settings(c1Name = "Save", c1Value = "tag1")
-        assertEquals("Save", settings.labelOf(custom1))
-        assertEquals("tag1", settings.wireOf(custom1))
+        val control = imageControl(settings(c1Name = "Save", c1Value = "tag1"))
+        assertEquals("Save", control.labelOf(custom1))
+        assertEquals("tag1", control.wireOf(custom1))
     }
 
     @Test
-    fun `the bar offers favourite first and the configured actions in their own order`() {
+    fun `the row offers favourite first and the configured actions in their own order`() {
         assertEquals(
             listOf(ItemAction.Favourite, custom1, custom2),
-            AppSettings().actions
+            imageControl().actions
         )
-        assertEquals(listOf(ItemAction.Favourite), AppSettings(customActions = emptyList()).actions)
+        assertEquals(
+            listOf(ItemAction.Favourite),
+            imageControl(AppSettings(assetControlTags = mapOf(AssetKind.IMAGE to emptyList()))).actions
+        )
     }
 
     @Test
     fun `an action the user deleted is neither offered nor labelled`() {
-        // The id stays on the item; the bar is what forgot it, so nothing here resolves it.
-        val settings = AppSettings(customActions = listOf(CustomAction("custom2", "C2", "cust2")))
-        assertEquals(listOf(ItemAction.Favourite, custom2), settings.actions)
-        assertNull(settings.customActionOf("custom1"))
-        assertNull(itemActionLabel(item("custom1"), settings))
+        // The id stays on the item; the control is what forgot it, so nothing here resolves it.
+        // It answers with the id rather than with null, which is what keeps a tag deleted from a
+        // control *carried* by the items that hold it and out of the payload — see
+        // `ResolvedAssetControl.wireOf`.
+        val control = imageControl(
+            AppSettings(
+                assetControlTags = mapOf(
+                    AssetKind.IMAGE to listOf(CustomAction("custom2", "C2", "cust2"))
+                )
+            )
+        )
+        assertEquals(listOf(ItemAction.Favourite, custom2), control.actions)
+        assertNull(control.tags.firstOrNull { it.id == "custom1" })
+        assertEquals("custom1", control.wireOf(custom1))
+        assertNull(itemActionLabel(item("custom1"), control))
     }
 
     @Test
     fun `the row summary follows the configured names`() {
         val marked = item("custom1", favorite = true)
-        assertEquals("★ · C1", itemActionLabel(marked, AppSettings()))
-        assertEquals("★ · Save", itemActionLabel(marked, settings(c1Name = "Save")))
+        assertEquals("★ · C1", itemActionLabel(marked, imageControl()))
+        assertEquals("★ · Save", itemActionLabel(marked, imageControl(settings(c1Name = "Save"))))
     }
 
     @Test
     fun `an item with no actions has no summary`() {
-        assertNull(itemActionLabel(item(), AppSettings()))
-        assertNotNull(itemActionLabel(item("custom2"), AppSettings()))
+        assertNull(itemActionLabel(item(), imageControl()))
+        assertNotNull(itemActionLabel(item("custom2"), imageControl()))
     }
 
     @Test
@@ -144,7 +171,7 @@ class SettingsTest {
 
     @Test
     fun `a new action is named from the first free slot`() {
-        val defaults = AppSettings().customActions
+        val defaults = DefaultCustomActions
         assertEquals("C3", nextCustomActionDefaults(defaults).displayName)
 
         // C1 deleted: the next one is C3 as well, because C3 is what is free rather than what

@@ -4,6 +4,7 @@ import com.example.listea.data.ListEntity
 import com.example.listea.data.ListItemEntity
 import com.example.listea.data.decisions
 import com.example.listea.data.encodeActionIds
+import com.example.listea.domain.AssetKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -44,11 +45,23 @@ class WebhookPayloadTest {
 
     /** The two out-of-the-box actions, with whatever wire values a test is about. */
     private fun settings(c1Value: String = "cust1", c2Value: String = "cust2") = AppSettings(
-        customActions = listOf(
-            CustomAction(id = "custom1", displayName = "C1", webhookValue = c1Value),
-            CustomAction(id = "custom2", displayName = "C2", webhookValue = c2Value)
+        assetControlTags = mapOf(
+            AssetKind.IMAGE to listOf(
+                CustomAction(id = "custom1", displayName = "C1", webhookValue = c1Value),
+                CustomAction(id = "custom2", displayName = "C2", webhookValue = c2Value)
+            )
         )
     )
+
+    /**
+     * The control a payload is built under, over whatever the app's tags are.
+     *
+     * An empty record, so the app's tags are what resolves — the state every Task on the device is
+     * in until something imports under v0.5.0, and the one the whole upgrade rests on. The
+     * per-kind and per-record paths are `SettingsTest`'s and the v0.5.0 tests' business.
+     */
+    private fun control(settings: AppSettings = AppSettings()): ResolvedAssetControl =
+        settings.controlForTask("")
 
     @Test
     fun `path is relative to the sync root, not to the list folder`() {
@@ -100,41 +113,41 @@ class WebhookPayloadTest {
 
     @Test
     fun `actions serialize in a fixed order, whatever is set`() {
-        val settings = AppSettings()
-        assertEquals(emptyList<String>(), itemActionNames(item("a.jpg").decisions, settings))
+        val control = control()
+        assertEquals(emptyList<String>(), itemActionNames(item("a.jpg").decisions, control))
         assertEquals(
             listOf("favorite"),
-            itemActionNames(item("a.jpg", favorite = true).decisions, settings)
+            itemActionNames(item("a.jpg", favorite = true).decisions, control)
         )
         assertEquals(
             listOf("favorite", "cust2"),
-            itemActionNames(item("a.jpg", "custom2", favorite = true).decisions, settings)
+            itemActionNames(item("a.jpg", "custom2", favorite = true).decisions, control)
         )
         assertEquals(
             listOf("favorite", "cust1", "cust2"),
             itemActionNames(
                 item("a.jpg", "custom1", "custom2", favorite = true).decisions,
-                settings
+                control
             )
         )
     }
 
     @Test
     fun `completion and actions are independent`() {
-        val settings = AppSettings()
+        val control = control()
         val unchecked = item("a.jpg", "custom1").decisions.copy(isCompleted = false)
-        assertEquals(listOf("cust1"), itemActionNames(unchecked, settings))
-        assertEquals(listOf("cust1"), itemActionNames(unchecked.copy(isCompleted = true), settings))
+        assertEquals(listOf("cust1"), itemActionNames(unchecked, control))
+        assertEquals(listOf("cust1"), itemActionNames(unchecked.copy(isCompleted = true), control))
     }
 
     @Test
     fun `configured wire values replace the defaults`() {
-        val settings = settings(c1Value = "tag1", c2Value = "tag2")
+        val control = control(settings(c1Value = "tag1", c2Value = "tag2"))
         assertEquals(
             listOf("favorite", "tag1", "tag2"),
             itemActionNames(
                 item("a.jpg", "custom1", "custom2", favorite = true).decisions,
-                settings
+                control
             )
         )
     }
@@ -142,19 +155,19 @@ class WebhookPayloadTest {
     @Test
     fun `favorite is not configurable`() {
         // Renaming a custom action must never touch the one fixed action.
-        val settings = settings(c1Value = "favorite")
+        val control = control(settings(c1Value = "favorite"))
         assertEquals(
             listOf("favorite"),
-            itemActionNames(item("a.jpg", favorite = true).decisions, settings)
+            itemActionNames(item("a.jpg", favorite = true).decisions, control)
         )
     }
 
     @Test
     fun `two actions sharing a wire value emit it once`() {
-        val settings = settings(c1Value = "tag", c2Value = "tag")
+        val control = control(settings(c1Value = "tag", c2Value = "tag"))
         assertEquals(
             listOf("tag"),
-            itemActionNames(item("a.jpg", "custom1", "custom2").decisions, settings)
+            itemActionNames(item("a.jpg", "custom1", "custom2").decisions, control)
         )
     }
 
@@ -163,8 +176,8 @@ class WebhookPayloadTest {
         // The item holds the id, so it is untouched and only the emitted string moves. This is
         // the whole point of keeping names out of the item row.
         val marked = item("a.jpg", "custom1").decisions
-        assertEquals(listOf("cust1"), itemActionNames(marked, AppSettings()))
-        assertEquals(listOf("archive"), itemActionNames(marked, settings(c1Value = "archive")))
+        assertEquals(listOf("cust1"), itemActionNames(marked, control()))
+        assertEquals(listOf("archive"), itemActionNames(marked, control(settings(c1Value = "archive"))))
     }
 
     @Test
@@ -172,9 +185,14 @@ class WebhookPayloadTest {
         // Deleting a button is a decision about the bar, not about the files already marked with
         // it: the id stays on the row, and stops resolving to anything the webhook can name.
         val marked = item("a.jpg", "custom1", favorite = true).decisions
-        val settings = AppSettings(customActions = emptyList())
+        // Both kinds emptied, not just the image one: a Task's control is resolved *over* its kinds,
+        // so a kind left out of the settings map still answers with the app's default tags and the
+        // deleted id would come back through the other side. Two kinds is what a Task has.
+        val control = control(
+            AppSettings(assetControlTags = AssetKind.entries.associateWith { emptyList() })
+        )
 
         assertEquals(setOf("custom1"), marked.customActions)
-        assertEquals(listOf("favorite"), itemActionNames(marked, settings))
+        assertEquals(listOf("favorite"), itemActionNames(marked, control))
     }
 }

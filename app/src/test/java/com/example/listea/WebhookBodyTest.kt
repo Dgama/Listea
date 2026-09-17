@@ -3,6 +3,7 @@ package com.example.listea
 import com.example.listea.data.ListEntity
 import com.example.listea.data.ListItemEntity
 import org.json.JSONArray
+import com.example.listea.domain.AssetKind
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -128,7 +129,11 @@ class WebhookBodyTest {
 
     @Test
     fun `actions come from settings as they stand at delivery time`() {
-        val renamed = AppSettings(customActions = listOf(DefaultCustomActions[0].copy(webhookValue = "keep")))
+        val renamed = AppSettings(
+            assetControlTags = mapOf(
+                AssetKind.IMAGE to listOf(DefaultCustomActions[0].copy(webhookValue = "keep"))
+            )
+        )
         // The row still holds the id it was marked with; only the wire value moved.
         val json = firstItem(
             buildWebhookPayload(

@@ -1,6 +1,7 @@
 package com.example.listea
 
 import com.example.listea.data.ReviewBlock
+import com.example.listea.domain.AssetKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -55,6 +56,59 @@ class CatalogTest {
         assertFalse(assetViewerAvailable("c.pdf"))
         assertFalse(assetViewerAvailable("d.txt"))
         assertFalse(assetViewerAvailable("noextension"))
+    }
+
+    /**
+     * The test that stops a second list of extensions existing.
+     *
+     * `assetKindOf` is written as a mapping through `mediaKindOf` precisely so that it cannot drift
+     * from what `assetViewerAvailable` says, and this is the assertion that would catch it if
+     * somebody wrote it as its own set instead. Every extension the app knows is checked from both
+     * sides at once: a file either has a kind a control governs *and* a viewer, or neither.
+     *
+     * The failure it is guarding against is quiet and user-facing — a file that renders but has no
+     * tag row, or has a tag row its Task can never be submitted from.
+     */
+    @Test
+    fun `the asset-control kind and the viewer agree on every extension this app knows`() {
+        val extensions = MediaKind.entries.flatMap { kind -> kind.extensions } +
+            listOf("pdf", "txt", "noextension", "")
+
+        extensions.forEach { extension ->
+            val name = if (extension.isEmpty()) "noextension" else "file.$extension"
+            val governed = when (assetKindOf(name)) {
+                AssetKind.IMAGE, AssetKind.VIDEO -> true
+                AssetKind.OTHER -> false
+            }
+
+            assertEquals(
+                "a file named $name is governed differently from whether it can be shown",
+                assetViewerAvailable(name),
+                governed
+            )
+        }
+    }
+
+    @Test
+    fun `the kind of a file is what the filter vocabulary says it is`() {
+        // The mapping is the whole of the function, so it is worth stating the three arms directly
+        // rather than only through the agreement above — `OTHER` is what a text file and an unknown
+        // file have in common, and it is not a fourth kind of picture.
+        assertEquals(AssetKind.IMAGE, assetKindOf("a.jpg"))
+        assertEquals(AssetKind.IMAGE, assetKindOf("a.JPEG"))
+        assertEquals(AssetKind.VIDEO, assetKindOf("a.mp4"))
+        assertEquals(AssetKind.OTHER, assetKindOf("a.txt"))
+        assertEquals(AssetKind.OTHER, assetKindOf("a.pdf"))
+        assertEquals(AssetKind.OTHER, assetKindOf("noextension"))
+    }
+
+    @Test
+    fun `a name with a dot in its parent is classified by its own extension`() {
+        // The callers pass a basename today, and one of them passes a `ReviewAsset.name` that has
+        // already been reduced. This pins the behaviour if a caller ever hands over a path instead:
+        // the last dot wins, so a file under a dotted folder is still itself.
+        assertEquals(AssetKind.IMAGE, assetKindOf("my.folder/photo.jpg"))
+        assertEquals(AssetKind.IMAGE, assetKindOf("photo.jpg"))
     }
 
     // §6.4, §9.3
