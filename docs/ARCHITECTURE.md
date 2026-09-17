@@ -2,7 +2,7 @@
 
 > **Status:** Normative architectural direction  
 > **Scope:** Long-lived product and domain boundaries  
-> **Last updated:** 2026-09-16 (revised: source/import/catalog boundaries and review-context independence)
+> **Last updated:** 2026-09-17 (revised: an Upstream is the registered origin, and Source is retired as a name for anything inside the system)
 
 Listea is a lightweight human-judgment layer between structured inputs and workflow outputs. It turns a collection of reviewable tasks into a fast, resumable feed, records what a person decided, and leaves upstream ingestion and downstream consequences to other systems.
 
@@ -57,6 +57,35 @@ Moving to another Task is not a statement about the Task being left behind. A pe
 > The resources attached to a Task describe how its content is presented. They do not determine how long the Task should exist.
 
 A Task with no Asset is not a lesser Task, a temporary Task, or a Task owned by whatever context happens to contain it. A Task whose content is entirely structured fields — a question, a vocabulary prompt, a record to adjudicate — is as durable as one carrying five documents. Nothing may infer ownership, scope, or deletion policy from how many Assets a Task has.
+
+An import may therefore carry an explicit per-Todo **content policy**, naming what a change to a
+Task's Asset set means:
+
+| Policy | What a change to the Task's Assets means |
+|---|---|
+| **`keep`** | The Task and its judgment stand; missing material is flagged. |
+| **`reset`** | The Task's identity stands, and its *current state* is cleared — an operation [ReviewEvent and ReviewResult](#reviewevent-and-reviewresult) already contemplates for an import. |
+| **`drop`** | The Task's **identity** does not survive the change, and a new Task takes its place. |
+
+`drop` is the only tier that reaches lifetime, and it is admitted **only** as an explicit,
+user-named, per-import policy — which [Re-import and reconciliation](#re-import-and-reconciliation)
+already requires for a change of Task boundary — and never as an inference drawn from a Task's
+structure. All three tiers read a *change* in the set of Assets, never its size, and a Task left with
+zero resolvable Assets is flagged missing and lives.
+
+**No tier chooses a policy from a count**, and the one place a count is read at all is worth stating
+exactly, because it is the boundary of the rule above rather than an exception to it. Asking to
+`drop` a Task that holds a single Asset **starts it over instead**: such a Task *is* its Asset, so
+replacing it would mint a Task holding that same one Asset under a new id, with its judgment and its
+List memberships gone — the identity lost and nothing bought. The user's statement still decides
+*that* something happens to the Task; the Task's shape only decides which of two ways of honouring it
+is available. A policy is never *inferred* from a count, and a Task is never replaced because of one.
+
+Who names the policy is the whole of the distinction. A user saying *"when this Task's content moves,
+start it over"* is stating an intention about a Task they own, which is a thing this model must be
+able to represent. A program noticing that a Task now has one Asset where it had two, and concluding
+anything from that, is deriving a lifetime from structure — which is what the paragraph above
+forbids, and still does.
 
 ### Task creation ⟂ Task review
 
@@ -326,7 +355,7 @@ The path into Core contains several distinct concepts and operations:
 External material
     |
     v
-Source registration
+Upstream registration
     |
     v
 Importer / Task Builder -------- Import provenance
@@ -334,7 +363,7 @@ Importer / Task Builder -------- Import provenance
     v
 Normalized Tasks + Assets
     |
-    +---------------------> Source-backed catalog / browse projection
+    +---------------------> Upstream-backed catalog / browse projection
     |                                      |
     |                                      +--> Quick Review context
     |                                      |
@@ -348,13 +377,17 @@ Normalized Tasks + Assets
 
 The interface may present several of these stages as one convenient motion. The domain must still keep them separate. Opening a folder, interpreting its contents, selecting Tasks, and creating a List are not one operation whose meaning changes according to the current screen.
 
-### File and Source
+### File, Source, and Upstream
 
 A **file** is raw external material. It may be discovered through a local folder, document provider, cloud service, archive, or another source. A file is not a Task merely because Listea can open it, and it is not an Asset until an importer deliberately attaches a representation of it to a Task. It has no List membership, TaskState, completion, or review history of its own.
 
-A **Source** is a registered origin from which raw material can be discovered. A folder is one Source kind, not a universal container in Core. A Source may retain a stable internal identity, external root locator and access information, display name, chosen importer configuration, import status, and enough provenance to reconcile later imports.
+A **Source** is a file *outside* the system: an objective thing that exists whether or not Listea has ever heard of it. Source is therefore not a domain concept Core owns and not a name for anything stored. It is the word for what an Upstream was before someone chose it — the reason the app says "add an Upstream" rather than "add a Source", and the reason no screen, table or query names a Source.
 
-Source identity remains distinct from Task and Asset identity. A path or URI may help recognize the same external material again, but it is never a globally stable domain ID. Source availability also remains distinct from Task lifetime: removing access to a Source or finding a file missing must not silently delete TaskState or ReviewEvents.
+An **Upstream** is a Source that has been chosen: the point where external material enters the system. A folder is one Upstream kind, not a universal container in Core, and a device may hold several at once — each with its own access grant, because granting a second folder must not cost the first. An Upstream retains a stable internal identity, external root locator and access information, display name, and enough provenance to reconcile later imports.
+
+**An Upstream is material, not work.** It holds no Tasks, has no completion, and owns no review context: it is a folder the app may read, and nothing more happens on it than browsing it and running an importer over part of it. What an importer produces is a **Todo**, and the two are separate records because they have separate lifetimes — an Upstream outlives every Todo made from it, and a Todo says nothing about which folder it came from beyond the provenance that lets a later run find it again.
+
+Upstream identity remains distinct from Task and Asset identity. A path or URI may help recognize the same external material again, but it is never a globally stable domain ID. Upstream availability also remains distinct from Task lifetime: removing access to an Upstream, or finding a file missing, must not silently delete TaskState or ReviewEvents.
 
 ### Import decides Task boundaries
 
@@ -375,14 +408,14 @@ Once created, a Task is indivisible from the point of view of review selection:
 
 Changing Task boundaries is a new import/reconciliation operation. It is never an effect of creating a List or entering Quick Review.
 
-### Source structure is not Task structure
+### Upstream structure is not Task structure
 
-Folders and other source hierarchies help an importer discover material and help a catalog present it. They do not define universal Task ownership.
+Folders and other Upstream hierarchies help an importer discover material and help a Todo present it. They do not define universal Task ownership.
 
 For example:
 
 ```text
-source/
+upstream/
 ├── candidate-a/
 │   ├── cv.pdf
 │   └── research.pdf
@@ -394,9 +427,9 @@ A file-as-Task importer may produce three Tasks. A folder-as-Task importer may p
 
 ### Catalog, scope, and Task groups
 
-A **Task Catalog** is a browse-and-selection projection over imported Tasks. It may preserve useful Source hierarchy and present top-level labels such as “Picture Classification” or “Candidate Selection.”
+A **Task Catalog** is a browse-and-selection projection over imported Tasks. It is what opening a Todo shows. It may preserve the Upstream's hierarchy and present top-level labels such as “Picture Classification” or “Candidate Selection.”
 
-The interface may call such a top-level view a **Task Group**, but Task Group is not initially a new Core ownership entity. It is a source-backed catalog scope or saved browse projection unless a demonstrated requirement gives it independent identity, membership, lifecycle, permissions, or behavior.
+The interface may call such a top-level view a **Task Group**, but Task Group is not initially a new Core ownership entity. It is an Upstream-backed catalog scope, or a saved browse projection, unless a demonstrated requirement gives it independent identity, membership, lifecycle, permissions, or behavior.
 
 Therefore:
 
@@ -409,10 +442,10 @@ Therefore:
 
 ### Complete containment in a scope
 
-A source-backed Task is **complete in a scope** when every Asset required to present it is resolvable through and contained by that scope. For file-backed Tasks:
+An Upstream-backed Task is **complete in a scope** when every Asset required to present it is resolvable through and contained by that scope. For file-backed Tasks:
 
 ```text
-required source-backed Assets(Task) ⊆ Assets resolvable in Scope
+required Upstream-backed Assets(Task) ⊆ Assets resolvable in Scope
 ```
 
 Merely intersecting a Task is insufficient. If a scope exposes only some Assets of a Task, the Task is partial there. A partial Task may be shown to explain the situation, but it cannot be reviewed or added to a List as though it were a smaller Task.
@@ -421,24 +454,16 @@ Completeness is selection eligibility, not Task health or TaskState. A Task can 
 
 ### Import is independent from selection
 
-The legacy action called **Select Folder** combines at least three operations:
+The action that used to do all of this at once — pick a folder, import it, and open something to review — is gone, and what replaced it is the split this section asks for. Adding an Upstream registers material and stops there; importing is a **Create Tasks** run of its own, started inside the Upstream on the folder it is to be run over; what to review is chosen after that, from the Tasks the run produced. The operations and their failure states remain independent:
 
-```text
-choose external material
-+ import it using file-as-Task
-+ build or open a review context
-```
-
-The product may retain a shortcut that performs these consecutively, but the operations and their failure states remain independent:
-
-1. **Register or choose Source** identifies external material.
-2. **Import** creates or reconciles Tasks and Assets using an explicit importer.
-3. **Select Tasks** chooses already normalized, complete Tasks.
+1. **Add an Upstream** identifies external material and registers it. It creates no Task and no review context, and it is a Settings action because it is about what the app may read rather than about what there is to do.
+2. **Import** creates or reconciles Tasks and Assets using an explicit importer, and writes a Todo to hold them.
+3. **Select Tasks** chooses already normalized, complete Tasks. It happens inside a Todo, as **Create List**, and not on the Todo tab — a row there stands for a Todo, and selecting from it would be the row pretending to be the screen behind it.
 4. **Start Quick Review or create a List** establishes a review context.
 
 Failure to import must not create a partly meaningful List. Failure to create a List must not roll back otherwise successful imported Tasks. Reopening a catalog scope must not re-import merely because the user wants to review it.
 
-User-facing language should name the intended operation. Prefer **Import Folder**, **Review This Scope**, and **Add Tasks to List** over one ambiguous **Select Folder** command.
+User-facing language should name the intended operation: **Create Tasks** to import, opening a **Todo** to see what an import produced, **Quick Review** for an ephemeral round, **Create List** for a persistent one. None of these is a synonym for another, and none should be presented as one. Opening a Todo is not itself an operation with a name, which is why it is the Todo's card rather than a button on it.
 
 ### Quick Review and List are independent review contexts
 
@@ -455,25 +480,34 @@ An interface may offer **Import and create List** as a composed workflow. Intern
 | Concept | Defines Task boundary | Owns TaskState/history | Owns ordering | Owns external location | Persistent review context |
 |---|---:|---:|---:|---:|---:|
 | File | No | No | No | Source system | No |
-| Source | No | No | Source browse order only | Yes | No |
+| Upstream | No | No | Upstream browse order only | Yes | No |
 | Importer | Yes, during import | No | May assign Asset order | Interprets it | No |
 | Asset | No | No | Asset order within Task | Retains locator/provenance | No |
 | Task | Is the resulting boundary | Yes | No | No | No |
-| Catalog scope / Task Group | No | No | Browse/display order | May project Source hierarchy | No |
+| Catalog scope / Task Group | No | No | Browse/display order | May project Upstream hierarchy | No |
 | Quick Review | No | No; writes through Task | Ephemeral queue order | No | No |
 | List / ListEntry | No | No; reads/writes through Task | Yes | No | Yes |
 
 ### Re-import and reconciliation
 
-Re-import is the routine operation allowed to reconsider imported material. It must be explicit and use stored Source and importer provenance.
+Re-import is the routine operation allowed to reconsider imported material. It must be explicit and use stored Upstream and importer provenance. It is started from inside the Upstream, on the folder it is to be run over, so that reading part of an Upstream is an ordinary thing to do rather than one that registers anything.
 
 It must distinguish unchanged material, newly discovered material, changed content or metadata at an existing source locator, material no longer resolvable, and a requested change of importer/grouping rule. Unchanged material should reconcile to the same Task and Asset identities. Missing material must not erase review state or history.
 
-Changing from file-as-Task to folder-as-Task can merge or split Task identity and is therefore not an ordinary refresh. It requires an explicit migration policy; until one exists, the system must create a separate import or reject the change rather than silently rewriting reviewed Tasks.
+Changing from file-as-Task to folder-as-Task can merge or split Task identity and is therefore not an ordinary refresh. It requires an explicit migration policy; until one exists, the system must create a separate import or reject the change rather than silently rewriting reviewed Tasks. Since v0.4.0 the *first* of those two is always available and no longer needs a reason: a folder may carry any number of Todos, so "make a separate import" is an ordinary thing to do rather than a fallback, and nothing is rejected on the ground that a folder already has one.
 
-Whether one Asset may eventually be referenced by multiple Tasks remains an open architecture decision. Initial importers may enforce one Task association per imported Asset without declaring shared Assets permanently impossible.
+**One file may back several Tasks, and does.** This was the open question above, and v0.4.0 closed it in favour of sharing. The reasoning is the one the escape hatch in the paragraph before already hinted at: an Asset is not the file, it is the file *presented for* a Task — so a second Task over the same file is a second Asset, and nothing is referenced twice. What uniqueness remains is `(taskId, rootUri, relativePath)`: one Task still holds one Asset per file, which is the invariant that was actually load-bearing, because two Assets of one Task at one path would be two answers to the same question.
 
-### Source/import invariants
+The consequence for identity is that the sharing boundary sits at the **Task**, not the file:
+
+| Reached through | Is | State |
+|---|---|---|
+| Two Todos, one file | Two Tasks | Independent |
+| Two Lists, one Task | One Task | Shared |
+
+And for reconciliation: a locator held by another Todo is not a collision, so a re-import mints its own Tasks beside them rather than reporting a conflict. Only a locator held by the *same* Todo is still a conflict, because that is the grouping rule disagreeing with itself. See [v0.4.0](iterations/v0.4.0.md).
+
+### Upstream/import invariants
 
 1. A file path, URI, filename, folder name, or List position is never a Task or Asset domain ID.
 2. Only an importer or Task Builder defines which raw inputs form a Task.
@@ -482,7 +516,7 @@ Whether one Asset may eventually be referenced by multiple Tasks remains an open
 5. A review context reviews the whole Task even when the surface displays one Asset at a time.
 6. Quick Review and every List observe the same TaskState for the same Task.
 7. List deletion removes ListEntries, not Tasks, Assets, TaskState, or ReviewEvents.
-8. Source removal or temporary unavailability does not silently rewrite review history.
+8. Upstream removal or temporary unavailability does not silently rewrite review history.
 9. An Asset Viewer never decides Task navigation, completion, or import grouping.
 10. Adding PDF support changes Asset kind and viewer capability; it does not redefine Task, List, Quick Review, or import semantics.
 
@@ -494,7 +528,7 @@ They do not define the future Core.
 
 In particular:
 
-- a folder path may resolve or deduplicate a current source-backed Task, but it is not the Task's permanent domain ID;
+- a folder path may resolve or deduplicate a current Upstream-backed Task, but it is not the Task's permanent domain ID;
 - `list_items` may currently mix membership and manual-item data, but `ListEntry == Task` is not an architectural rule;
 - current file review state may seed TaskState, but `Task == file review row` is not an architectural rule;
 - a webhook body may require a legacy public item ID, but `Task.id == webhook item.id` is not an architectural rule;

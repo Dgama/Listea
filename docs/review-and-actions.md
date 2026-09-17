@@ -4,7 +4,8 @@ The Review screen: every gesture, control and behaviour, and the actions that go
 
 - [The screen](#the-screen)
 - [Gestures](#gestures)
-- [The action bar](#the-action-bar)
+- [The frame: what belongs to the item](#the-frame-what-belongs-to-the-item)
+- [The file's controls](#the-files-controls)
 - [Custom actions](#custom-actions)
 - [The Info sheet](#the-info-sheet)
 - [Zoom](#zoom)
@@ -17,16 +18,18 @@ The Review screen: every gesture, control and behaviour, and the actions that go
 
 ## The screen
 
-One file fills the screen. A thin bar along the top gives you back, the filename, and your position
-in the queue. A bar along the bottom carries the decisions. Tapping the media hides both, and
-tapping again brings them back.
+The screen is a frame with the file inside it. Along the top sits the navigator, along the bottom
+sits the completion checkbox, and **both are always there** — they belong to the item and to the
+queue, and nothing about looking at the file takes them away. What the file itself needs — a
+video's transport, the tag chips, Info — is drawn *over* the media and comes and goes with a tap.
 
 <p align="center">
-  <img src="assets/screenshots/review-media.jpg" width="300" alt="The Review screen: a video filling the screen, with the filename and queue position along the top and the completion checkbox, favourite, custom action chips and Info button along the bottom">
+  <img src="assets/screenshots/review-media.jpg" width="300" alt="The Review screen: a video inside the frame, with the item name, filename and queue position along the top and the completion checkbox below it, and the favourite, custom action chips and Info button laid over the bottom of the video">
 </p>
 
-Images (JPEG/PNG/WebP), animated GIFs and video all render in place. There is no fullscreen
-button — the picture is already the whole screen.
+Images (JPEG/PNG/WebP), animated GIFs and video all render in place. The frame takes its own room
+rather than floating over the picture, which is what makes a control that is drawn over the media
+mean something different from one that is not.
 
 Full Review and Quick Review are the **same screen**. They differ in where the queue came from and
 in a handful of strings, not in what any control does.
@@ -35,27 +38,97 @@ in a handful of strings, not in what any control does.
 
 | Gesture | What it does |
 |---|---|
-| **Swipe left** | Mark the current item checked, then advance |
-| **Swipe right** | Go back one item. Changes nothing |
+| **Swipe left** | Go forward one file; off the last file, mark the item checked and advance |
+| **Swipe right** | Go back one file; off the first, go back one item. Changes nothing |
 | **Pinch** | Zoom, up to 5× |
 | **Drag while zoomed** | Pan inside the picture |
-| **Tap the media** | Show or hide the top and bottom bars |
+| **Tap the media** | Show or hide the file's own controls |
 | **Back** | Leave the review |
+
+An item holds one file most of the time, and then a swipe is exactly what it has always been: left
+checks it off and advances, right steps back. An item holding several — a folder imported as a
+Task — is one item and several files, and a swipe looks at all of them before it reaches the next
+item.
+
+Both ways of moving exist, and they are deliberately different controls. Swiping turns a **page**:
+it moves between the files inside the item, and only leaves the item at either end of them. The
+navigator's arrows move the **queue** and skip the files entirely. A swipe that only turned a page
+checks nothing.
+
+**Leaving an item is where the judgment is.** An item with several files is checked once, not once
+per file.
 
 Swiping right is a navigation, not an undo: it never unchecks anything. To uncheck an item, swipe
 back to it and use the checkbox.
 
-## The action bar
+## The frame: what belongs to the item
 
-Along the bottom, in order:
+The top band is the navigator, and it says two things at once — which item you are on, and which of
+its files is showing.
 
-- **Completion checkbox** — check or uncheck the current item without moving.
+```
+whatsapp                    xxxx.mp4              << ‹ 3(3/3)/3 › >>
+```
+
+| Zone | What it is |
+|---|---|
+| **Left** | Back, then the item's name, with the tags it carries under it. |
+| **Middle** | The file on screen. Absent when the item holds only one file. |
+| **Right** | The queue position, bracketed by its arrows. |
+
+The item's name carries a second line when the item has tags: one badge per action set on it — ★,
+and each custom action by its display name. It is the same row a List's item shows under its title,
+drawn by the same code from the same configured actions, so an item reads the same inside a round as
+it does on the page it was queued from. It carries no tap of its own: the chips over the media are
+where a tag is set, and this is the line it is read back on.
+
+It sits on the frame rather than with those chips because it says something about the *item* and not
+about the file. A tag belongs to the whole item, whichever of its files is showing, and a tap on the
+media — which puts the file's own controls away — must not take the item's answer with it.
+
+The position reads `3(3/3)/3` on an item with several files: you are on item 3 of 3, showing file 3
+of its 3. On an item holding one file — still the overwhelming majority — there is no file level to
+speak of, so it is simply `3 / 3` and only two arrows are drawn.
+
+Four arrows are drawn on a multi-file item, and the outer and inner pairs do different things:
+
+| Arrow | Moves |
+|---|---|
+| `<<` `>>` | The queue: previous and next item, whatever file you are on |
+| `‹` `›` | The file: previous and next page inside the current item |
+
+A level with nothing to move between is not a level. That is why the inner pair and the filename
+only appear once an item holds more than one file, and why the outside pair is drawn greyed at the
+ends of a queue rather than removed — a control that vanishes re-measures the bar under your finger.
+
+The bar has a floor under it, because "the arrows keep their full size" and "the item's name stays
+readable" cannot both hold on every screen. The controls, the item's name when both names are
+present and the position need more width together than a narrow phone at a large font scale has,
+and the name is what is left over. When the bar is narrower than 365dp **every** control in it comes down to
+40dp at once, and the name is measured against that. 40dp is under the 48dp touch guideline and is
+a deliberate trade rather than an oversight: the name is what tells you which item you are on, and
+40dp is still a target a thumb finds. Shrinking is all-or-nothing so that no control changes size
+under a finger that is already moving.
+
+The bottom band holds the completion checkbox, centred and alone.
+
+## The file's controls
+
+Laid over the bottom of the media, in order:
+
 - **★ Favourite** — the built-in action.
 - **Your custom actions** — however many you have configured, in the order you configured them.
 - **Info** — opens the [Info sheet](#the-info-sheet).
 
+A video adds its own transport above them: play/pause, elapsed time, a progress bar and mute. That
+transport is lifted clear of the chips rather than stacked on top of them, so both stay usable.
+
+Tapping the media puts this whole layer away and brings it back. The navigator and the checkbox do
+not go with it — they are the item's, and a round cannot be finished by a tap that hid the control
+that finishes it.
+
 Checking and tagging are independent. Tapping ★ does not check an item; checking an item does not
-tag it. Nothing on this bar implies anything else on it.
+tag it. Nothing on this layer implies anything about the checkbox.
 
 ## Custom actions
 
@@ -147,9 +220,9 @@ never becomes a pan.
 Video plays through Media3 (ExoPlayer), in place, with Listea's own transport rather than Media3's
 `PlayerControlView`.
 
-**The transport** is one strip along the bottom edge, directly above the action bar: play/pause,
-the position and length, a scrubber, playback speed, and mute. Nothing else. It comes up and goes
-away with the rest of the chrome on a tap.
+**The transport** is one strip along the bottom of the media, sitting directly above the tag chips:
+play/pause, the position and length, a scrubber, playback speed, and mute. Nothing else. It comes
+up and goes away with the file's other controls on a tap.
 
 Tapping the strip anywhere that is not a control does nothing, rather than counting as the tap on
 the media that puts the chrome away — aiming at pause and missing by a few pixels should not be
@@ -182,21 +255,58 @@ orientations.
 
 </details>
 
-## The four viewing surfaces
+## The viewing surfaces
 
 The same renderer and the same gestures, with different amounts of authority:
 
-| Surface | Reached from | Can change state |
-|---|---|---|
-| **Review** | A List's Review button | Yes — full action bar |
-| **Quick Review** | A folder's Quick Review action | Yes — full action bar |
-| **File Viewer** | Tapping a file in the Folder tab | No |
-| **List item viewer** | Tapping an item on a List's page | No |
+| Surface | Reached from | Can change state | Chrome |
+|---|---|---|---|
+| **Review** | A List's Review button | Yes — checkbox and tag chips | Whole frame |
+| **Quick Review** | A Todo's Quick Review action, at a folder holding Tasks | Yes — checkbox and tag chips | Whole frame |
+| **File Viewer** | Tapping a file in an Upstream's browser | No | Whole frame |
+| **List item viewer** | Tapping an item on a List's page | No | Whole frame |
+| **Todo preview** | Tapping a Task while browsing a Todo | No | Navigator and steps |
 
-The two viewers are plain galleries: they page between siblings, show the Info sheet, and change
-nothing. That they look identical to each other is the point — neither is a place where decisions
-get made, so neither grows a control that suggests otherwise. Save and Share are offered on all
-four.
+The three readers are plain galleries: they page between siblings and change nothing. That they look
+near-identical to each other is the point — none is a place where decisions get made, so none grows
+a control that suggests otherwise. Save and Share are offered on the first four; the Info sheet on
+all but the Todo preview, which is the one that drops even that.
+
+### The Todo preview
+
+The odd one out, and deliberately so. It is reached by tapping a Task while browsing a Todo, and it
+keeps only the navigator: no tag chips, no completion box, no Info bar — not
+disabled, absent. What is left is the one band that belongs to the *Task* rather than to the file,
+which is the boundary the frame already draws; everything dropped is the file's own chrome.
+
+This is the one gallery with no Save and no Share either. Not because they would be wrong, but
+because the surface exists to answer "what is this?" before it exists to do anything with it, and
+every control it grows is a way for browsing to turn into acting by accident. A user who wants to
+act on the material has Quick Review at that folder and the Lists built from it.
+
+It has two levels of steps, the same two the List's item viewer has. Steps *within* a Task are kept,
+because a Task standing for a folder is several files and paging is the only way to see the rest of
+it. Steps *between* Tasks are kept too, and for a reason that does not soften the one above: the
+preview is opened from a level and the level is a sequence, so walking that sequence is still
+answering "what is this?" about the thing the user was already looking at. `‹` and `›` walk the
+Tasks of that level in catalog order, and swiping off either end of a Task's files moves to the next
+Task rather than stopping — the gesture and the arrows are one behaviour. At the ends of the *level*
+it stops, because there is no next Task to reach and nothing to complete.
+
+This reverses an earlier decision that steps between Tasks were absent. The reasoning then was that
+the catalog is a better way to choose the next thing to look at than a sideways step buried inside a
+file; what it missed is that the catalog is *behind* the preview, and going back to it to move one
+row down costs a screen and a tap to answer a question the arrows answer directly. What was right in
+it is kept: a Task is reached this way only if it was already in the level, so the sequence can never
+lead anywhere the user could not have tapped, and nothing about the destination changes because of
+how it was reached. Stepping sideways is a look at the next one, not a move on it.
+
+The Task is looked up by id in the Todo's catalog rather than carried in as a row, so a preview
+open across a refresh shows the Task as the database now has it, and a Task that has gone closes
+the screen instead of leaving a file that is no longer in the catalog on display. What the lookup
+hands the screen is the whole level, in the catalog's own order, rather than the one row that was
+tapped — which is what lets a refresh change the sequence the arrows follow rather than leaving them
+walking a list captured at the tap.
 
 ## Filtering and sorting
 
@@ -265,7 +375,7 @@ The setting decides what is **read** on entry, never what is written: the positi
 recorded either way, so switching resuming back on picks up where Review actually got to rather
 than from wherever it was when you switched it off.
 
-**Quick Review never resumes.** It is folder-scoped and temporary, and always starts at the first
+**Quick Review never resumes.** It is Todo-scoped and temporary, and always starts at the first
 unchecked item.
 
 ## Finishing a queue

@@ -10,14 +10,14 @@ where the other pages link to rather than repeat.
 
 | Page | What it covers |
 |---|---|
-| [Getting started](getting-started.md) | Prerequisites, building, installing, granting a folder, and running a first review end to end. |
-| [Core concepts](core-concepts.md) | The vocabulary: root, folder, item, List, Quick Review, round, checked state, action. And the one rule that explains most of Listea's behaviour — a decision belongs to the file. |
+| [Getting started](getting-started.md) | Prerequisites, building, installing, adding an Upstream, and running a first review end to end. |
+| [Core concepts](core-concepts.md) | The vocabulary: Upstream, Todo, Task, Asset, folder, List, Quick Review, round, checked state, action, dissolution, and where a decision is stored. |
 
 ## Using it
 
 | Page | What it covers |
 |---|---|
-| [Review and actions](review-and-actions.md) | The Review screen in full: gestures, zoom, video transport, the action bar, the Info sheet, rounds, resuming, and how filtering and sorting shape a queue. |
+| [Review and actions](review-and-actions.md) | The Review screen in full: the frame and what belongs to which level, gestures, zoom, video transport, the Info sheet, rounds, resuming, and how filtering and sorting shape a queue. |
 | [Webhooks](webhooks.md) | The four events, when each fires, the exact JSON payload, item ids, the confirmation dialog, webhook history, resending and failures. |
 | [File management](file-management.md) | Everything that touches storage: deleting checked files, the post-webhook delete offer, saving to a gallery album, sharing, permissions and root boundaries. |
 | [Settings](settings.md) | Every switch and field on the Settings screen, with links to the page that explains what each one does. |

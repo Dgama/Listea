@@ -19,16 +19,19 @@ granted folder on one Android device.
 
 Concretely, and as a baseline for everything below:
 
-- A reviewable item **is a file**. It has a path under the root, a size, a modified time, and a
-  media type inferred from its extension.
+- A reviewable item **is a Task**, and a Task is files: one file, or a folder's worth of them. Its
+  files have a path under the root, a size, a modified time, and a media type inferred from the
+  extension.
 - Review **is a media screen**. One renderer, one swipe gesture, one action bar, one zoom
   implementation, one video transport.
-- State **is checked plus actions**, keyed by root and relative path.
-- A queue **comes from a folder** — directly, as a Quick Review, or via a List over a subtree.
+- State **is checked plus actions**, keyed by the Task's own id.
+- A queue **comes from a Todo** — the Tasks one Create Tasks run produced — or from a List built
+  out of Tasks picked from one.
 - The output **is a webhook**, describing a List and its items.
 
 That is a coherent product and it works. The limitation is not quality; it is that every one of
-those five sentences says *file*, *media* or *folder*.
+those five sentences still ends at *file*, *media* or *folder*. A Task has an identity of its own
+now, and nothing yet to hold but files.
 
 ## Architectural direction
 
@@ -88,15 +91,18 @@ question.
 
 **Prepare Listea to review tasks that are not files.**
 
-Today a `ReviewItem` is a file, and its state is keyed by a path under a storage root. A general
-task model would let a review item represent something broader — with an identity that does not
-have to be a filesystem path, content that does not have to be bytes on disk, and a source that
-does not have to be a folder.
+Today a `ReviewItem` is a Task, and its state is keyed by the Task's own id rather than by a path.
+What a Task *holds* is still files. A general task model would let a review item represent something
+broader — content that does not have to be bytes on disk, and a source that does not have to be a
+folder.
 
 This is the deepest of the three. It reaches the database schema, the identity scheme, the queue
 builders and the webhook payload, and it is the one that makes the other two worth doing.
 
-**Status: not implemented.**
+**Status: half done, by way of v0.2.5.** The identity half landed — a review item is a Task with an
+id of its own, and state hangs off that id, so the model no longer assumes a filesystem path is the
+thing decisions belong to. The other half is untouched: every Task is files, so there is still no
+way to review something that is not on disk.
 
 ## Next milestone: a check-in task workflow
 

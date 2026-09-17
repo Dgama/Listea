@@ -42,12 +42,15 @@ and videos on your device, and that is all it reviews.**
 ## How it works
 
 ```
-Folder  →  Quick Review  or  List  →  Review items  →  Check / assign actions  →  (optional) webhook
+Upstream  →  Create Tasks  →  Todo  →  Quick Review  or  List  →  Review items  →  (optional) webhook
 ```
 
-1. Point Listea at a folder on your device, through Android's own folder picker.
-2. Turn a folder into a queue — immediately, or as something that persists.
-3. Work through it one item at a time.
+1. Add a folder on your device, through Android's own folder picker, in Settings. That folder is
+   an **Upstream**, and you can add as many as you like.
+2. Open it, walk to the folder you want, and run **Create Tasks**: choose whether each file or each
+   folder becomes a Task, give it a name, and say whether it keeps its folder tree. What it produces
+   is a **Todo**.
+3. Work through a Todo one item at a time — as a Quick Review, or as a List that persists.
 4. Mark each item done, and optionally tag it with an action that says what should happen to it.
 5. Send the result somewhere, if you have somewhere to send it.
 
@@ -58,25 +61,18 @@ and you confirm every one of them.
 
 ### Quick Review
 
-Browse into any folder and start. No setup, nothing created, nothing to clean up afterwards — it
-reviews that folder's own files and stops. Available on every folder, whether or not a List covers
-it.
+Open a Todo, open the folder you want, and start. No setup, nothing created, nothing to clean up
+afterwards — it reviews the Tasks directly in that folder and stops. Available whether or not a List
+covers them.
 
 ### Lists
 
 For work that outlives one sitting. A List covers a folder and everything beneath it, keeps its own
 progress, and can be reopened, re-synced with the folder, and wired to a webhook.
 
-<table>
-<tr>
-<td align="center"><img src="docs/assets/screenshots/folder-quick-review.jpg" width="270" alt="The Folder screen showing a folder card with Refresh, Quick Review, Open List and Create List actions"></td>
-<td align="center"><img src="docs/assets/screenshots/list-detail.jpg" width="270" alt="A List's detail page showing its source folder, progress and item checklist"></td>
-</tr>
-<tr>
-<td align="center"><sub>Quick Review, from any folder</sub></td>
-<td align="center"><sub>A List's detail page</sub></td>
-</tr>
-</table>
+<p align="center">
+  <img src="docs/assets/screenshots/list-detail.jpg" width="300" alt="A List's detail page showing its source folder, progress and item checklist">
+</p>
 
 Either way the decisions are the same decisions: checking a file in Quick Review and checking it
 from a List are one act, because state belongs to the file rather than to the queue you reached it
@@ -103,8 +99,9 @@ is built in.
 You have a folder that syncs from somewhere — a few hundred images and videos you have not looked
 at yet.
 
-1. Open the folder in Listea and tap **Quick Review** to start there and then, or **Create List**
-   if this is going to take more than one sitting.
+1. Add the folder as an Upstream in Settings, open it, run **Create Tasks**, then tap **Quick
+   Review** in the Todo it produced to start there and then — or **Select → Create List** if this is
+   going to take more than one sitting.
 2. Swipe through it. Each file fills the screen; swipe left to mark it done and advance, right to
    go back. Pinch to look closer; video plays in place.
 3. As you go, tap ★ or one of your own chips on anything that needs more than "done" — the ones
@@ -123,10 +120,13 @@ Everything in this table works today.
 
 | | |
 |---|---|
-| **Folder browsing** | Any folder you grant, through Android's Storage Access Framework. Shows whether a List covers it, and which files are already checked. |
+| **Upstreams** | Any folder you grant, through Android's Storage Access Framework, added in Settings and listed one card each. Opening one browses its files with the ones already checked marked. |
+| **Create Tasks** | Turns a folder's material into Tasks — one Task per file or one per folder, under a name you choose, keeping the folder tree or flattening it. |
+| **Todo** | The Tasks one Create Tasks run produced, one card each. Opening one browses them and offers Quick Review and Select there. |
+| **Dissolution** | Deleting a Todo takes its Tasks and their decisions with it, leaves the files' own identity alone, and tells every List what it lost. A per-Todo switch can write the decisions down first, so a Todo created at the same folder later can load one history from them. |
 | **Review** | Full-screen images, animated GIFs and video. Swipe to check and advance, swipe back to reconsider, pinch to 5×, per-item Info sheet. |
 | **Video** | Its own transport strip: play/pause, scrubber, 0.5×–2× speed, mute. Autoplay and start-muted are settings. |
-| **Quick Review** | Any folder, instantly, without creating anything. |
+| **Quick Review** | Any folder holding Tasks, instantly, without creating anything. |
 | **Lists** | Persistent queues over a folder and its subfolders, with progress, source-change detection and manual re-sync. Manual, file-less Lists too. |
 | **Checked state** | Belongs to the file, not to the queue. Shared by every List and Quick Review that reaches the same file. |
 | **Custom actions** | User-defined chips with their own display names and wire values, plus a built-in favourite. |
@@ -155,8 +155,10 @@ there:
 check-ins are the point, but because building one forces task data, state, actions and presentation
 to stop being welded to image and video files.
 
-**None of this is implemented.** It describes where the project is going, not what it does. The
-full version is in [docs/roadmap.md](docs/roadmap.md).
+**Almost none of this is implemented.** v0.2.5 gave a reviewable item an identity of its own — a
+Task, whose state hangs off that id rather than off a file path — which is the start of the third
+piece and no more: every Task still holds files. The rest describes where the project is going, not
+what it does. The full version is in [docs/roadmap.md](docs/roadmap.md).
 
 ## Documentation
 
@@ -164,8 +166,8 @@ full version is in [docs/roadmap.md](docs/roadmap.md).
 
 | | |
 |---|---|
-| [Getting started](docs/getting-started.md) | Build it, grant a folder, run your first review |
-| [Core concepts](docs/core-concepts.md) | Roots, Lists, items, rounds, and where state lives |
+| [Getting started](docs/getting-started.md) | Build it, add an Upstream in Settings, run your first review |
+| [Core concepts](docs/core-concepts.md) | Upstreams, Todos, Lists, items, rounds, and where state lives |
 | [Review and actions](docs/review-and-actions.md) | Every gesture, control and behaviour in Review |
 | [Webhooks](docs/webhooks.md) | Events, payload format, history, resending |
 | [File management](docs/file-management.md) | Everything that touches your files |

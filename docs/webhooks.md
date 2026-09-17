@@ -37,8 +37,8 @@ separate jobs:
 2. It is **used directly** by anything that has no List behind it — Quick Review — and by
    **Resend** from the history.
 
-Quick Review has no webhook configuration of its own and is not getting one. It is folder-scoped
-and temporary, so it posts to the default URL as it stands right now.
+Quick Review has no webhook configuration of its own and is not getting one. It is Todo-scoped and
+temporary — a Todo rather than a List — so it posts to the default URL as it stands right now.
 
 ## Events
 
@@ -46,7 +46,7 @@ and temporary, so it posts to the default URL as it stands right now.
 |---|---|---|---|---|
 | `list.completed` | A List goes from incomplete to complete | The List's URL | The whole List | The List's webhook on |
 | `list.webhook.test` | The **Test webhook** button | The List's URL | The whole List | A usable URL |
-| `quickreview.completed` | A Quick Review queue is finished | The **default** URL | That folder's round | *Send from Quick Review* |
+| `quickreview.completed` | A Quick Review queue is finished | The **default** URL | That Todo's round | *Send from Quick Review* |
 | `review.exited` | A review round ends, finished or not | See below | That review's round | *Send when leaving a review* |
 
 **`list.completed`** has never depended on any of the review switches and still does not. It fires
@@ -119,9 +119,15 @@ Duplicates are collapsed: two chips configured with the same wire value emit it 
 favourite always sends `favorite` and is not configurable; everything else is whatever you set in
 **Settings → Review**.
 
-A round finished in a folder's Quick Review sends this same shape with the folder standing in for
+A round finished in Quick Review sends this same shape with the Upstream's folder standing in for
 the List, which keeps one payload format on the wire rather than inventing a second one. The
 per-item `relativePath` comes out identical to what a List over the same folder would have produced.
+
+**Nothing drops out for want of a registration row.** A round over a Todo holds Tasks that no List
+and no folder listing ever registered, so an item arrives with no id of its own. The payload builder
+mints a stable one on the first delivery and keeps it in `legacy_task_ids`, which is the same path a
+folder-as-Task Task takes — so every item in the round appears, and appears with the same id on
+every later round.
 
 ## Item ids
 

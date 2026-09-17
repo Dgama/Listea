@@ -37,7 +37,9 @@ Exactly three things write to storage, and every one of them is something you as
 **Settings → File management → Delete checked files.** The one thing Listea does that destroys
 something outside its own database.
 
-It deletes **every checked file under the current root folder** from the device itself, permanently.
+It deletes **every checked file under the chosen Upstream** from the device itself, permanently.
+When more than one Upstream is registered, Settings offers a chip row to say which one this counts and
+deletes in; with a single Upstream there is nothing to choose and no chips are shown.
 
 **Nothing happens without an explicit confirmation, and the confirmation is the full listing rather
 than a count.** Every file is named, grouped under the folder that holds it, and the list scrolls:
@@ -50,12 +52,12 @@ xxx/zzz
 ```
 
 **What is offered.** Only files Listea still believes exist: checked, not already flagged missing,
-and under the current root. It reads the same per-file state everything else does, so a file checked
-in a folder no List covers is offered exactly like one checked from a List's page — see
+and under the chosen Upstream. It reads the same per-file state everything else does, so a file
+checked in a folder no List covers is offered exactly like one checked from a List's page — see
 [Where state lives](core-concepts.md#where-state-lives).
 
 This is **wider than a review round and wider than a List**. It covers every checked file under the
-root, however and whenever it was checked. The Settings line above the button counts exactly that,
+Upstream, however and whenever it was checked. The Settings line above the button counts exactly that,
 and reading it as a List's progress or a round's tally is the easiest mistake it invites.
 
 **How files are found.** Each file is resolved from its path at delete time, one folder listing per

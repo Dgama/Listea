@@ -48,6 +48,50 @@ Versions are centralised in [`gradle/libs.versions.toml`](../gradle/libs.version
 `org.json` is used for webhook payload construction — part of the Android platform, which is why
 payload-shape tests are written against the pure helpers rather than the builder.
 
+### Build size, and where it comes from
+
+Measured on the current tree:
+
+| | |
+|---|---|
+| `app-debug.apk` on disk | **25.2 MB** |
+| What is inside it, uncompressed | **75 MB** |
+| …of which DEX | **73.9 MB** |
+| …of which `classes.dex` alone | **43.4 MB** |
+| Compose icon classes compiled in | **21,320** — 4,264 glyphs × 5 styles |
+| Compose icons the app actually names | **38** |
+
+The APK file has not grown; its **contents** are what is large, and almost all of that is one
+dependency.
+
+**`androidx.compose.material:material-icons-extended` ships every Material icon there is**, and it
+is declared as a plain `implementation` dependency, so all of it is compiled in. Compose's
+`Icons.Filled.*` accessors are properties on an object in that artifact, so importing the artifact is
+what makes `Icons.Filled.Refresh` resolve — there is no per-icon tree-shaking to fall back on,
+because the reference is a field read on a class that also holds the other four thousand.
+
+**Nothing shrinks it.** Debug builds never run R8, and the release build type sets
+`optimization { enable = false }` in `app/build.gradle.kts`, so even a release APK keeps the whole
+set. The builds on the releases page are debug.
+
+**Why a reported size can read much higher than 25 MB.** Any tool that measures the *contents*
+rather than the download — an analyzer showing "raw size", a file manager that unpacks the archive,
+or an OEM app-info screen that totals the uncompressed footprint — sees the 75 MB figure, not the
+25 MB one. On the attached device, `du` over the installed app directory is 24.6 MB, matching the
+APK. Worth knowing before treating a size report as growth.
+
+Three ways out, none taken in the v0.3.0 iteration because this is a build-configuration change with
+no design content and the round was already carrying a model split:
+
+1. **Turn R8 on for release** (`optimization { enable = true }`, with a keep rule for anything
+   reflective). Largest single win, and it is the setting that was switched off.
+2. **Replace the extended set with the 38 icons actually used**, either as hand-written
+   `ImageVector`s or by dropping to `material-icons-core` and the glyphs it has.
+   `grep -rhoE 'Icons\.[A-Za-z.]+\.[A-Za-z]+' app/src/main/java | sort -u` is the complete list.
+3. **Ship release-signed builds.** Independent of size, and already a stated gap — the
+   [getting started](getting-started.md#install-a-build) page warns that debug builds cannot be
+   installed over a future release-signed one.
+
 ## Building
 
 ```bash
@@ -69,10 +113,11 @@ The debug APK lands in `app/build/outputs/apk/debug/`.
 
 ## Tests
 
-**196 JVM unit tests**, run with `./gradlew testDebugUnitTest`. No device or emulator needed.
+**560 JVM unit tests**, run with `./gradlew testDebugUnitTest`. No device or emulator needed.
 
 They deliberately target the pure logic rather than the UI, which is why so much of that logic lives
-in files with no Android imports:
+in files with no Android imports. The table is a selection by subject rather than the whole list;
+`app/src/test/java/com/example/listea/` and its `data/` and `domain/` subpackages hold all of them.
 
 | Test | Covers |
 |---|---|
@@ -80,7 +125,7 @@ in files with no Android imports:
 | `ListArrangeTest` | A List's items under the same machinery |
 | `ReviewRoundTest` | Composing a page's arrangement with *unchecked items only* |
 | `QuickReviewQueueTest` | Resolving a folder into a review queue |
-| `FolderTypeTest` | None / List / Sublist attribution and subtree progress |
+| `FolderTypeTest` | None / List / Sublist attribution, subtree progress, and which Todo holds a row in which capacity |
 | `ItemIdTest` | Public id format, ordering, fingerprint determinism |
 | `WebhookPayloadTest` | Payload shape, `relativePath` derivation, action resolution |
 | `WebhookHistoryTest`, `WebhookStatusLabelTest`, `WebhookErrorLabelTest` | History records, status lines, network error wording |
@@ -91,6 +136,16 @@ in files with no Android imports:
 | `VideoControlsTest` | Transport state |
 | `SettingsTest` | Settings encoding, custom action defaults and decode tolerance |
 | `SourceFreshnessTest` | List-versus-folder diffing |
+| `ImportPlanTest`, `ImportRunTest`, `ImportInvariantTest` | Building Tasks from a folder: what a run plans, what it writes, and what it must not break |
+| `CreateTasksConfigTest` | What a Create Tasks run stores — the name, the importer and the folder-tree answer |
+| `CatalogTest`, `CatalogScopeTest`, `CatalogSelectionTest`, `TaskNavigationTest` | A Todo's catalog: scopes, selection units, and where a row leads |
+| `CreateListFromTasksTest` | Making a List out of Tasks picked from a catalog |
+| `SharedTaskTest` | Two Todos over one folder: two Tasks, two decisions, the reads that had assumed one of each, and the claims that say which Todo holds a path as its own Task and which only covers it |
+| `ConsentGateViewModelTest`, `FolderListGateTest`, `ConsentTest` | The consent questions asked before an import or a List, driven through the ViewModel and through the DAO |
+| `MigrationChainTest`, `MigrationSmokeTest`, `MigrationV12ToV13Test`, `MigrationV13ToV14Test`, `MigrationV15ToV16Test`, `MigrationV16ToV17Test`, `MigrationV17ToV18Test`, `MigrationV18ToV19Test` | Every migration, applied in order against a real database |
+| `TodoDissolutionTest`, `ListAfterDissolutionTest`, `HistoryRecoveryTest` | Deleting a Todo: what it takes, what it leaves, what a List says afterwards, and what a later Todo can load from what was left |
+| `ContentPolicyTest` | What a changed Task means: the three tiers, the "unchanged means no policy" rule, and every rule by which an Asset counts as changed, missing, or not news |
+| `ContentPolicyRunTest` | The same tiers as *shapes of outcome* through real SQL: which of a Task's id, its judgments and its List memberships survive each one |
 
 There is one instrumented test (`ExampleInstrumentedTest`), which is the template's and is not load
 bearing.
@@ -99,22 +154,25 @@ bearing.
 
 ```
 app/src/main/java/com/example/listea/
-  MainActivity.kt          app shell, top-level navigation, the Folder screen
+  MainActivity.kt          app shell, top-level navigation, the Upstreams browser
   AppShell.kt              shared scaffolds and the shared spacing scale
-  ManagementUi.kt          shared pieces for Folder / Lists / List Detail
+  ManagementUi.kt          shared pieces for Upstreams / Todo / Lists / List Detail
 
+  UpstreamsScreen.kt       the Upstreams tab: one card per folder material comes from
+  SourcesScreen.kt         the Todo tab: one card per Upstream's Tasks
+  CatalogScreen.kt         a Todo's catalog, and selecting Tasks out of it
   ListsScreen.kt           the Lists index
   ListDetailScreen.kt      one List: source, progress, items
   ListsViewModel.kt        all list, folder, freshness and webhook operations
 
   ReviewScreen.kt          full Review, and the shared review session
-  QuickReviewScreen.kt     folder-scoped Review over the same session
-  QuickReview.kt           resolving a folder into a review queue
+  QuickReviewScreen.kt     Todo-scoped Review over the same session
+  QuickReview.kt           resolving a scope and its catalog rows into a review queue
   ReviewArrange.kt         what a round queues, given a filter and the settings
   FileViewerScreen.kt      the plain gallery
   ListItemViewerScreen.kt  the same, reached from a List
 
-  MediaUi.kt               shared media shell, review action bar, Info sheet
+  MediaUi.kt               shared media frame, the item and file control bands, Info sheet
   MediaPreview.kt          the one renderer: images, GIF, video
   VideoControls.kt         the video transport: play, seek, speed, mute
   SwipeCard.kt             the one swipe gesture, and where paging and zoom are arbitrated
@@ -154,12 +212,14 @@ is a known cost, and it is the first thing the [roadmap](roadmap.md) work will h
 
 **Pure logic is kept separable.** `FileArrange.kt`, `ReviewArrange.kt`, `QuickReview.kt`,
 `FolderListStatus.kt`, `ItemId.kt` and the payload helpers in `Webhook.kt` have no Compose and
-little or no Android dependency. That is what makes 196 JVM tests possible, and it is the seam the
+little or no Android dependency. That is what makes 560 JVM tests possible, and it is the seam the
 cross-platform roadmap item would widen.
 
-**State belongs to the file, not to the List.** Checked, favourite and custom actions are stored in
-their own table keyed by root plus relative path; a List stores membership and projects that state.
-This is the single most load-bearing decision in the codebase — see
+**State belongs to the Task, not to the List.** Checked, favourite and custom actions are stored in
+`task_state`, keyed by `taskId` and cascading from `tasks`; a List stores membership and projects
+that state. (Before v0.2.5 the same state was keyed by root plus relative path on a row of its own,
+which is why the older columns are still on those tables and still dead.) This is the single most
+load-bearing decision in the codebase — see
 [Core concepts → Where state lives](core-concepts.md#where-state-lives) — and a great deal of
 behaviour is downstream of it.
 
@@ -185,15 +245,49 @@ sent or stored, and is marked in the source as temporary.
 
 ## Database and migrations
 
-Room, schema **version 12**, database file `listea.db`. Four entities: `ListEntity`,
-`ListItemEntity`, `WebhookRecordEntity`, `FileReviewStateEntity`.
+Room, schema **version 19**, database file `listea.db`, and `exportSchema` is on. Sixteen entities
+across three files:
+
+| File | Entities |
+|---|---|
+| `ListEntities.kt` | `ListEntity`, `ListItemEntity`, `WebhookRecordEntity`, `FileReviewStateEntity` |
+| `TaskEntities.kt` | `TaskEntity`, `AssetEntity`, `TaskStateEntity`, `ReviewEventEntity`, and the legacy id and manual-item tables |
+| `ImportEntities.kt` | `SourceEntity`, `TaskImportEntity`, `DissolvedTaskStateEntity`, and the legacy source and task links |
 
 **Every version step from 1 has a written migration** and they are all registered; there is no
-destructive fallback. Upgrading in place is expected to keep existing data. `exportSchema` is off.
+destructive fallback. Upgrading in place is expected to keep existing data.
 
-The two most substantial steps, for context when reading them: **9 → 10** introduced public item
-ids and backfilled them, and **11 → 12** rebuilt the item tables when the two fixed custom-action
-columns became a list of action ids.
+Steps worth reading for context: **9 → 10** introduced public item ids and backfilled them,
+**11 → 12** rebuilt the item tables when the two fixed custom-action columns became a list of action
+ids, **14 → 15** added `sources.keepTree`, defaulting to the tree `catalogAtScope` already drew, and
+**15 → 16** split the Upstream out of the Source — a new `upstreams` table carrying one row per
+grant, and `sources` narrowed to mean a Todo. Its data step is the readable one: every Source a run
+had touched became an Upstream, and a Source no run had touched stopped being a Todo unless a Task
+still named it. See [v0.3.0](iterations/v0.3.0.md#3-schema). **16 → 17** relaxed two `UNIQUE`
+indices, which is the whole of what it does: `sources` may now hold any number of rows at one path,
+and `assets` is unique on `(taskId, rootUri, relativePath)` instead of `(rootUri, relativePath)`.
+No table is rebuilt and no row is touched, so a mistake in it would show up as a lost index rather
+than as lost data — which is why `MigrationV16ToV17Test` checks both halves, that nothing moved and
+that the rules really are relaxed. See [v0.4.0](iterations/v0.4.0.md#schema).
+
+**17 → 18** adds `dissolved_task_state`, the snapshot a deleted Todo leaves behind, along with the
+two columns a List uses to say it lost rows (`lastDissolvedCount`, `lastDissolvedAt`) and
+`sources.keepStateOnDelete`. Nothing is rewritten and no row is touched: the table arrives empty,
+because this step cannot invent a history for a Todo that was never deleted, and both note columns
+are null, which is the only honest value for a List nothing has happened to. The per-Todo default
+is **off**, which is the behaviour-preserving answer rather than the friendly one — before this
+release nothing could delete a Todo at all, so a Todo that started keeping a snapshot would have
+begun doing something the user never asked for. See
+[v0.4.0](iterations/v0.4.0.md#step-2--lifecycle).
+
+**18 → 19** adds the two standings a Todo holds (`sources.contentPolicy`, `sources.followUpstream`)
+and the third `lists` note column, `lastDissolvedReason`. Three `ALTER`s and nothing else: no table
+is rebuilt and no row is touched. Both Todo columns arrive at the values an untouched install
+already behaved with — `keep` and off — so an upgraded Todo behaves exactly as it did, and
+`lastDissolvedReason` arrives holding the delete's own key, because a deletion is the only
+operation that could have written a note before this version. Leaving it null or defaulting it to
+the drop's key would make every List that already had a note start reporting a Task replacement
+that never happened. See [v0.4.0](iterations/v0.4.0.md#step-2b--the-two-per-import-policies).
 
 The schema is **not settled** — see [Project status](../README.md#project-status). Adding a
 migration is expected of any change to an entity.
