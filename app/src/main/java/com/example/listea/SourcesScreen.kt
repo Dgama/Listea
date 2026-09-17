@@ -152,6 +152,16 @@ private fun TodoCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            // The third of the standing answers this card holds, and the only one it does not offer
+            // as a switch: the tier is chosen where its three consequences are spelled out, in the
+            // run's own dialog, so the card's job is to say which one is in force rather than to
+            // change it a word at a time. Shown in the dialog's words, and under the dialog's own
+            // heading, because the row and the question are the same question.
+            Text(
+                todoContentPolicyLabel(source),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             if (!available) {
                 Spacer(Modifier.height(ListeaDimens.CompactGap))
                 Text(
@@ -268,6 +278,16 @@ internal fun todoDetail(source: SourceSummary): String = buildString {
     if (source.relativePath.isNotEmpty()) append(" · in ").append(source.relativePath)
     append(" · ").append(countLabel(source.taskCount, "Task"))
 }
+
+/**
+ * What this Todo does when one of its Tasks' content changes, said as the dialog that asked.
+ *
+ * The heading is [ContentPolicyChoice]'s own, so a user who answered that question recognises the
+ * answer here without having to learn a second name for it, and the tier is named by its [label]
+ * rather than by the stored key: `reset` is not a word anybody chose.
+ */
+internal fun todoContentPolicyLabel(source: SourceSummary): String =
+    "When a Task's content changes: " + ContentPolicy.fromKey(source.contentPolicy).label
 
 /**
  * What a Todo's last run did, or that it has never run.

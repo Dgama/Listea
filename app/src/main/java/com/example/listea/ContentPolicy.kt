@@ -13,15 +13,17 @@ import com.example.listea.data.TaskImportEntity
  *
  * Stored as its [key] on `sources.contentPolicy`, in the same shape [ImporterKind] is stored, so a
  * value written by one build reads back the same in the next and an unknown string is a value this
- * build does not have rather than a crash.
+ * build does not have rather than a crash. [label] is the other half: the words a user reads, named
+ * once here rather than wherever a screen happens to need them, so the chooser that asks the
+ * question and the Todo card that reports the answer cannot call the same tier two things.
  */
-enum class ContentPolicy(val key: String) {
+enum class ContentPolicy(val key: String, val label: String) {
     /**
      * The Task and its judgment stand; material that has gone is flagged missing and nothing else
      * happens. This is what every Listea before v0.4.0 step 2 did, and it stays the default for
      * exactly that reason — see the rule in `docs/settings.md`.
      */
-    KEEP("keep"),
+    KEEP("keep", "Keep it"),
 
     /**
      * The Task's identity stands and its *current state* is cleared. A Task whose content moved is
@@ -29,7 +31,7 @@ enum class ContentPolicy(val key: String) {
      * to avoid — but nothing about *which* Task it is has changed, so its history and every List
      * that holds it are untouched.
      */
-    RESET("reset"),
+    RESET("reset", "Start it over"),
 
     /**
      * The Task's identity does not survive the change: it is deleted, with the List memberships
@@ -41,7 +43,7 @@ enum class ContentPolicy(val key: String) {
      * who says "when this content moves, start over" is stating an intention about a Task they own,
      * and that is a thing the model must be able to represent. The difference is who said it.
      */
-    DROP("drop");
+    DROP("drop", "Replace the Task");
 
     companion object {
         /** What a Todo starts as, and what an unreadable stored value falls back to. */

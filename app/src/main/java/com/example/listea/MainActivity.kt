@@ -1639,19 +1639,19 @@ internal fun ContentPolicyChoice(
             style = MaterialTheme.typography.bodyMedium
         )
         ImportImporterRow(
-            label = "Keep it",
+            label = ContentPolicy.KEEP.label,
             detail = "keep · the Task and its ticks stay; material that has gone is flagged",
             selected = selected == ContentPolicy.KEEP,
             onSelect = { onSelect(ContentPolicy.KEEP) }
         )
         ImportImporterRow(
-            label = "Start it over",
+            label = ContentPolicy.RESET.label,
             detail = "reset · the Task stays and its ticks clear, so moved content is judged again",
             selected = selected == ContentPolicy.RESET,
             onSelect = { onSelect(ContentPolicy.RESET) }
         )
         ImportImporterRow(
-            label = "Replace the Task",
+            label = ContentPolicy.DROP.label,
             detail = "drop · a Task that changed is replaced, and Lists that held it lose it",
             selected = selected == ContentPolicy.DROP,
             onSelect = { onSelect(ContentPolicy.DROP) }

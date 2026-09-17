@@ -79,8 +79,13 @@ data class SourceSummary(
      *
      * All three are read here because the card is where two of them are *changed* — a switch that
      * did not know its own position would be a control that lies — and because [contentPolicy] is
-     * what the next import dialog opens on. The card does not offer that one: it is a word about a
-     * run, and the run's own dialog is where it is legible.
+     * what the next import dialog opens on. The card *reports* that one without offering it, and
+     * the division is deliberate rather than an omission: the tier is chosen where its three
+     * consequences are spelled out, in the run's own dialog, so the card says which one is in
+     * force and leaves changing it to the question that can explain it. This paragraph used to say
+     * the card did not show it either, on the grounds that it is a word about a run; walking the
+     * device found the cost of that — a Todo under `reset` looks exactly like one under `drop`
+     * until the next import, which is the run you cannot see coming.
      */
     val contentPolicy: String = ContentPolicy.Default.key,
     val followUpstream: Boolean = false,

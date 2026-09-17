@@ -113,7 +113,7 @@ The debug APK lands in `app/build/outputs/apk/debug/`.
 
 ## Tests
 
-**560 JVM unit tests**, run with `./gradlew testDebugUnitTest`. No device or emulator needed.
+**561 JVM unit tests**, run with `./gradlew testDebugUnitTest`. No device or emulator needed.
 
 They deliberately target the pure logic rather than the UI, which is why so much of that logic lives
 in files with no Android imports. The table is a selection by subject rather than the whole list;
@@ -212,7 +212,7 @@ is a known cost, and it is the first thing the [roadmap](roadmap.md) work will h
 
 **Pure logic is kept separable.** `FileArrange.kt`, `ReviewArrange.kt`, `QuickReview.kt`,
 `FolderListStatus.kt`, `ItemId.kt` and the payload helpers in `Webhook.kt` have no Compose and
-little or no Android dependency. That is what makes 560 JVM tests possible, and it is the seam the
+little or no Android dependency. That is what makes 561 JVM tests possible, and it is the seam the
 cross-platform roadmap item would widen.
 
 **State belongs to the Task, not to the List.** Checked, favourite and custom actions are stored in

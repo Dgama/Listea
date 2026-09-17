@@ -146,6 +146,15 @@ that Todo rather than here. They are the two switches in the Todo card's overflo
 the place its own behaviour is decided: a Todo made before either control existed has the settings
 its row was backfilled with, and changing the app-wide default afterwards leaves it where it is.
 
+The Todo holds a **third** standing answer — *When a Task's content changes* — and the card
+**reports it without offering it**. It is printed under the Todo's name, in the words and under the
+heading the Create Tasks dialog asked the question with, so a Todo under **Replace the Task** is
+visibly not one under **Keep it** before the run that would tell you. Changing it stays in the
+dialog, because that is where its three consequences are spelled out and a one-line switch cannot
+carry them. Earlier drafts left the card silent on the grounds that the tier is a word about a run;
+the cost of that is a Todo whose next import will delete a Task looking exactly like one that will
+not.
+
 Each row prints its consequence under its name, because neither switch shows one when it is thrown:
 following the upstream writes on a later day without being asked, and keeping decisions on delete
 only matters at a delete that has not happened yet. The row is the target rather than the thumb, and

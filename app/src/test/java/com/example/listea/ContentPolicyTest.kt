@@ -45,6 +45,22 @@ class ContentPolicyTest {
         assertEquals(ContentPolicy.KEEP, ContentPolicy.Default)
     }
 
+    @Test
+    fun `each tier is named by the words the chooser shows, and no two alike`() {
+        // The labels live on the enum because two screens read them: the import dialog that asks
+        // the question, and the Todo card that reports which answer is in force. Before that they
+        // were literals in the chooser, where the card could not reach them — so this pins the
+        // words themselves, and pins them apart, because a card that named two tiers the same way
+        // could not say which one a Todo is on.
+        assertEquals("Keep it", ContentPolicy.KEEP.label)
+        assertEquals("Start it over", ContentPolicy.RESET.label)
+        assertEquals("Replace the Task", ContentPolicy.DROP.label)
+        assertEquals(
+            ContentPolicy.entries.size,
+            ContentPolicy.entries.map { it.label }.distinct().size
+        )
+    }
+
     // --- the tier ---------------------------------------------------------------------------------
 
     @Test
