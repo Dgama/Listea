@@ -1,6 +1,5 @@
 package com.example.listea
 
-import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -9,6 +8,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
@@ -35,18 +35,22 @@ import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.outlined.RadioButtonUnchecked
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -69,6 +73,13 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.example.listea.data.DissolvedHistory
+import com.example.listea.data.ImportOutcome
+import com.example.listea.data.ImportResult
+import com.example.listea.data.ReviewDecisions
+import com.example.listea.data.SharedFileState
+import com.example.listea.data.SourceSummary
+import com.example.listea.data.decodeActionIds
 import com.example.listea.ui.theme.ListeaTheme
 
 class MainActivity : ComponentActivity() {
@@ -97,7 +108,11 @@ fun ListeaApp(
     modifier: Modifier = Modifier,
     listsViewModel: ListsViewModel = viewModel()
 ) {
-    var destination by rememberSaveable { mutableStateOf(TopLevelDestination.Folder) }
+    // Saved by name through [TopLevelDestinationSaver] rather than by the enum's own serialisation,
+    // which would throw on restore from a bundle written before a destination was renamed.
+    var destination by rememberSaveable(stateSaver = TopLevelDestinationSaver) {
+        mutableStateOf(TopLevelDestination.Upstreams)
+    }
 
     // Nested destinations, hoisted purely so the shell can tell whether one is open.
     var openListId by rememberSaveable { mutableStateOf<Long?>(null) }
@@ -108,6 +123,106 @@ fun ListeaApp(
     var viewingFileUri by rememberSaveable { mutableStateOf<String?>(null) }
     var webhookHistoryOpen by rememberSaveable { mutableStateOf(false) }
 
+    // The Source whose catalog is open. Held as saveable primitives rather than the SourceSummary
+    // itself: the summary is a read of a row that an import can change, and a restored screen
+    // should re-read it rather than show a snapshot.
+    var catalogSourceId by rememberSaveable { mutableStateOf<String?>(null) }
+    var catalogSourceName by rememberSaveable { mutableStateOf("") }
+    // The Source's path under its grant, which the catalog itself does not need — its rows are
+    // already root-relative — but a round started from it does, as the provenance it reports.
+    var catalogSourcePath by rememberSaveable { mutableStateOf("") }
+    // The grant the open Source's files sit under, and the Task the catalog has opened a look at.
+    // The Task is held by id rather than as a row: the row is a read of `task_imports`, and a
+    // restored screen should re-read it rather than show a snapshot of a catalog that may have
+    // been refreshed since.
+    var catalogRootUri by rememberSaveable { mutableStateOf<String?>(null) }
+    var previewTaskId by rememberSaveable { mutableStateOf<String?>(null) }
+    // The scope of the catalog being browsed, held here for the same reason the browser's stack is:
+    // the catalog is composed only while nothing is open over it, so a scope remembered inside it
+    // would not survive a look at a Task.
+    //
+    // Set when a Todo is opened, to that Todo's own root — see [openCatalog].
+    var catalogScope by rememberSaveable { mutableStateOf("") }
+    // Whether the open Todo is one flat list. A property of the Source, read once when it is opened
+    // rather than re-read from the summary, because it is an answer the Create Tasks run gave and
+    // the screen that shows it must not change shape under a refresh.
+    var catalogFlat by rememberSaveable { mutableStateOf(false) }
+    // Whether the open catalog was entered from the Lists tab to build one. It is the same screen
+    // either way — the Tasks are chosen the same way, and the List is created by the same button —
+    // so what differs is only where leaving goes and whether picking starts on. Held as two bits
+    // rather than one mode, because the first is a fact about the entry and the second is the
+    // initial value of something the user can turn off.
+    var catalogFromLists by rememberSaveable { mutableStateOf(false) }
+    var catalogSelecting by rememberSaveable { mutableStateOf(false) }
+
+    // Everything the catalog remembers, dropped together. One function rather than the same
+    // assignments at each way out, because a way out that forgot one of them would leave a stale
+    // scope or root to be restored by the next Source that was opened.
+    val closeCatalog: () -> Unit = {
+        catalogSourceId = null
+        catalogRootUri = null
+        catalogSourcePath = ""
+        catalogScope = ""
+        catalogFlat = false
+        catalogFromLists = false
+        catalogSelecting = false
+   }
+
+    // Opening a Todo, from the card that names it. The name is the Source's own display name rather
+    // than its path: it is what the card that was tapped said, and the catalog reads it back as its
+    // title. The shape comes off the same summary — `keepTree` is already normalised against the
+    // importer (§2), so a folder-as-Task Source is flat here by the same rule that made it flat when
+    // it was imported.
+    //
+    // No "open for selection" flag any more. Create List used to be a button on the Todo's row that
+    // opened this screen with picking already on; with that button gone, turning selection on is
+    // something the user does here, over the Tasks they are actually looking at.
+    //
+    // Nor is there a round over the Todo as a whole. Quick Review reads one level and does not
+    // descend (§7), so a round started from the row would open on the Todo's root — where there are
+    // only folders — and review nothing; the catalog's own header offers it at each level instead.
+    // The scope it opens at is the Todo's own root, which is `relativePath` and not the empty path.
+    // A run started inside a subfolder prefixes every `groupPath` it writes with that subfolder, so
+    // a Todo's Tasks live under its own root rather than at the grant's: opened at `""`, such a Todo
+    // showed a folder named after itself, offered no Quick Review anywhere, and had no level whose
+    // round was not empty.
+    val openCatalog: (SourceSummary) -> Unit = { source ->
+        // A Todo that follows its upstream is kept in step on the way in. Asked before the screen
+        // is switched, because what it writes is what the catalog is about to read: a Task brought
+        // in here is in the folder the user is opening rather than appearing a moment later.
+        listsViewModel.syncTodoUpstream(source.id)
+        catalogSourceId = source.id
+        catalogSourceName = source.displayName
+        catalogSourcePath = source.relativePath
+        catalogRootUri = source.rootUri
+        catalogScope = source.relativePath
+        catalogFlat = !source.keepTree
+        catalogFromLists = false
+        catalogSelecting = false
+    }
+
+    // The other way into a catalog, and the same screen: a List is an order over Tasks, so building
+    // one is picking a Todo to take Tasks from and then picking the Tasks. Everything after the
+    // Todo is what the Todo tab already does, which is why this changes how the catalog is entered
+    // rather than adding a second place to select Tasks — a second picker would be a second set of
+    // rules about what a folder covers, and the two would drift.
+    //
+    // The switch to the Todo tab is not a detour the user has to notice: leaving puts them back on
+    // Lists, with the list they made open.
+    val buildListFrom: (SourceSummary) -> Unit = { source ->
+        openCatalog(source)
+        catalogFromLists = true
+        catalogSelecting = true
+        destination = TopLevelDestination.Todo
+    }
+
+    // The Upstream whose folder the browser is standing in, or null while the list of Upstreams is
+    // the tab. Held here rather than inside the screen for the same reason the browsing stack is:
+    // the screen leaves the composition when the tab is switched away from.
+    var openUpstream by rememberSaveable(stateSaver = PinnedScopeSaver) {
+        mutableStateOf<PinnedScope?>(null)
+    }
+
     // Which folder the browser is standing in, owned here rather than by FolderScreen itself.
     // FolderScreen is composed only while Folder is the selected destination, so anything it
     // remembers depends on the destination switch handing that state back; ListeaApp is never
@@ -117,13 +232,51 @@ fun ListeaApp(
         mutableStateOf(emptyList<DirRef>())
     }
 
+    // A browser counts as nested, and that is the whole of point 4's fix. It was left out of this
+    // list, so standing in an Upstream drew the bottom navigation and the tab title over it while
+    // the screen itself had no way out but the system Back gesture — and because the tab bar was
+    // still there, switching to Settings or Todo looked like a way back and was not: the tab
+    // changed underneath while `openUpstream` stayed set, so returning to Upstreams landed in the
+    // folder again with no list above it. Folding the browser in here takes the chrome away and
+    // hands Back to the browser, which is where "up one folder, then out" now lives.
     val nested = openListId != null || reviewListId != null ||
-        quickReview != null || viewingFileUri != null || webhookHistoryOpen
+        quickReview != null || viewingFileUri != null || webhookHistoryOpen ||
+        catalogSourceId != null || previewTaskId != null || openUpstream != null
+
+    // Every grant the app still holds a persisted permission for, which is what "available" means
+    // for a card on either tab. Read from the platform rather than remembered in a store: the
+    // permissions are the truth, the user can revoke one from Android's own settings while Listea
+    // is closed, and a cached copy would keep offering folders that can no longer be opened.
+    //
+    // Keyed on the destination so it is re-read whenever the user comes back to a list, which is
+    // when it can have changed — a folder added in Settings or revoked in the system UI.
+    val appContext = LocalContext.current
+    val heldRoots = remember(appContext, destination) { heldRootUris(appContext) }
+
+    // Read here as well as in FolderScreen, which is where the setting is changed: whether Quick
+    // Review may be offered at all is what the catalog's own entry point needs to know, and asking
+    // the same store both places keeps one switch rather than two opinions about it.
+    val settings by listsViewModel.settings.collectAsStateWithLifecycle()
+    val quickReviewEnabled = settings.folderQuickReviewEnabled
 
     // Android convention for a bottom bar: back from a secondary destination returns to the first
-    // one rather than leaving the app. Disabled while nested, so the nested screens keep their own.
-    BackHandler(enabled = !nested && destination != TopLevelDestination.Folder) {
-        destination = TopLevelDestination.Folder
+    // one rather than leaving the app. Disabled while nested, so the nested screens keep their own,
+    // and on the Upstreams tab, where [FolderScreen] answers it: an Upstream's browser is the one
+    // screen the tab has that Back has somewhere to go from.
+    BackHandler(enabled = !nested && destination != TopLevelDestination.Upstreams) {
+        destination = TopLevelDestination.Upstreams
+    }
+
+    // A committed pick registers an Upstream and says so here, because the picker's callback has no
+    // way to know which screen is up. Consumed rather than kept: it is an event about a pick, and
+    // acting on it on every recomposition would re-open the same folder forever.
+    //
+    // Adding no longer opens anything. The picker is on Settings now, which lists what has been
+    // added right below the button, so the answer to "did that work" is already on screen — and
+    // jumping the user into a folder browser would take them off the page they were configuring.
+    val justAdded by listsViewModel.newUpstream.collectAsStateWithLifecycle()
+    LaunchedEffect(justAdded) {
+        if (justAdded != null) listsViewModel.consumeNewUpstream()
     }
 
     // Each destination keeps its own saved state while the other two are off screen. The `when`
@@ -141,21 +294,45 @@ fun ListeaApp(
     ) { contentModifier ->
         destinationState.SaveableStateProvider(destination) {
             when (destination) {
-                TopLevelDestination.Folder -> FolderScreen(
-                    modifier = contentModifier,
-                    quickReview = quickReview,
-                    onQuickReviewChange = { quickReview = it },
-                    viewingFileUri = viewingFileUri,
-                    onViewFileChange = { viewingFileUri = it },
-                    onOpenList = { listId ->
-                        openListId = listId
-                        destination = TopLevelDestination.Lists
-                    },
-                    onOpenSettings = { destination = TopLevelDestination.Settings },
-                    browsedStack = browsedStack,
-                    onBrowsedStackChange = { browsedStack = it },
-                    listsViewModel = listsViewModel
-                )
+                // The Upstreams tab has two surfaces, and which one is up is what `openUpstream`
+                // says: the list of Upstreams, and the browser for the one that was opened. The
+                // browser is the same screen the old Folder tab was, based on the Upstream's own
+                // folder rather than on the grant.
+                TopLevelDestination.Upstreams -> {
+                    val opened = openUpstream
+                    if (opened == null) {
+                        UpstreamsScreen(
+                            modifier = contentModifier,
+                            viewModel = listsViewModel,
+                            heldRoots = heldRoots,
+                            onOpenBrowser = { upstream ->
+                                openUpstream = PinnedScope(
+                                    rootUri = upstream.rootUri,
+                                    relativePath = upstream.relativePath,
+                                    name = upstream.displayName
+                                )
+                            }
+                        )
+                    } else {
+                        FolderScreen(
+                            pinnedScope = opened,
+                            onExitScope = {
+                                openUpstream = null
+                                browsedStack = emptyList()
+                            },
+                            modifier = contentModifier,
+                            viewingFileUri = viewingFileUri,
+                            onViewFileChange = { viewingFileUri = it },
+                            onOpenList = { listId ->
+                                openListId = listId
+                                destination = TopLevelDestination.Lists
+                            },
+                            browsedStack = browsedStack,
+                            onBrowsedStackChange = { browsedStack = it },
+                            listsViewModel = listsViewModel
+                        )
+                    }
+                }
 
                 TopLevelDestination.Lists -> ListsScreen(
                     modifier = contentModifier,
@@ -163,13 +340,116 @@ fun ListeaApp(
                     openListId = openListId,
                     onOpenListChange = { openListId = it },
                     reviewListId = reviewListId,
-                    onReviewListChange = { reviewListId = it }
+                    onReviewListChange = { reviewListId = it },
+                    onBuildList = buildListFrom
                 )
 
-                TopLevelDestination.Sources -> SourcesScreen(
-                    modifier = contentModifier,
-                    viewModel = listsViewModel
-                )
+                // The three surfaces of a Source, in the order they nest: the browser's own list,
+                // one Source's catalog, and a round started from a Source's row. Drawn inside this
+                // destination rather than above the scaffold for the same reason FolderScreen draws
+                // its own: leaving any of them has to land back on the tab it was entered from,
+                // with that tab's remembered state intact.
+                TopLevelDestination.Todo -> {
+                    val reviewing = quickReview
+                    val sourceId = catalogSourceId
+                    val previewing = previewTaskId
+                    val previewRoot = catalogRootUri
+                    // The grant the open Todo's Tasks sit under, and the name it opens under. Read as
+                    // locals so the round started from inside the catalog is built from the three
+                    // values that identify it rather than from a summary the catalog does not hold.
+                    val openRoot = catalogRootUri
+                    val openPath = catalogSourcePath
+                    val openName = catalogSourceName
+                    when {
+                        reviewing != null -> QuickReviewScreen(
+                            modifier = contentModifier,
+                            viewModel = listsViewModel,
+                            target = reviewing,
+                            onExit = { quickReview = null }
+                        )
+
+                        // A preview needs the grant the Source's files sit under, and it is opened
+                        // only from a row that had one, so all three are always set together. Read
+                        // as one condition rather than defaulting the missing root: a preview with
+                        // no root could only show a screen of "source missing", which is not a look
+                        // at anything.
+                        sourceId != null && previewing != null && previewRoot != null ->
+                            CatalogTaskPreview(
+                                modifier = contentModifier,
+                                viewModel = listsViewModel,
+                                sourceId = sourceId,
+                                taskId = previewing,
+                                rootUri = previewRoot,
+                                // The level the preview was opened from, so stepping sideways
+                                // walks the Tasks the user was looking at rather than the Todo.
+                                scope = catalogScope,
+                                flat = catalogFlat,
+                                onExit = { previewTaskId = null }
+                            )
+
+                        sourceId != null -> CatalogScreen(
+                            modifier = contentModifier,
+                            viewModel = listsViewModel,
+                            sourceId = sourceId,
+                            sourceName = openName,
+                            // The Todo's own root: the floor the breadcrumb stops at and the level
+                            // its title names, and not the same thing as the empty path.
+                            origin = openPath,
+                            rootUri = previewRoot,
+                            scope = catalogScope,
+                            onScopeChange = { catalogScope = it },
+                            flat = catalogFlat,
+                            startSelecting = catalogSelecting,
+                            // No grant, nothing to write a decision against, and switched off means
+                            // this build browses without offering review at all. Both leave the
+                            // button out; the row it came from says why in the first case.
+                            //
+                            // The scope goes into the target, because a round run from here covers
+                            // the folder the user is *standing in* and not the Todo: that is the
+                            // level they picked out by walking to it, and the Tasks of a sibling
+                            // folder are not what they were looking at when they pressed the
+                            // button.
+                            onQuickReview = if (quickReviewEnabled && openRoot != null) {
+                                {
+                                    quickReview = QuickReviewTarget(
+                                        rootUri = openRoot,
+                                        folderPath = openPath,
+                                        sourceId = sourceId,
+                                        scope = catalogScope,
+                                        flat = catalogFlat,
+                                        title = openName
+                                    )
+                                }
+                            } else {
+                                null
+                            },
+                            onExit = {
+                                // Read before the close, which clears it. Backing out of a
+                                // catalog entered to build a List lands on Lists, where the
+                                // building started — not on the Todo tab, which the user never
+                                // chose to be on and would have to leave again.
+                                val fromLists = catalogFromLists
+                                closeCatalog()
+                                if (fromLists) destination = TopLevelDestination.Lists
+                            },
+                            onOpenList = { listId ->
+                                closeCatalog()
+                                openListId = listId
+                                destination = TopLevelDestination.Lists
+                            },
+                            onOpenPreview = { row, _ -> previewTaskId = row.taskId }
+                        )
+
+                        else -> SourcesScreen(
+                            modifier = contentModifier,
+                            viewModel = listsViewModel,
+                            heldRoots = heldRoots,
+                            // The card itself, not a button on it: the catalog is behind the row,
+                            // and the row is the thing that names what is behind it.
+                            onOpenTodo = { source -> openCatalog(source) }
+                        )
+                    }
+                }
 
                 TopLevelDestination.Settings -> SettingsScreen(
                     modifier = contentModifier,
@@ -182,6 +462,8 @@ fun ListeaApp(
     }
 
     WebhookDialogs(listsViewModel)
+    ImportFolderDialogs(listsViewModel)
+    DeleteTodoDialogs(listsViewModel)
 }
 
 /**
@@ -481,6 +763,16 @@ private fun PostWebhookDeleteDialog(
     )
 }
 
+/** Three strings, so the scope survives a rotation and a process death like everything else here. */
+private val PinnedScopeSaver = listSaver<PinnedScope?, String>(
+    save = { scope ->
+        scope?.let { listOf(it.rootUri, it.relativePath, it.name) } ?: emptyList()
+    },
+    restore = { saved ->
+        if (saved.size == 3) PinnedScope(saved[0], saved[1], saved[2]) else null
+    }
+)
+
 /**
  * Keeps a browsing stack across rotation and process death, as flat uri/name pairs.
  *
@@ -492,16 +784,94 @@ private val DirStackSaver = listSaver<List<DirRef>, String>(
     restore = { flat -> flat.chunked(2).map { DirRef(it[0].toUri(), it[1]) } }
 )
 
-/** Same idea for an open Quick Review: rotating should not throw the user out of it. */
-private val QuickReviewTargetSaver = listSaver<QuickReviewTarget?, Any>(
-    save = { target -> target?.let { listOf(it.rootUri, it.folderPath) }.orEmpty() },
-    restore = { saved -> QuickReviewTarget(saved[0] as String, saved[1] as String) }
+/**
+ * Same idea for an open Quick Review: rotating should not throw the user out of it.
+ *
+ * Every field, including the Source and the scope. Restoring only the folder would silently turn a
+ * round over a Todo into a round over the Upstream's folder — the same screen, a different queue,
+ * and a different set of decisions written — so the field that says which of the two this is has to
+ * survive with it. An empty Source id is a folder round, which no Source can be, because a Source's
+ * id is a UUID.
+ *
+ * [QuickReviewTarget.scope] survives for the same reason one level down: two levels of one Todo are
+ * two different queues, and restoring "Holiday" as "" would hand back a round over a scope that has
+ * no Tasks in it at all.
+ *
+ * Six entries, and the size check is what tells a bundle written by an older build apart from a real
+ * target. Both older shapes are read back rather than dropped: a four-element list was a round over
+ * a whole Todo, and a five-element one predates [QuickReviewTarget.flat], which only a flat Todo
+ * ever sets. Their scopes were written when a Todo's root was spelled `""`; that is still right for
+ * a Todo whose run started at the Upstream itself, which is what almost every restored round will
+ * be, and a stale level on the others costs a re-browse rather than a wrong decision.
+ */
+private val QuickReviewTargetSaver = listSaver<QuickReviewTarget?, String>(
+    save = { target ->
+        target?.let {
+            listOf(
+                it.rootUri,
+                it.folderPath,
+                it.sourceId ?: "",
+                it.scope,
+                if (it.flat) "1" else "0",
+                it.title
+            )
+        }.orEmpty()
+    },
+    restore = { saved ->
+        when (saved.size) {
+            6 -> QuickReviewTarget(
+                rootUri = saved[0],
+                folderPath = saved[1],
+                sourceId = saved[2].ifEmpty { null },
+                scope = saved[3],
+                flat = saved[4] == "1",
+                title = saved[5]
+            )
+
+            5 -> QuickReviewTarget(
+                rootUri = saved[0],
+                folderPath = saved[1],
+                sourceId = saved[2].ifEmpty { null },
+                scope = saved[3],
+                title = saved[4]
+            )
+
+            4 -> QuickReviewTarget(
+                rootUri = saved[0],
+                folderPath = saved[1],
+                sourceId = saved[2].ifEmpty { null },
+                title = saved[3]
+            )
+
+            else -> null
+        }
+    }
 )
 
 /** Holds the in-flight folder read, so a newer navigation can replace it. */
 private class LoadJob {
     var job: Job? = null
 }
+
+/**
+ * An Upstream the browser was opened from, which is the whole of what it may show.
+ *
+ * The browsing stack is based on this folder instead of on the granted root, so "up" stops here.
+ * That is the difference between an Upstream and the grant: the grant is where Listea is allowed to
+ * stand, and an Upstream is where the user has said the material is.
+ *
+ * [rootUri] is the grant and [relativePath] is the folder inside it, which is the pair the rest of
+ * the app identifies a Source by: the browser has to speak in both, because the folder it stands in
+ * is the Source's and the grant is where every stored path is measured from.
+ *
+ * [name] is the Source's display name, which is what the card that opened this showed and therefore
+ * what the breadcrumb and the title have to agree with.
+ */
+data class PinnedScope(val rootUri: String, val relativePath: String, val name: String)
+
+/** What the browser says when the Upstream's own folder is not under the grant any more. */
+private const val UPSTREAM_GONE =
+    "This Upstream's folder is no longer accessible. Add it again to browse it."
 
 private sealed interface FolderUiState {
     data class NoFolder(val message: String?) : FolderUiState
@@ -511,22 +881,32 @@ private sealed interface FolderUiState {
     data class Browsing(val stack: List<DirRef>, val contents: FolderContents) : FolderUiState
 }
 
+/**
+ * The **Upstream browser**: the folder an Upstream is, laid out as a folder.
+ *
+ * This is the old Folder tab with the Task-shaped parts taken out. Quick Review and Create List are
+ * about Tasks, and they live in Todo now, where every row is a Task an import already wrote; a round
+ * started here would run over files no import has claimed, and the List it built would hold
+ * half-formed things. What is left is what belongs to material: look at it, sort it, open a file,
+ * walk into a folder, Create Tasks, and Refresh a run that already happened.
+ *
+ * It is opened only from an Upstream's card, so [pinnedScope] is required rather than optional. The
+ * stack is based on that folder instead of on the granted root, which is what makes "up" stop there
+ * and makes every path below relative to the Upstream rather than to the grant.
+ */
 @Composable
 fun FolderScreen(
+    pinnedScope: PinnedScope,
+    onExitScope: () -> Unit,
     modifier: Modifier = Modifier,
-    quickReview: QuickReviewTarget? = null,
-    onQuickReviewChange: (QuickReviewTarget?) -> Unit = {},
     viewingFileUri: String? = null,
     onViewFileChange: (String?) -> Unit = {},
     onOpenList: (Long) -> Unit = {},
-    onOpenSettings: () -> Unit = {},
     browsedStack: List<DirRef> = emptyList(),
     onBrowsedStackChange: (List<DirRef>) -> Unit = {},
     listsViewModel: ListsViewModel = viewModel()
 ) {
     val context = LocalContext.current
-    val store = remember { FolderStore(context) }
-    val folderListRequest by listsViewModel.folderListRequest.collectAsStateWithLifecycle()
     val settings by listsViewModel.settings.collectAsStateWithLifecycle()
     val arrangements by listsViewModel.arrangements.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -535,22 +915,28 @@ fun FolderScreen(
 
     /**
      * Shows the last directory of [stack]. If it can no longer be read (another app deleted it
-     * while we were away) this walks up towards the root; if even the root is gone the saved root
-     * URI is dropped and we return to "No folder selected".
+     * while we were away) this walks up towards the base; if even the base is gone the screen says
+     * the Upstream's folder is unreachable, which is the one thing it can still be sure of.
      * [quiet] keeps the current list on screen instead of flashing a spinner.
      */
     suspend fun show(stack: List<DirRef>, quiet: Boolean = false) {
-        val root = stack.firstOrNull()
-        if (root == null) {
-            state = FolderUiState.NoFolder(message = null)
+        if (stack.isEmpty()) {
+            // [startingStack] found nothing to stand in, and the grant it was looked for under is
+            // not somewhere to stand instead: the Upstream's folder is the whole of what this
+            // screen shows, so a missing one is reported rather than worked around.
+            onBrowsedStackChange(emptyList())
+            state = FolderUiState.NoFolder(UPSTREAM_GONE)
             return
         }
         if (!quiet) state = FolderUiState.Loading
 
+        // Asked once, about the grant rather than about each directory: the persisted permission is
+        // the tree the user picked, and a folder below it is never a permission of its own.
+        val grant = pinnedScope.rootUri.toUri()
         var path = stack
         while (true) {
             val contents = withContext(Dispatchers.IO) {
-                if (hasPersistedReadAccess(context, root.uri)) {
+                if (hasPersistedReadAccess(context, grant)) {
                     readFolder(context, path.last().uri)
                 } else {
                     null
@@ -568,9 +954,11 @@ fun FolderScreen(
             if (path.size == 1) break
             path = path.dropLast(1)
         }
-        store.clear()
         onBrowsedStackChange(emptyList())
-        state = FolderUiState.NoFolder("That folder is no longer accessible. Please choose it again.")
+        // The unreachable folder is the Upstream's own, and the grant the user still holds is a
+        // different thing that this screen must not throw away because one folder under it went
+        // missing.
+        state = FolderUiState.NoFolder(UPSTREAM_GONE)
     }
 
     /** Single entry point for every load, so a newer one always replaces an older one. */
@@ -580,23 +968,32 @@ fun FolderScreen(
     }
 
     /**
-     * Where to open on entry: the folder the user was last in, or the root.
+     * Where to open on entry: the folder the user was last in, or the Upstream's own folder.
      *
-     * A remembered path is only trusted while it still starts at the current root. Choosing a
-     * different folder in Settings leaves the old path pointing outside the new grant, so that
-     * case starts over at the root instead.
+     * The base is the Upstream's folder and the granted root is never used: the stack keeps that
+     * folder as its first entry, which is what makes "up" stop there. An Upstream is a folder inside
+     * a grant, so this is the one place that walks the grant down to it — everywhere below speaks in
+     * paths already anchored at the grant.
+     *
+     * Empty when the folder is not there any more, which [show] reports rather than substituting the
+     * grant for it.
      */
-    fun startingStack(): List<DirRef> {
-        val root = store.read() ?: return emptyList()
+    suspend fun startingStack(): List<DirRef> {
+        val folder = withContext(Dispatchers.IO) {
+            resolveLinkedFolder(context, pinnedScope.rootUri.toUri(), pinnedScope.relativePath)
+        } ?: return emptyList()
+        val base = DirRef(folder.uri, "")
+        // A remembered path from an earlier visit to this same Upstream is worth keeping; anything
+        // else is from another folder and starts over.
         val remembered = browsedStack
-        return if (remembered.firstOrNull()?.uri == root) remembered else listOf(DirRef(root, ""))
+        return if (remembered.firstOrNull()?.uri == base.uri) remembered else listOf(base)
     }
 
     LaunchedEffect(Unit) { open(startingStack()) }
 
-    // Quick Review and the file viewer are still drawn here, so the browsing stack survives and
-    // exiting lands back on the same folder. Only their on/off state is owned by the shell, which
-    // needs it to hide the bottom navigation.
+    // The file viewer is still drawn here, so the browsing stack survives and closing it lands back
+    // on the same folder. Only its on/off state is owned by the shell, which needs it to hide the
+    // bottom navigation.
 
     // Another app (FolderSync, a file manager, ...) may change the folder while we are backgrounded,
     // so re-read the directory on screen whenever we come back to the foreground. A load started by
@@ -608,20 +1005,18 @@ fun FolderScreen(
         }
     }
 
-    // Quick Review edits the same files this listing describes, and can leave them checked,
-    // deleted or moved. Coming back re-reads the folder so the rows — and anything the filter is
-    // deciding from them — describe what is there now rather than what was there on the way in.
-    // Checked state alone would have kept itself current through its own database flow; existence
-    // would not have.
-    var wasQuickReviewing by remember { mutableStateOf(false) }
-    LaunchedEffect(quickReview) {
-        val returned = wasQuickReviewing && quickReview == null
-        wasQuickReviewing = quickReview != null
-        if (returned) (state as? FolderUiState.Browsing)?.let { open(it.stack, quiet = true) }
-    }
-
     val browsing = state as? FolderUiState.Browsing
+
+    // Where the browser is standing, said twice because two vocabularies meet here. [herePath] is
+    // relative to the Upstream — the stack's base is the Upstream's own folder, so its first
+    // segment is the one below it — and [here] is the same folder written the way everything stored
+    // is written: relative to the grant. A Source's `relativePath`, a List's scope and a saved
+    // arrangement are all grant-relative, so joining the Upstream's path on the front is what keeps
+    // a Todo and its browser talking about the same folder.
     val herePath = browsing?.let { relativePathOf(it.stack) }
+    val here = listOf(pinnedScope.relativePath, herePath.orEmpty())
+        .filter { it.isNotEmpty() }
+        .joinToString("/")
 
     // ---------------------------------------------------------------------------------------
     // What the Files section is showing, derived once for the whole screen.
@@ -635,12 +1030,14 @@ fun FolderScreen(
     // All of it tolerates there being no folder open, because this runs before the state is
     // narrowed: with no folder there are no files, and nothing below it is ever consulted.
     // ---------------------------------------------------------------------------------------
-    val rootUri = browsing?.stack?.first()?.uri?.toString()
+    //
+    // The root is the Upstream's grant rather than the folder the browser is standing in, because
+    // ownership, List scopes and arrangements are all stored against the grant.
+    val rootUri = pinnedScope.rootUri.takeIf { browsing != null }
     val ownershipFlow = remember(rootUri) {
         rootUri?.let { listsViewModel.observeFolderOwnership(it) } ?: flowOf(FolderOwnership())
     }
     val ownership by ownershipFlow.collectAsStateWithLifecycle(initialValue = FolderOwnership())
-    val here = herePath.orEmpty()
     val quickReviewEnabled = settings.folderQuickReviewEnabled
 
     // Split once per listing rather than per row, so the two sections below can be headed
@@ -704,28 +1101,18 @@ fun FolderScreen(
         }
     }
 
-    // Quick Review and the file viewer own Back while either is up.
-    BackHandler(
-        enabled = quickReview == null && viewingFileUri == null &&
-            browsing != null && browsing.stack.size > 1
-    ) {
-        browsing?.let { open(it.stack.dropLast(1)) }
+    // Back walks up the folder stack, and at the base it leaves the Upstream. An open Upstream is
+    // the whole of what this tab is showing, so Back has a level of the app to go to here and never
+    // one to fall out of — which it had been doing, quitting from inside a folder the user had only
+    // just opened. The shell leaves this destination's Back to the screen for the same reason.
+    BackHandler(enabled = viewingFileUri == null) {
+        val stack = browsing?.stack
+        if (stack != null && stack.size > 1) open(stack.dropLast(1)) else onExitScope()
     }
 
-    val reviewing = quickReview
-    if (reviewing != null) {
-        QuickReviewScreen(
-            modifier = modifier,
-            viewModel = listsViewModel,
-            target = reviewing,
-            onExit = { onQuickReviewChange(null) }
-        )
-        return
-    }
-
-    // Like Quick Review, hosted inside this screen so closing returns to the same folder.
-    // Resolved against the current listing, so a rotation reopens the same file once the folder
-    // has been read again.
+    // Hosted inside this screen so closing the viewer returns to the same folder, exactly where it
+    // was left. Resolved against the current listing, so a rotation reopens the same file once the
+    // folder has been read again.
     val openFile = viewingFileUri?.let { uri -> shownFiles.firstOrNull { it.uri.toString() == uri } }
 
     // A file can be deleted by another app between opening it and the folder being re-read. Give
@@ -748,297 +1135,776 @@ fun FolderScreen(
             initial = openFile,
             // Where these files sit, for the Info sheet. The viewer shows one folder's direct
             // files, so this is the same path for every card in it.
-            folderPath = herePath.orEmpty(),
+            folderPath = here,
             settings = settings,
             onClose = { onViewFileChange(null) }
         )
         return
     }
 
-    Column(modifier = modifier.fillMaxSize()) {
-        when (val current = state) {
-            is FolderUiState.Loading -> Box(
-                Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) { CircularProgressIndicator() }
+    // The browser draws its own header, because the shell gave its chrome up when this opened.
+    //
+    // It used to be drawn under the tab bar, which is where the "cannot get back" report came from:
+    // the bar was the only navigation on screen and none of it led out of the folder, and Back —
+    // which did — leaves no trace to look at. The header answers the question the tab bar cannot:
+    // the arrow and the word "Upstreams" beside it say where leaving goes, and the title is the
+    // Upstream being browsed, which is the name the card that opened it carried.
+    ListeaNestedScaffold(
+        title = pinnedScope.name,
+        onBack = onExitScope,
+        backLabel = "Upstreams",
+        modifier = modifier
+    ) { bodyModifier ->
+        Column(bodyModifier.fillMaxSize()) {
+            when (val current = state) {
+                is FolderUiState.Loading -> Box(
+                    Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) { CircularProgressIndicator() }
 
-            // Nothing is chosen for the user and no picker opens by itself: the first thing a
-            // new install sees is an explanation of where to start.
-            is FolderUiState.NoFolder -> Column(
-                Modifier.padding(ListeaDimens.PagePadding)
-            ) {
-                Text("No folder selected", style = MaterialTheme.typography.bodyLarge)
-                Spacer(Modifier.height(ListeaDimens.CompactGap))
-                Text(
-                    "Select a folder in Settings to get started.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                current.message?.let {
-                    Spacer(Modifier.height(ListeaDimens.RowGap))
-                    Text(
-                        it,
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-                Spacer(Modifier.height(ListeaDimens.SectionGap))
-                Button(onClick = onOpenSettings) { Text("Open Settings") }
-            }
-
-            is FolderUiState.Browsing -> {
-                // Non-null here, unlike the hoisted `rootUri` above, which has to survive the
-                // states in which no folder is open at all. Everything else this branch needs —
-                // the ownership, the arrangement, the files and the subset shown — is hoisted,
-                // because the file viewer above pages that same subset.
-                val root = current.stack.first().uri.toString()
-
-                // Ownership for the current folder and every visible directory, derived once per
-                // data change rather than per card recomposition, from one indexed lookup each.
-                val statuses = remember(ownership, here, current.contents.entries) {
-                    buildMap {
-                        put(here, folderListStatus(ownership, here))
-                        current.contents.entries.forEach { entry ->
-                            if (entry.isDirectory) {
-                                val path = childRelativePath(here, entry.name)
-                                put(path, folderListStatus(ownership, path))
-                            }
-                        }
-                    }
-                }
-                fun statusOf(path: String) = statuses[path] ?: FolderListStatus.None
-
-                fun requestList(path: String, folderUri: Uri, folderName: String) {
-                    listsViewModel.requestListForFolder(
-                        rootUri = root,
-                        relativePath = path,
-                        folderUri = folderUri,
-                        folderName = folderName
-                    )
-                }
-
-                val folderKey = folderArrangementKey(root, here)
-                var sortOpen by remember { mutableStateOf(false) }
-                var filterOpen by remember { mutableStateOf(false) }
-
-                // One scroll surface for the page. The breadcrumb, the folder summary and the
-                // action row scroll away with everything else rather than pinning most of the
-                // screen open above a small list viewport — which is what left almost nothing
-                // usable in landscape.
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(
-                        horizontal = ListeaDimens.PagePadding,
-                        vertical = ListeaDimens.RowGap
-                    ),
-                    verticalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
+                // An Upstream that could not be read says so and offers the way back to the list it was
+                // opened from, not a trip to Settings — the grant is still there, one folder under it
+                // is not.
+                is FolderUiState.NoFolder -> Column(
+                    Modifier.padding(ListeaDimens.PagePadding)
                 ) {
-                    item {
-                        Breadcrumb(
-                            stack = current.stack,
-                            onNavigate = { depth -> open(current.stack.take(depth)) }
+                    Text(
+                        "Nothing can be read here.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    current.message?.let {
+                        Spacer(Modifier.height(ListeaDimens.RowGap))
+                        Text(
+                            it,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
                         )
                     }
-                    item {
-                        CurrentFolderCard(
-                            entries = current.contents.entries,
-                            status = statusOf(here),
-                            quickReviewEnabled = quickReviewEnabled,
-                            onRefresh = { open(current.stack) },
-                            onOpenList = onOpenList,
-                            onCreateList = {
-                                requestList(here, current.stack.last().uri, current.stack.last().name)
-                            },
-                            // Straight in. No list is consulted, so there is nothing to
-                            // check and nothing to be stale: the folder is the source.
-                            onQuickReview = {
-                                onQuickReviewChange(QuickReviewTarget(root, here))
+                    Spacer(Modifier.height(ListeaDimens.SectionGap))
+                    Button(onClick = onExitScope) { Text("Back to Upstreams") }
+                }
+
+                is FolderUiState.Browsing -> {
+                    // The Upstream's grant, which a run over this folder is recorded against: the two
+                    // are one pair, and `here` below is where the folder sits inside it. Everything
+                    // else this branch needs — the ownership, the arrangement, the files and the subset
+                    // shown — is hoisted, because the file viewer above pages that same subset.
+                    val root = pinnedScope.rootUri
+
+                    // Ownership for the current folder and every visible directory, derived once per
+                    // data change rather than per card recomposition, from one indexed lookup each.
+                    val statuses = remember(ownership, here, current.contents.entries) {
+                        buildMap {
+                            put(here, folderListStatus(ownership, here))
+                            current.contents.entries.forEach { entry ->
+                                if (entry.isDirectory) {
+                                    val path = childRelativePath(here, entry.name)
+                                    put(path, folderListStatus(ownership, path))
+                                }
                             }
-                        )
-                    }
-
-                    if (current.contents.entries.isEmpty()) {
-                        item {
-                            Spacer(Modifier.height(ListeaDimens.SectionGap))
-                            Text(
-                                "This folder is empty",
-                                style = MaterialTheme.typography.bodyMedium
-                            )
                         }
                     }
+                    fun statusOf(path: String) = statuses[path] ?: FolderListStatus.None
 
-                    if (directories.isNotEmpty()) {
+                    val folderKey = folderArrangementKey(root, here)
+                    var sortOpen by remember { mutableStateOf(false) }
+                    var filterOpen by remember { mutableStateOf(false) }
+                    // The shared file being drilled into, grant-relative like everything else
+                    // stored. Null is the ordinary case, and the dialog below is the only thing
+                    // that reads it.
+                    var sharedPath by remember(root) { mutableStateOf<String?>(null) }
+
+                    // One scroll surface for the page. The breadcrumb, the folder summary and the
+                    // action row scroll away with everything else rather than pinning most of the
+                    // screen open above a small list viewport — which is what left almost nothing
+                    // usable in landscape.
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(
+                            horizontal = ListeaDimens.PagePadding,
+                            vertical = ListeaDimens.RowGap
+                        ),
+                        verticalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
+                    ) {
                         item {
-                            SectionHeader(
-                                "Directories",
-                                Modifier.padding(top = ListeaDimens.RowGap)
+                            Breadcrumb(
+                                stack = current.stack,
+                                onNavigate = { depth -> open(current.stack.take(depth)) },
+                                baseLabel = pinnedScope.name
                             )
                         }
-                        items(directories, key = { it.uri }) { entry ->
-                            val path = childRelativePath(here, entry.name)
-                            FolderCard(
-                                entry = entry,
-                                status = statusOf(path),
-                                onNavigate = {
-                                    open(current.stack + DirRef(entry.uri, entry.name))
+                        item {
+                            CurrentFolderCard(
+                                entries = current.contents.entries,
+                                status = statusOf(here),
+                                owners = ownersOf(ownership, here),
+                                onRefresh = { open(current.stack) },
+                                onOpenList = onOpenList,
+                                onCreateTasks = {
+                                    listsViewModel.requestCreateTasks(root, here)
                                 }
                             )
                         }
-                    }
 
-                    if (files.isNotEmpty()) {
-                        item {
-                            // The header keeps the folder's whole file count behind it: the
-                            // controls that decide what is shown must not themselves disappear
-                            // when the filter they set happens to match nothing.
-                            ArrangeableSectionHeader(
-                                title = "Files",
-                                arrangement = arrangement,
-                                onSort = { sortOpen = true },
-                                onFilter = { filterOpen = true },
-                                modifier = Modifier.padding(top = ListeaDimens.RowGap)
-                            )
-                            if (!arrangement.isFilterDefault) {
-                                FilterSummary(shown = shownFiles.size, total = files.size)
+                        if (current.contents.entries.isEmpty()) {
+                            item {
+                                Spacer(Modifier.height(ListeaDimens.SectionGap))
+                                Text(
+                                    "This folder is empty",
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
                             }
                         }
-                        items(shownFiles, key = { it.uri }) { entry ->
-                            FileRow(
-                                entry = entry,
-                                // Hidden entirely while Folder review integration is off, which
-                                // changes what is shown and nothing that is stored.
-                                isChecked = shownCheckState(entry),
-                                onOpen = { onViewFileChange(entry.uri.toString()) }
-                            )
+
+                        if (directories.isNotEmpty()) {
+                            item {
+                                SectionHeader(
+                                    "Directories",
+                                    Modifier.padding(top = ListeaDimens.RowGap)
+                                )
+                            }
+                            items(directories, key = { it.uri }) { entry ->
+                                val path = childRelativePath(here, entry.name)
+                                FolderCard(
+                                    entry = entry,
+                                    status = statusOf(path),
+                                    owners = ownersOf(ownership, path),
+                                    onNavigate = {
+                                        open(current.stack + DirRef(entry.uri, entry.name))
+                                    }
+                                )
+                            }
+                        }
+
+                        if (files.isNotEmpty()) {
+                            item {
+                                // The header keeps the folder's whole file count behind it: the
+                                // controls that decide what is shown must not themselves disappear
+                                // when the filter they set happens to match nothing.
+                                ArrangeableSectionHeader(
+                                    title = "Files",
+                                    arrangement = arrangement,
+                                    onSort = { sortOpen = true },
+                                    onFilter = { filterOpen = true },
+                                    modifier = Modifier.padding(top = ListeaDimens.RowGap)
+                                )
+                                if (!arrangement.isFilterDefault) {
+                                    FilterSummary(shown = shownFiles.size, total = files.size)
+                                }
+                            }
+                            items(shownFiles, key = { it.uri }) { entry ->
+                                val path = childRelativePath(here, entry.name)
+                                val owners = ownersOf(ownership, path)
+                                FileRow(
+                                    entry = entry,
+                                    // Hidden entirely while Folder review integration is off, which
+                                    // changes what is shown and nothing that is stored. The *mark*
+                                    // goes with it, because the mark opens a review drill-in. The
+                                    // owner line does not: which Todo imported a file is not a
+                                    // review fact, and the folder cards show it ungated already.
+                                    isChecked = shownCheckState(entry),
+                                    onOpen = { onViewFileChange(entry.uri.toString()) },
+                                    owners = owners,
+                                    ownerCount =
+                                        if (quickReviewEnabled) fileOwnerMark(owners) else null,
+                                    onOpenShared = { sharedPath = path }
+                                )
+                            }
                         }
                     }
-                }
 
-                fun applyArrangement(updated: FileArrangement) {
-                    listsViewModel.setArrangement(folderKey, updated)
-                    sortOpen = false
-                    filterOpen = false
-                }
+                    fun applyArrangement(updated: FileArrangement) {
+                        listsViewModel.setArrangement(folderKey, updated)
+                        sortOpen = false
+                        filterOpen = false
+                    }
 
-                if (sortOpen) {
-                    FileSortDialog(
-                        arrangement = arrangement,
-                        // Sorting by something the page is not showing would be an order with no
-                        // visible reason for being what it is.
-                        showCheckedSort = quickReviewEnabled,
-                        onDismiss = { sortOpen = false },
-                        onApply = ::applyArrangement
-                    )
-                }
-                if (filterOpen) {
-                    FileFilterDialog(
-                        arrangement = arrangement,
-                        showCheckedGroup = quickReviewEnabled,
-                        onDismiss = { filterOpen = false },
-                        onApply = ::applyArrangement
-                    )
+                    if (sortOpen) {
+                        FileSortDialog(
+                            arrangement = arrangement,
+                            // Sorting by something the page is not showing would be an order with no
+                            // visible reason for being what it is.
+                            showCheckedSort = quickReviewEnabled,
+                            onDismiss = { sortOpen = false },
+                            onApply = ::applyArrangement
+                        )
+                    }
+                    if (filterOpen) {
+                        FileFilterDialog(
+                            arrangement = arrangement,
+                            showCheckedGroup = quickReviewEnabled,
+                            onDismiss = { filterOpen = false },
+                            onApply = ::applyArrangement
+                        )
+                    }
+                    sharedPath?.let { path ->
+                        SharedFileDialog(
+                            path = path,
+                            settings = settings,
+                            load = { listsViewModel.sharedFileStates(root, path) },
+                            onDismiss = { sharedPath = null }
+                        )
+                    }
                 }
             }
-        }
+    }
     }
 
-    when (val request = folderListRequest) {
+}
+
+/**
+ * Create Tasks, and a Todo's Refresh Import.
+ *
+ * Hosted at the top level rather than inside either tab, because a refresh is raised from Todo and a
+ * run that commits changes the catalog Upstreams reads. One host means one report, wherever the run
+ * was started from.
+ *
+ * The whole configuration is chosen here and only here. file-as-Task and folder-as-Task read the
+ * same folder into different Tasks, the name is what the Todo will be called, and whether the folder
+ * tree survives is what the Todo looks like when opened — none of which the app can infer from the
+ * material. It is the question this dialog exists to ask. A refresh is not asked, because the Source
+ * already answered it.
+ */
+@Composable
+private fun ImportFolderDialogs(viewModel: ListsViewModel) {
+    val request by viewModel.importFolderRequest.collectAsStateWithLifecycle()
+
+    when (val current = request) {
         null -> Unit
 
-        is FolderListRequest.Scanning -> AlertDialog(
+        is ImportFolderRequest.Reading -> AlertDialog(
             onDismissRequest = {},
-            title = { Text("Scanning folder") },
+            title = { Text("Reading folder") },
             text = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator()
                     Spacer(Modifier.width(ListeaDimens.SectionGap))
-                    Text("Looking for files in this folder and everything below it.")
+                    Text("Finding what an import would cover.")
                 }
             },
             confirmButton = {}
         )
 
-        is FolderListRequest.Confirm -> AlertDialog(
-            onDismissRequest = { listsViewModel.dismissFolderListRequest() },
-            // One action, so the wording has to say which of its outcomes is about to happen:
-            // rebuilding this folder's own list, or taking it over from elsewhere.
-            title = {
-                Text(
-                    if (request.replacesExact) "Replace existing List?" else "Replace other Lists?"
-                )
+        is ImportFolderRequest.Confirm -> ImportConfirmDialog(
+            request = current,
+            onConfirm = { options, recoverFrom ->
+                viewModel.confirmImportFolder(options, recoverFrom)
             },
+            onDismiss = { viewModel.dismissImportFolderRequest() }
+        )
+
+        is ImportFolderRequest.Importing -> AlertDialog(
+            onDismissRequest = {},
+            title = { Text("Importing") },
             text = {
-                val count = request.replacedTitles.size
-                Column {
-                    Text(
-                        "Creating a list for " + request.folderName +
-                            " (" + request.fileCount + " files) will replace " +
-                            countLabel(count, "existing list") + ":"
-                    )
-                    Spacer(Modifier.height(ListeaDimens.RowGap))
-                    request.replacedTitles.forEach { title -> Text("- $title") }
-                    Spacer(Modifier.height(ListeaDimens.RowGap))
-                    Text(
-                        "Their items, checked state, actions and webhook settings are replaced.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator()
+                    Spacer(Modifier.width(ListeaDimens.SectionGap))
+                    Text("Creating Tasks.")
                 }
             },
+            confirmButton = {}
+        )
+
+        is ImportFolderRequest.Report -> AlertDialog(
+            onDismissRequest = { viewModel.dismissImportFolderRequest() },
+            title = { Text(importReportTitle(current.result)) },
+            text = { ImportReportBody(current) },
             confirmButton = {
-                TextButton(onClick = { listsViewModel.confirmListForFolder() }) { Text("Continue") }
-            },
-            dismissButton = {
-                TextButton(onClick = { listsViewModel.dismissFolderListRequest() }) { Text("Cancel") }
+                TextButton(onClick = { viewModel.dismissImportFolderRequest() }) { Text("OK") }
             }
         )
 
-        is FolderListRequest.Error -> AlertDialog(
-            onDismissRequest = { listsViewModel.dismissFolderListRequest() },
-            title = { Text("Could not create list") },
-            text = { Text(request.message) },
+        is ImportFolderRequest.Error -> AlertDialog(
+            onDismissRequest = { viewModel.dismissImportFolderRequest() },
+            title = { Text("Could not import") },
+            text = { Text(current.message) },
             confirmButton = {
-                TextButton(onClick = { listsViewModel.dismissFolderListRequest() }) { Text("OK") }
-            }
-        )
-
-        is FolderListRequest.ImportConsent -> AlertDialog(
-            onDismissRequest = { listsViewModel.dismissFolderListRequest() },
-            title = { Text("Import folder?") },
-            text = {
-                Column {
-                    Text(
-                        "Creating a list for " + request.folderName +
-                            " (" + countLabel(request.fileCount, "file") + ") means importing it " +
-                            "first. Listea will register " + request.sourceRoot + " as " +
-                            request.importer + " and create the Tasks."
-                    )
-                    Spacer(Modifier.height(ListeaDimens.RowGap))
-                    Text(
-                        "Nothing is written until you import.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { listsViewModel.confirmImportForFolder() }) { Text("Import") }
-            },
-            dismissButton = {
-                TextButton(onClick = { listsViewModel.dismissFolderListRequest() }) { Text("Not now") }
+                TextButton(onClick = { viewModel.dismissImportFolderRequest() }) { Text("OK") }
             }
         )
     }
 }
 
 /**
+ * Create Tasks, and the refresh of one that already ran.
+ *
+ * The configuration is edited here and read back here: the dialog owns the draft, and the only thing
+ * that crosses back to the view model is the [ImportOptions] the user confirmed. A refresh shows the
+ * Source's stored values with nothing editable, because a refresh that changed the grouping would
+ * not be re-running this Source, it would be describing a different one.
+ *
+ * The fields are seeded from `request.options` rather than from a default, so the dialog opens on
+ * what the run is actually about — the Source's own name and importer when refreshing, the folder's
+ * name and the default grouping when creating.
+ */
+@Composable
+private fun ImportConfirmDialog(
+    request: ImportFolderRequest.Confirm,
+    onConfirm: (ImportOptions, DissolvedHistory?) -> Unit,
+    onDismiss: () -> Unit
+) {
+    // Keyed on the run being described rather than on the [Confirm] object: the object is a new
+    // instance every collection, so keying on it would discard a half-typed name on any recompose
+    // that re-read the flow, and the label is what distinguishes one run's confirmation from the
+    // next one's.
+    val runKey = request.folderLabel
+    val seed = request.options
+    var name by rememberSaveable(runKey) { mutableStateOf(seed.displayName) }
+    var keepTree by rememberSaveable(runKey) { mutableStateOf(seed.keepTree) }
+    var importer by rememberSaveable(runKey) { mutableStateOf(seed.importer) }
+    var policy by rememberSaveable(runKey) { mutableStateOf(seed.contentPolicy) }
+    // Null is "start fresh" and is the seeded answer, so a user who does not read this far gets the
+    // Todo they would have got before histories existed.
+    var recoverFrom by rememberSaveable(runKey) { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (request.refresh) "Refresh import?" else "Create tasks?") },
+        text = {
+            // Scrollable, and it has to be: the histories section makes this the tallest dialog in
+            // the app, and an `AlertDialog` gives its text slot a bounded height. A plain `Column`
+            // that overflows is not scrolled and not clipped — its children are *squeezed*, so the
+            // last rows collapse to nothing and the picker offers an option with no words on it.
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                // Scope first, folder second: what is about to be read is the number the user is
+                // deciding on, and the folder names the thing it is being read out of. It also
+                // settles the verb, which no longer has to be "register" — by the time this dialog
+                // opens from an Upstream, that Upstream is already a row.
+                Text(
+                    (if (request.refresh) "Listea will re-read " else "Listea will read ") +
+                        importScope(request) + " from " + request.folderLabel + "."
+                )
+                // A notice, not a warning. Running Create Tasks over a folder that already has a
+                // Todo is how a second intention is expressed — the same folder supplying a second
+                // dish — so the dialog says what is there and goes on to allow it. Saying it before
+                // the button is pressed is the cheap moment; finding two cards on the Todo tab
+                // afterwards is the expensive one.
+                if (request.existingTodos.isNotEmpty()) {
+                    Spacer(Modifier.height(ListeaDimens.RowGap))
+                    Text(
+                        "This folder already has " + todoCount(request.existingTodos.size) +
+                            ": " + request.existingTodos.joinToString(", ") { "\"" + it + "\"" } +
+                            ". Creating Tasks here makes another, with Tasks of its own.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(Modifier.height(ListeaDimens.RowGap))
+                if (request.refresh) {
+                    // Nothing to choose: the sentence above already names what is being re-read,
+                    // and the line below is the whole of what a refresh can change (nothing).
+                    Text(
+                        "Re-importing under " + importer.key + ", the grouping this Source already " +
+                            "has. Nothing is deleted; folders that lost files are flagged.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    OutlinedTextField(
+                        value = name,
+                        onValueChange = { name = it },
+                        label = { Text("Name") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(ListeaDimens.RowGap))
+                    Text(
+                        "Grouping decides what a Task is. Nothing is written until you create them.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    ImportImporterChoice(
+                        selected = importer,
+                        onSelect = {
+                            importer = it
+                            // The box disappears for folder-as-Task, so it must not stay ticked
+                            // behind it: the stored value goes through normalizeKeepTree either way,
+                            // and this keeps what the user saw when they pressed Create the same as
+                            // what the Source ends up with.
+                            if (it == ImporterKind.FOLDER_AS_TASK) keepTree = false
+                        }
+                    )
+                    if (importer == ImporterKind.FILE_AS_TASK) {
+                        ImportKeepTreeChoice(keepTree = keepTree, onToggle = { keepTree = !keepTree })
+                    }
+                }
+                // Drawn for a refresh as well, and it is the one control here that is. The rule
+                // this dialog keeps on a refresh — the name and the grouping are not editable — is
+                // about what the Source *is*: changing them would describe a different Source
+                // wearing this one's row. What happens when a Task's content changes is not that;
+                // it is a statement about re-importing, which is precisely what a refresh does, and
+                // it is written back so the answer stands for the next run too.
+                Spacer(Modifier.height(ListeaDimens.RowGap))
+                ContentPolicyChoice(
+                    selected = policy,
+                    onSelect = { policy = it }
+                )
+                // Read outside the grouping branch, because a history says nothing about grouping:
+                // what it holds is matched against the new Todo's own `groupPath`s, and a history
+                // whose grouping differs simply matches none of them. Only Create Tasks sets it —
+                // see [ListsViewModel.requestSourceRefresh] — so this never draws for a refresh.
+                if (request.histories.isNotEmpty()) {
+                    Spacer(Modifier.height(ListeaDimens.RowGap))
+                    ImportHistoryChoice(
+                        histories = request.histories,
+                        selected = recoverFrom,
+                        onSelect = { recoverFrom = it }
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onConfirm(
+                        ImportOptions(
+                            importer = importer,
+                            displayName = name,
+                            keepTree = keepTree,
+                            contentPolicy = policy
+                        ),
+                        // Resolved here rather than in the ViewModel, because the id is what
+                        // survives a configuration change and the object is what the report needs.
+                        // The selection cannot go stale: the histories are re-read from the same
+                        // flow that opened this dialog, and a history is never consumed.
+                        request.histories.firstOrNull { it.sourceId == recoverFrom }
+                    )
+                }
+            ) { Text(if (request.refresh) "Refresh" else "Create") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+/** "one Todo" / "3 Todos", so the notice above reads as a sentence rather than as a form field. */
+/** What a run would cover, as a phrase. Says both counts because either can be the surprising one. */
+internal fun importScope(request: ImportFolderRequest.Confirm): String =
+    countLabel(request.fileCount, "file") + " in " + countLabel(request.folderCount, "folder")
+
+/**
+ * The one choice this release turns on, said as plainly as it can be.
+ *
+ * Two choices rather than a dropdown: there are exactly two rules, they are not settings, and the
+ * difference between them — one Task per file, or one Task per child folder — is the sentence the
+ * user has to read in order to answer.
+ */
+@Composable
+private fun ImportImporterChoice(selected: ImporterKind, onSelect: (ImporterKind) -> Unit) {
+    Column {
+        ImportImporterRow(
+            label = "One Task per file",
+            detail = "file-as-task · every file the scan finds becomes its own Task",
+            selected = selected == ImporterKind.FILE_AS_TASK,
+            onSelect = { onSelect(ImporterKind.FILE_AS_TASK) }
+        )
+        ImportImporterRow(
+            label = "One Task per folder",
+            detail = "folder-as-task · each child folder becomes one Task of its pictures, " +
+                "videos and PDFs",
+            selected = selected == ImporterKind.FOLDER_AS_TASK,
+            onSelect = { onSelect(ImporterKind.FOLDER_AS_TASK) }
+        )
+    }
+}
+
+/**
+ * What a Todo does when one of its Tasks' content changes — the tier chooser.
+ *
+ * Shared by the two places the question is asked: the import dialog, where the answer is about the
+ * run in front of the user and is written back to the Todo, and Settings, where it is the answer
+ * new Todos start with. The three sentences are the same in both because the question is.
+ *
+ * Three rows rather than a dropdown, for the same reason [ImportImporterChoice] is two: the
+ * difference between them is what the user has to read in order to answer, and it is not a word
+ * they already know. The order is the order of consequence — keep changes nothing, reset clears a
+ * judgment, drop removes a Task from the Lists that hold it — so a user who reads only the first
+ * row is a user who chose the safe answer.
+ *
+ * The three sentences are written in terms of what the user will *see*, not in terms of the
+ * mechanics: a policy named "drop" with a description about Task identities would be this app
+ * talking to itself.
+ */
+@Composable
+internal fun ContentPolicyChoice(
+    selected: ContentPolicy,
+    onSelect: (ContentPolicy) -> Unit
+) {
+    Column {
+        Text(
+            "When a Task's content changes",
+            style = MaterialTheme.typography.bodyMedium
+        )
+        ImportImporterRow(
+            label = "Keep it",
+            detail = "keep · the Task and its ticks stay; material that has gone is flagged",
+            selected = selected == ContentPolicy.KEEP,
+            onSelect = { onSelect(ContentPolicy.KEEP) }
+        )
+        ImportImporterRow(
+            label = "Start it over",
+            detail = "reset · the Task stays and its ticks clear, so moved content is judged again",
+            selected = selected == ContentPolicy.RESET,
+            onSelect = { onSelect(ContentPolicy.RESET) }
+        )
+        ImportImporterRow(
+            label = "Replace the Task",
+            detail = "drop · a Task that changed is replaced, and Lists that held it lose it",
+            selected = selected == ContentPolicy.DROP,
+            onSelect = { onSelect(ContentPolicy.DROP) }
+        )
+    }
+}
+
+/**
+ * Whether the Todo keeps the folder tree, offered only where the importer can honour it.
+ *
+ * Shown for file-as-Task alone, because folder-as-Task has no tree to keep: its Tasks are one per
+ * child folder and its catalog is flat whatever this says. Hiding the box is a courtesy, not the
+ * rule — [normalizeKeepTree] is the rule, and it holds however the box was left.
+ */
+@Composable
+private fun ImportKeepTreeChoice(keepTree: Boolean, onToggle: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle)
+            .padding(vertical = ListeaDimens.CompactGap),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Checkbox(checked = keepTree, onCheckedChange = { onToggle() })
+        Spacer(Modifier.width(ListeaDimens.RowGap))
+        Column {
+            Text("Keep the folder tree", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "Off flattens this Todo: every Task in one list, no folders to open. " +
+                    "The Tasks themselves are the same either way.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+/**
+ * The offer to start this Todo from what a deleted one already knew.
+ *
+ * Shown only when there is something to offer, so a folder that has never had a Todo dissolved
+ * opens exactly the dialog it opened before. "Start fresh" is a row rather than the absence of one:
+ * the choice is between histories and not having one, and a list of alternatives with no way to
+ * decline would read as a decision already made.
+ *
+ * One history at a time, and never a mixture — you can only load what one dissolution recorded,
+ * because a recovery is about a *place* rather than about individual files, and two histories at one
+ * folder are two different times at that place. See the step 2 plan's Recovery section.
+ */
+@Composable
+private fun ImportHistoryChoice(
+    histories: List<DissolvedHistory>,
+    selected: String?,
+    onSelect: (String?) -> Unit
+) {
+    Column {
+        Text("Decisions left behind", style = MaterialTheme.typography.bodyMedium)
+        Text(
+            "A Todo deleted at this folder kept what it had judged. Loading one gives this Todo's " +
+                "Tasks those decisions — matched by path, so a history recorded under a different " +
+                "grouping has nothing to say to this one.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        ImportImporterRow(
+            label = "Start fresh",
+            detail = "no decisions loaded; every Task begins unjudged",
+            selected = selected == null,
+            onSelect = { onSelect(null) }
+        )
+        for (history in histories) {
+            ImportImporterRow(
+                label = history.sourceName.ifBlank { "Untitled Todo" },
+                detail = countLabel(history.taskCount, "Task") + " judged · deleted " +
+                    formatTimestamp(history.dissolvedAt),
+                selected = selected == history.sourceId,
+                onSelect = { onSelect(history.sourceId) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun ImportImporterRow(
+    label: String,
+    detail: String,
+    selected: Boolean,
+    onSelect: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onSelect)
+            .padding(vertical = ListeaDimens.CompactGap),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        RadioButton(selected = selected, onClick = onSelect)
+        Spacer(Modifier.width(ListeaDimens.RowGap))
+        Column {
+            Text(label, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                detail,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+/** The one-line verdict, in the vocabulary §5.5 defines. */
+internal fun importReportTitle(result: ImportResult): String = when (result.outcome) {
+    ImportOutcome.COMPLETE -> "Import complete"
+    ImportOutcome.PARTIAL -> "Import finished with conflicts"
+    ImportOutcome.FAILED -> "Import failed"
+}
+
+/**
+ * What the run did.
+ *
+ * Every line is something the run actually counted, and the two omissions are deliberate: a zero is
+ * not printed, because "0 adopted" is noise on every run that adopts nothing; and notices are
+ * counted rather than listed, because a folder of unsupported files is one fact about the importer's
+ * policy rather than one fact per file. Conflicts are the exception and are named — they are the one
+ * outcome here the user has to do something about.
+ *
+ * A recovery is the other exception, and for the same reason in reverse: it is never silent, because
+ * it is never automatic. Nobody gets a recovery they did not choose, so a chosen one that copied
+ * nothing is an answer owed rather than a zero worth suppressing.
+ */
+@Composable
+private fun ImportReportBody(current: ImportFolderRequest.Report) {
+    val result = current.result
+    // Scrollable for the reason `ImportConfirmDialog`'s text slot is: this is the other dialog that
+    // can outgrow `AlertDialog`'s bounded slot, and an overflowing `Column` there is squeezed rather
+    // than clipped — the last lines collapse and the report loses exactly the part a long run has
+    // most to say with: the conflicts it is naming, and the notices underneath them.
+    Column(Modifier.verticalScroll(rememberScrollState())) {
+        val lines = buildList {
+            if (result.tasksCreated > 0) add(countLabel(result.tasksCreated, "Task") + " created")
+            if (result.tasksAdopted > 0) add(countLabel(result.tasksAdopted, "Task") + " adopted")
+            // A reset is counted in the reconciled total as well, because the Task really was
+            // brought up to date and really did keep its identity — so it is said *inside* that
+            // line rather than beside it. Two counters reading "2 Tasks updated" and "1 Task
+            // started over" would leave the user to work out whether the one was one of the two.
+            if (result.tasksReconciled > 0) {
+                add(
+                    countLabel(result.tasksReconciled, "Task") + " updated" +
+                        if (result.tasksReset > 0) {
+                            " · " + countLabel(result.tasksReset, "of them") + " started over"
+                        } else {
+                            ""
+                        }
+                )
+            } else if (result.tasksReset > 0) {
+                // The same outcome with nothing to reconcile: a Task whose content has all gone is
+                // in no plan, so there is no "them" for it to have been one of.
+                add(countLabel(result.tasksReset, "Task") + " started over — their content changed")
+            }
+            // Not folded into anything: a drop is the one outcome here that removes a Task and
+            // every List membership it held, and a count that reads like bookkeeping would hide it.
+            if (result.tasksDropped > 0) {
+                add(countLabel(result.tasksDropped, "Task") + " replaced — their content changed")
+            }
+            // Only the non-zero half belongs among the counts. A recovery that reached nothing is
+            // a sentence rather than a number, and it is said below.
+            if (result.tasksRecovered > 0) {
+                add(countLabel(result.tasksRecovered, "Task") + " recovered")
+            }
+            if (result.assetsCreated > 0) add(countLabel(result.assetsCreated, "Asset") + " added")
+            if (result.assetsUpdated > 0) add(countLabel(result.assetsUpdated, "Asset") + " updated")
+            if (result.assetsMarkedMissing > 0) {
+                add(countLabel(result.assetsMarkedMissing, "Asset") + " missing from the source")
+            }
+        }
+        if (lines.isEmpty()) {
+            Text("Nothing changed.")
+        } else {
+            lines.forEach { Text(it) }
+        }
+
+        // The recovery's other answer, and the reason it is not one of the counts above: "nothing"
+        // is not a number. A chosen history can reach nothing at all — its grouping rule may have no
+        // path in common with this run's — and without this sentence that outcome would be
+        // indistinguishable from a run that was never offered a history.
+        if (result.tasksRecovered == 0 && current.recoveredFrom != null) {
+            Spacer(Modifier.height(ListeaDimens.RowGap))
+            Text(
+                "Nothing was recovered from \"" + current.recoveredFrom + "\": no Task here " +
+                    "matches a path it recorded.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        if (result.conflicts.isNotEmpty()) {
+            Spacer(Modifier.height(ListeaDimens.RowGap))
+            Text(
+                countLabel(result.conflicts.size, "file") + " already belong to another Task:",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            result.conflicts.take(REPORT_CONFLICT_PREVIEW).forEach { conflict ->
+                Text("- " + conflict.relativePath + " (" + conflict.ownerLabel + ")")
+            }
+            if (result.conflicts.size > REPORT_CONFLICT_PREVIEW) {
+                Text(
+                    "and " + (result.conflicts.size - REPORT_CONFLICT_PREVIEW) + " more",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        val unsupported = result.notices.filterIsInstance<ImportNotice.UnsupportedFile>().size
+        val emptyFolders = result.notices.filterIsInstance<ImportNotice.EmptyFolder>().size
+        if (unsupported > 0 || emptyFolders > 0) {
+            Spacer(Modifier.height(ListeaDimens.RowGap))
+            if (unsupported > 0) {
+                Text(
+                    countLabel(unsupported, "file") + " this grouping does not import were skipped.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (emptyFolders > 0) {
+                Text(
+                    countLabel(emptyFolders, "folder") + " held nothing this grouping imports.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+private const val REPORT_CONFLICT_PREVIEW = 5
+
+/**
  * The path as a row of tappable ancestors. This is how you go up: every segment above the one you
  * are in navigates straight to it, reusing the same browsing stack the rest of the screen uses,
- * so nothing can drift out of the selected SAF root. The current folder is the end of the line
+ * so nothing can drift out of the Upstream's folder. The current folder is the end of the line
  * and is not a link.
  */
 @Composable
-private fun Breadcrumb(stack: List<DirRef>, onNavigate: (Int) -> Unit) {
+private fun Breadcrumb(
+    stack: List<DirRef>,
+    onNavigate: (Int) -> Unit,
+    /**
+     * What the first entry is called: the Upstream's own name, which is the same word the card that
+     * opened this used, so the screen and the card agree about what this place is.
+     */
+    baseLabel: String
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1055,7 +1921,7 @@ private fun Breadcrumb(stack: List<DirRef>, onNavigate: (Int) -> Unit) {
                 )
             }
             Text(
-                dir.name.ifEmpty { "Root" },
+                dir.name.ifEmpty { if (index == 0) baseLabel else "Root" },
                 style = MaterialTheme.typography.titleMedium,
                 maxLines = 1,
                 color = if (isCurrent) {
@@ -1080,20 +1946,20 @@ private fun Breadcrumb(stack: List<DirRef>, onNavigate: (Int) -> Unit) {
  * mistaken for a button. The counts are the folder's direct children only — the listing already
  * in memory — and never a recursive walk.
  *
- * Four short status lines do not need a phone's full width, so the actions sit beside them rather
- * than under them, and drop underneath only when the width genuinely cannot hold both. Either way
- * every action valid here is rendered: V4.0 put the same four in one unbreakable Row and a narrow
- * portrait screen cut the last of them off the right edge.
+ * Refresh re-reads the folder and Create Tasks is how what is in it becomes Tasks at all, so both
+ * belong to the material. Quick Review and Create List are about Tasks and live in Todo now, where
+ * every row is one an import already wrote. Open List stays because it makes nothing: it is a way
+ * back to a List this folder is already part of, and a status line saying a folder belongs to
+ * something that could not then be opened would be the card telling half a story.
  */
 @Composable
 private fun CurrentFolderCard(
     entries: List<FolderEntry>,
     status: FolderListStatus,
-    quickReviewEnabled: Boolean,
+    owners: List<RowOwner>,
     onRefresh: () -> Unit,
     onOpenList: (Long) -> Unit,
-    onCreateList: () -> Unit,
-    onQuickReview: () -> Unit
+    onCreateTasks: () -> Unit
 ) {
     val owner = owningScope(status)
 
@@ -1117,6 +1983,9 @@ private fun CurrentFolderCard(
                 folderOwnerTitle(status)?.let { StatusLine(it) }
                 // Only a folder that owns its list outright has a webhook to report.
                 statusWebhookLabel(status)?.let { StatusLine(it) }
+                // The Todo that made a Task of this folder. This is the one surface where a List
+                // title and a Todo are named on the same card, which is what the prefix is for.
+                folderOwnerLabel(owners)?.let { StatusLine(it) }
                 Text(
                     folderCountsLabel(entries),
                     style = MaterialTheme.typography.bodySmall,
@@ -1125,16 +1994,8 @@ private fun CurrentFolderCard(
             },
             actions = {
                 FolderAction("Refresh", Icons.Filled.Refresh, onClick = onRefresh)
-                // Offered on every folder now, subject only to the Folder integration setting.
-                // It reviews this folder's own files, so whether any List covers them — and
-                // whether that List is up to date — has stopped being a precondition.
-                if (quickReviewAvailable(quickReviewEnabled)) {
-                    FolderAction(
-                        label = "Quick Review",
-                        icon = Icons.Filled.Visibility,
-                        onClick = onQuickReview
-                    )
-                }
+                // Only when a List owns this folder outright. A folder under one is part of a
+                // subtree, and "Open List" would have to guess which List the user means.
                 owner?.let { scope ->
                     FolderAction(
                         "Open List",
@@ -1142,10 +2003,11 @@ private fun CurrentFolderCard(
                         onClick = { onOpenList(scope.id) }
                     )
                 }
-                // Always offered for a readable folder. What it does about an existing list —
-                // this folder's own, an ancestor's, or ones below it — is decided by the overlap
-                // rules, and the user confirms before anything is replaced.
-                FolderAction("Create List", Icons.Filled.Add, onClick = onCreateList)
+                // Registration, unlike everything above it, is not about this folder's lists: it
+                // is where the folder stops being raw material and becomes a Source, which is what
+                // the catalog and the Upstreams tab are reads of. It asks before it runs, and it
+                // asks which grouping — those are the two things only the user can answer.
+                FolderAction("Create Tasks", CatalogIcon, onClick = onCreateTasks)
             }
         )
     }
@@ -1183,6 +2045,7 @@ private fun FolderAction(
 private fun FolderCard(
     entry: FolderEntry,
     status: FolderListStatus,
+    owners: List<RowOwner>,
     onNavigate: () -> Unit
 ) {
     OutlinedCard(
@@ -1234,6 +2097,9 @@ private fun FolderCard(
                 // and repeating it on every folder underneath would suggest each can deliver
                 // something of its own.
                 statusWebhookLabel(status)?.let { StatusLine(it) }
+                // Which Todo made a Task of this folder — and, because a directory card has no List
+                // title on it, this is the only ownership line a directory ever shows.
+                folderOwnerLabel(owners)?.let { StatusLine(it) }
             }
             Icon(
                 Icons.AutoMirrored.Filled.KeyboardArrowRight,
@@ -1251,7 +2117,14 @@ private fun FolderCard(
  * in no list — or when Folder review integration is switched off.
  */
 @Composable
-private fun FileRow(entry: FolderEntry, isChecked: Boolean?, onOpen: () -> Unit) {
+private fun FileRow(
+    entry: FolderEntry,
+    isChecked: Boolean?,
+    onOpen: () -> Unit,
+    owners: List<RowOwner> = emptyList(),
+    ownerCount: Int? = null,
+    onOpenShared: (() -> Unit)? = null
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1274,6 +2147,38 @@ private fun FileRow(entry: FolderEntry, isChecked: Boolean?, onOpen: () -> Unit)
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+            // Which Todo holds this file, and whether it holds it as the Task itself or as one of
+            // the files a Task over a folder covers. Only drawn when there is something to say, so
+            // an unheld file keeps the two lines it has always had and the height is paid only by
+            // the rows the reader is being told about.
+            //
+            // Inside the weighted column rather than beside it: this row already mixes a flexible
+            // child with a fixed-width button and icon, and text in the fixed children would
+            // compete with the filename for the same width on every row of a long list.
+            fileOwnerLabel(owners)?.let { label ->
+                Text(
+                    label,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        // The tappable caveat on the tick beside it, for a file more than one Todo holds — the row
+        // that cannot say its own answer in a line. Drawn before the tick so the two never read as
+        // one control.
+        if (ownerCount != null && onOpenShared != null) {
+            TextButton(
+                onClick = onOpenShared,
+                contentPadding = PaddingValues(horizontal = ListeaDimens.RowGap)
+            ) {
+                Text(
+                    todoCount(ownerCount),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.tertiary
+                )
+            }
         }
         isChecked?.let { checked ->
             Icon(
@@ -1285,6 +2190,111 @@ private fun FileRow(entry: FolderEntry, isChecked: Boolean?, onOpen: () -> Unit)
                     MaterialTheme.colorScheme.outline
                 },
                 modifier = Modifier.size(ListeaDimens.IconSize)
+            )
+        }
+    }
+}
+
+/**
+ * Which Todos a shared file belongs to, and what each of them decided about it.
+ *
+ * The mark on the row says a disagreement is possible. This is where the disagreement — or the
+ * agreement, which is also worth knowing — is actually readable, so the collapsed tick stops being
+ * the only thing the browser says about a file that is two intentions at once.
+ *
+ * One line per Todo, because the Todo is the thing the user would act on: changing what this file
+ * means means going into one of them. It also makes agreement legible without a second read — two
+ * lines that say the same thing are the answer to the question the mark raises, and no line has to
+ * claim to be the file's own state, which is exactly the claim the collapsed tick cannot make.
+ *
+ * Read on entry rather than observed, because the browser has no reason to carry a row per Task
+ * over every shared file it lists, and this is opened for one file at a time.
+ */
+@Composable
+private fun SharedFileDialog(
+    path: String,
+    settings: AppSettings,
+    load: suspend () -> List<SharedFileState>,
+    onDismiss: () -> Unit
+) {
+    val states by produceState<List<SharedFileState>?>(initialValue = null, path) { value = load() }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(path.substringAfterLast('/')) },
+        text = {
+            val rows = states
+            when {
+                rows == null -> Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator()
+                    Spacer(Modifier.width(ListeaDimens.SectionGap))
+                    Text("Reading what each Todo decided.")
+                }
+
+                rows.isEmpty() -> Text("No Task holds this file any more.")
+
+                else -> Column(
+                    verticalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
+                ) {
+                    Text(
+                        fileOwnersNote(rows),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    rows.forEach { row -> SharedFileStateRow(row, settings) }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } }
+    )
+}
+
+/** One Todo's line: which Todo, what its Task over this file is called, and what it decided. */
+@Composable
+private fun SharedFileStateRow(state: SharedFileState, settings: AppSettings) {
+    val actions = itemActionLabel(
+        ReviewDecisions(
+            isCompleted = state.isCompleted,
+            isFavorite = state.isFavorite,
+            customActions = decodeActionIds(state.customActions)
+        ),
+        settings
+    )
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
+    ) {
+        Icon(
+            if (state.isCompleted) Icons.Filled.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
+            contentDescription = if (state.isCompleted) "Checked" else "Not checked",
+            tint = if (state.isCompleted) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.outline
+            },
+            modifier = Modifier.size(ListeaDimens.IconSize)
+        )
+        Column(Modifier.weight(1f)) {
+            // The same function the row's own label uses, so the headline here and the line that
+            // opened this dialog can never disagree about the capacity.
+            Text(
+                ownerTitle(state.sourceName, state.isOwnTask),
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                buildList {
+                    if (state.taskName.isNotBlank()) add(state.taskName)
+                    actions?.let { add(it) }
+                    if (isEmpty()) add("Nothing decided yet")
+                }.joinToString(" · "),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         }
     }

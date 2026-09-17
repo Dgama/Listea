@@ -5,12 +5,17 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
+import com.example.listea.ContentDecision
+import com.example.listea.ContentPolicy
 import com.example.listea.ImporterKind
 import com.example.listea.ImportPlan
 import com.example.listea.PlannedTask
 import com.example.listea.assetViewerAvailable
+import com.example.listea.decideContentDecision
+import com.example.listea.hasSourceChanges
 import com.example.listea.isAncestorOrSame
-import com.example.listea.scopesOverlap
+import com.example.listea.normalizeKeepTree
+import com.example.listea.taskChanges
 import com.example.listea.domain.ReviewContext
 import com.example.listea.domain.ReviewEventId
 import com.example.listea.domain.ReviewEventKind
@@ -20,6 +25,16 @@ import com.example.listea.domain.completesTask
 import com.example.listea.domain.encode
 import java.util.UUID
 import kotlinx.coroutines.flow.Flow
+
+/**
+ * How many paths one `IN (:paths)` statement may name.
+ *
+ * SQLite binds one variable per element and older Androids cap that at 999, which `minSdk = 24`
+ * means this build cannot assume away. The import path is the only place a single statement can be
+ * handed a whole folder's worth of paths, so it chunks rather than inheriting the ceiling; 500
+ * leaves room for the bound parameters any such statement carries besides the list itself.
+ */
+private const val PathBindChunk = 500
 
 @Dao
 abstract class ListsDao {
@@ -33,7 +48,10 @@ abstract class ListsDao {
                COALESCE(SUM(ts.isCompleted), 0) AS completedItems,
                l.webhookEnabled AS webhookEnabled,
                l.lastDeliveryStatus AS lastDeliveryStatus,
-               l.lastDeliveryCode AS lastDeliveryCode
+               l.lastDeliveryCode AS lastDeliveryCode,
+               l.lastDissolvedCount AS lastDissolvedCount,
+               l.lastDissolvedAt AS lastDissolvedAt,
+               l.lastDissolvedReason AS lastDissolvedReason
         FROM lists l
         LEFT JOIN list_items i ON i.listId = l.id
         LEFT JOIN task_state ts ON ts.taskId = i.taskId
@@ -395,7 +413,7 @@ abstract class ListsDao {
         val source = registerOrReuseSource(rootUri, relativePath, now)
         val result = runImportInternal(source.id, relativePath, fileAsTaskPlan(relativePath, files), now)
         if (result.outcome != ImportOutcome.COMPLETE) {
-            throw IllegalStateException("Import of $relativePath did not complete")
+            throw FolderListImportConflict(source.relativePath)
         }
 
         val taskIdsByGroup = taskImportsForSource(source.id).associate { it.groupPath to it.taskId }
@@ -455,21 +473,57 @@ abstract class ListsDao {
         return listId
     }
 
+    /**
+     * Puts Tasks into a List that already exists, each as a membership at the end of it.
+     *
+     * The other half of [createListFromTasks], and the reason a List is not owned by the Todo its
+     * Tasks came from: a List is an order over Tasks, so making one is picking Tasks and picking a
+     * List, and this is the order where the List is chosen first. Nothing else differs — each row
+     * is built by the same [listItemForTask], from the same Task's own Assets, so a membership
+     * added this way is indistinguishable from one the List was created with.
+     *
+     * A Task the List already holds is skipped rather than added a second time. A List shows each
+     * of its Tasks once; a second membership would be one Task at two positions, which is not a
+     * second opinion about it and would put the review queue at the same Task twice.
+     *
+     * Returns how many memberships were actually added, so a caller can say "these were already in
+     * it" rather than report a success that wrote nothing.
+     */
+    @Transaction
+    open suspend fun addTasksToList(listId: Long, taskIds: List<String>, now: Long): Int {
+        val already = taskIdsInList(listId).toSet()
+        val additions = taskIds.distinct().filterNot { it in already }
+        if (additions.isEmpty()) return 0
+
+        var order = maxSortOrder(listId) + 1
+        insertItems(
+            additions.map { taskId ->
+                listItemForTask(taskId, listId, order++, now, folderRelativePath = null)
+            }
+        )
+        clearDissolutionNote(listId)
+        return additions.size
+    }
+
+    /** Every Task this List already shows, so an addition can skip the ones it holds. */
+    @Query("SELECT taskId FROM list_items WHERE listId = :listId")
+    protected abstract suspend fun taskIdsInList(listId: Long): List<String>
+
     /** The Source a folder-tab action works against: a covering one, or a newly registered one. */
     private suspend fun registerOrReuseSource(
         rootUri: String,
         relativePath: String,
         now: Long
-    ): SourceEntity {
-        findCoveringSource(rootUri, relativePath)?.let { return it }
-        return when (
-            val result = registerSourceInternal(rootUri, relativePath, relativePath, ImporterKind.FILE_AS_TASK, now)
-        ) {
-            is RegisterSourceResult.Registered -> result.source
-            is RegisterSourceResult.Overlaps ->
-                throw IllegalStateException("Source overlaps ${result.covering.relativePath}")
-        }
-    }
+    ): SourceEntity =
+        sourcesCovering(rootUri, relativePath).firstOrNull()
+            ?: registerSource(
+                rootUri = rootUri,
+                relativePath = relativePath,
+                displayName = relativePath,
+                importerKind = ImporterKind.FILE_AS_TASK,
+                keepTree = true,
+                now = now
+            )
 
     private fun fileAsTaskPlan(importRoot: String, files: List<ScannedFile>) =
         com.example.listea.plan(
@@ -562,7 +616,7 @@ abstract class ListsDao {
      */
     @Query(
         """
-        SELECT a.relativePath FROM assets a
+        SELECT DISTINCT a.relativePath FROM assets a
         JOIN task_state ts ON ts.taskId = a.taskId
         WHERE a.rootUri = :rootUri AND ts.isCompleted = 1 AND a.sourceMissing = 0
         ORDER BY a.relativePath COLLATE NOCASE ASC
@@ -570,10 +624,16 @@ abstract class ListsDao {
     )
     abstract suspend fun getCheckedFilePaths(rootUri: String): List<String>
 
-    /** How many there are, for the card that offers the delete. Same filters, no paths loaded. */
+    /**
+     * How many there are, for the card that offers the delete. Same filters, no paths loaded.
+     *
+     * Counted over distinct *paths* rather than rows, because a file under two Todos has two Tasks
+     * and so two rows here. The card offers to delete files from disk, and there is one of those
+     * however many intentions are about it — a count that said two would make the button a lie.
+     */
     @Query(
         """
-        SELECT COUNT(*) FROM assets a
+        SELECT COUNT(DISTINCT a.relativePath) FROM assets a
         JOIN task_state ts ON ts.taskId = a.taskId
         WHERE a.rootUri = :rootUri AND ts.isCompleted = 1 AND a.sourceMissing = 0
         """
@@ -685,9 +745,19 @@ abstract class ListsDao {
      * The diff is recomputed here from the same scan so the write is consistent with what the
      * database holds at commit time. Completion is recalculated, but this returns a plain diff and
      * never a completion transition, so it cannot cause a webhook to fire.
+     *
+     * [source] is passed in rather than resolved here, and that is the point of the parameter:
+     * registering a Source is a write, so it is the caller's to consent to (§8.3). A re-sync used to
+     * register one silently from inside this transaction, which meant a List's folder could be
+     * brought into the catalog by pressing Update rather than by agreeing to an import.
      */
     @Transaction
-    open suspend fun applyReconcile(listId: Long, files: List<ScannedFile>, now: Long): FolderDiff {
+    open suspend fun applyReconcile(
+        listId: Long,
+        source: SourceEntity,
+        files: List<ScannedFile>,
+        now: Long
+    ): FolderDiff {
         val items = getSourceItems(listId)
         val diff = diffAgainst(items, files)
         val byPath = items.associateBy { it.sourceRelativePath }
@@ -698,15 +768,10 @@ abstract class ListsDao {
         val listPath = list?.sourceRelativePath.orEmpty()
 
         // A covered file-as-Task import creates or reconciles the Tasks for what the scan saw, so
-        // an appended file's Task is resolved rather than minted on the write path. The only thing
-        // that can stop it is a folder-as-Task Source covering this folder, which would fold the
-        // files into groups rather than append them as their own Tasks.
-        val rootUri = list?.sourceRootUri
-        val taskIdsByGroup = if (rootUri != null) {
-            val source = registerOrReuseSource(rootUri, listPath, now)
-            if (source.importerKind != ImporterKind.FILE_AS_TASK.key) {
-                throw IllegalStateException("List folder is inside a folder-as-Task Source")
-            }
+        // an appended file's Task is resolved rather than minted on the write path. The caller has
+        // already refused the case where the covering Source is folder-as-Task, which would fold
+        // these files into groups rather than append them as their own Tasks.
+        val taskIdsByGroup = if (list?.sourceRootUri != null) {
             runImportInternal(source.id, listPath, fileAsTaskPlan(listPath, files), now)
             taskImportsForSource(source.id).associate { it.groupPath to it.taskId }
         } else {
@@ -714,14 +779,18 @@ abstract class ListsDao {
         }
 
         val appendFrom = maxSortOrder(listId) + 1
-        insertItems(
-            diff.addedPaths.mapIndexedNotNull { index, path ->
-                val file = files.firstOrNull { it.relativePath == path } ?: return@mapIndexedNotNull null
-                val groupPath = rootRelativePathOf(listPath, file.relativePath)
-                val taskId = taskIdsByGroup[groupPath] ?: return@mapIndexedNotNull null
-                listItemForTask(taskId, listId, appendFrom + index, now, listPath)
-            }
-        )
+        val additions = diff.addedPaths.mapIndexedNotNull { index, path ->
+            val file = files.firstOrNull { it.relativePath == path } ?: return@mapIndexedNotNull null
+            val groupPath = rootRelativePathOf(listPath, file.relativePath)
+            val taskId = taskIdsByGroup[groupPath] ?: return@mapIndexedNotNull null
+            listItemForTask(taskId, listId, appendFrom + index, now, listPath)
+        }
+        insertItems(additions)
+        // Only when the List actually grew — counted from the rows about to be written rather than
+        // from the diff, which can name a path whose Task could not be resolved. A re-sync that
+        // found nothing new is not the List moving on, and a note that vanished on every refresh
+        // would be a note nobody could read.
+        if (additions.isNotEmpty()) clearDissolutionNote(listId)
 
         diff.missingPaths.forEach { path ->
             byPath[path]?.takeIf { !it.sourceMissing }?.let { setSourceMissing(it.id, true) }
@@ -832,8 +901,13 @@ abstract class ListsDao {
     @Transaction
     open suspend fun registerFiles(states: List<FileReviewStateEntity>) {
         insertRegistrations(states)
+        // Chunked for the same reason the import run chunks: `assignLegacyItemIds` binds one
+        // variable per path, and API 24-29 caps a statement at 999. A folder big enough to exceed
+        // that is a folder the import path can already produce, and the two write the same ids.
         states.groupBy { it.rootUri }.forEach { (rootUri, rows) ->
-            assignLegacyItemIds(rootUri, rows.map { it.relativePath })
+            rows.map { it.relativePath }.chunked(PathBindChunk).forEach { chunk ->
+                assignLegacyItemIds(rootUri, chunk)
+            }
         }
     }
 
@@ -846,18 +920,114 @@ abstract class ListsDao {
      * Not scoped to a list, because the tick is not about a list: a file reviewed in a folder no
      * List has ever covered is checked, and the browser has to be able to say so. One query for
      * the whole screen, like the ownership it sits beside.
+     *
+     * **One row per file, ticked when any Task over it is ticked.** A file under two Todos has two
+     * Tasks and so two states, and a browser row can only show one tick; leaving the join
+     * unaggregated would emit the file twice and let whichever row the caller happened to keep
+     * decide what the user sees. `MAX` is the honest collapse, and it is the same rule
+     * [getCheckedFilePaths] uses to decide a file is deletable: a file means one thing on disk, and
+     * any intention that called it done has called it done.
+     *
+     * It is a collapse and not an answer, which is why [observeFileClaims] exists beside it: a file
+     * held by more than one Todo is shown ticked *and* marked, rather than quietly reported as the
+     * vote of whichever row came first.
      */
     @Query(
         """
         SELECT frs.relativePath AS relativePath,
-               COALESCE(ts.isCompleted, 0) AS isCompleted
+               COALESCE(MAX(ts.isCompleted), 0) AS isCompleted
         FROM file_review_state frs
         LEFT JOIN assets a ON a.rootUri = frs.rootUri AND a.relativePath = frs.relativePath
         LEFT JOIN task_state ts ON ts.taskId = a.taskId
         WHERE frs.rootUri = :rootUri
+        GROUP BY frs.relativePath
         """
     )
     abstract fun observeFileCompletion(rootUri: String): Flow<List<FileCompletion>>
+
+    /**
+     * Every claim any Todo under [rootUri] has on a path, in both capacities, in one read.
+     *
+     * The first arm is the Tasks themselves — a file-as-Task Task's own file, a folder-as-Task
+     * Task's own folder. The second is the files those Tasks cover, and it deliberately excludes
+     * the rows the first arm already carries: `groupPath = relativePath` is a Task's own Asset, and
+     * arm one holds that `(path, Todo)` pair already. Excluding it is not only half the rows on a
+     * file-as-Task root — the common case — it is what lets `<>` mean "covers it rather than is it"
+     * in one place.
+     *
+     * One read rather than two flows combined later, because the arms are the same vocabulary in
+     * the same path space and have to be deduped *against each other*. Handed them separately, a
+     * caller would have to decide what a file-as-Task Todo's file is, and that is a rule rather
+     * than a lookup — so it belongs in `FolderListStatus.kt` where a unit test can reach it.
+     *
+     * `FROM sources s JOIN task_imports ti`, not the reverse, so the planner can drive from
+     * `sources(rootUri, relativePath)` and reach `task_imports` through `(sourceId, groupPath)`
+     * rather than scanning every Task in the database. Both arms filter `:rootUri` on both sides,
+     * which is what makes "arm one subsumes arm two's equal-path rows" exactly true. `ORDER BY`
+     * because a compound select has no order of its own, and owners that reordered between two
+     * reads of unchanged data would be a flicker with no cause.
+     */
+    @Query(
+        """
+        SELECT ti.groupPath AS relativePath,
+               ti.groupPath AS groupPath,
+               s.id AS sourceId,
+               s.displayName AS sourceName,
+               ti.taskId AS taskId,
+               ti.displayName AS taskName
+        FROM sources s
+        JOIN task_imports ti ON ti.sourceId = s.id
+        WHERE s.rootUri = :rootUri
+        UNION ALL
+        SELECT a.relativePath AS relativePath,
+               ti.groupPath AS groupPath,
+               s.id AS sourceId,
+               s.displayName AS sourceName,
+               a.taskId AS taskId,
+               ti.displayName AS taskName
+        FROM assets a
+        JOIN task_imports ti ON ti.taskId = a.taskId
+        JOIN sources s ON s.id = ti.sourceId
+        WHERE a.rootUri = :rootUri
+          AND s.rootUri = :rootUri
+          AND a.relativePath IS NOT NULL
+          AND ti.groupPath <> a.relativePath
+        ORDER BY relativePath
+        """
+    )
+    abstract fun observeFileClaims(rootUri: String): Flow<List<FileClaim>>
+
+    /**
+     * Every Task over one file, with its Todo and what that Todo decided — the drill-in behind a
+     * marked row.
+     *
+     * Keyed by the file rather than by a Task, because the question being answered is the one the
+     * browser's mark raises: *which* Todos, and do they agree. Deliberately per file rather than
+     * for the whole screen — a folder of shared files would answer with a row per Task over every
+     * one of them, and nothing shows that until something is expanded.
+     */
+    @Query(
+        """
+        SELECT s.id AS sourceId,
+               s.displayName AS sourceName,
+               ti.taskId AS taskId,
+               ti.displayName AS taskName,
+               COALESCE(ti.groupPath = a.relativePath, 0) AS isOwnTask,
+               ts.isCompleted AS isCompleted,
+               ts.isFavorite AS isFavorite,
+               ts.customActions AS customActions
+        FROM assets a
+        JOIN task_imports ti ON ti.taskId = a.taskId
+        JOIN sources s ON s.id = ti.sourceId
+        JOIN task_state ts ON ts.taskId = ti.taskId
+        WHERE a.rootUri = :rootUri AND a.relativePath = :relativePath
+        ORDER BY s.createdAt, s.id
+        """
+    )
+    abstract suspend fun getSharedFileStates(
+        rootUri: String,
+        relativePath: String
+    ): List<SharedFileState>
 
     /**
      * The decisions currently held for these files, for a folder-resolved review queue.
@@ -879,19 +1049,20 @@ abstract class ListsDao {
     @Query(
         """
         SELECT frs.id AS id,
-               COALESCE(li.publicId, frs.publicId) AS publicId,
+               COALESCE(MAX(li.publicId), frs.publicId) AS publicId,
                frs.rootUri AS rootUri,
                frs.relativePath AS relativePath,
-               COALESCE(ts.isCompleted, 0) AS isCompleted,
-               COALESCE(ts.isFavorite, 0) AS isFavorite,
-               COALESCE(ts.customActions, '') AS customActions,
-               COALESCE(a.sourceMissing, 0) AS sourceMissing,
+               COALESCE(MAX(ts.isCompleted), 0) AS isCompleted,
+               COALESCE(MAX(ts.isFavorite), 0) AS isFavorite,
+               COALESCE(MAX(ts.customActions), '') AS customActions,
+               COALESCE(MAX(a.sourceMissing), 0) AS sourceMissing,
                frs.updatedAt AS updatedAt
         FROM file_review_state frs
         LEFT JOIN assets a ON a.rootUri = frs.rootUri AND a.relativePath = frs.relativePath
         LEFT JOIN legacy_item_ids li ON li.assetId = a.id
         LEFT JOIN task_state ts ON ts.taskId = a.taskId
         WHERE frs.rootUri = :rootUri AND frs.relativePath IN (:relativePaths)
+        GROUP BY frs.relativePath
         """
     )
     abstract fun observeFileStates(
@@ -911,19 +1082,20 @@ abstract class ListsDao {
     @Query(
         """
         SELECT frs.id AS id,
-               COALESCE(li.publicId, frs.publicId) AS publicId,
+               COALESCE(MAX(li.publicId), frs.publicId) AS publicId,
                frs.rootUri AS rootUri,
                frs.relativePath AS relativePath,
-               COALESCE(ts.isCompleted, 0) AS isCompleted,
-               COALESCE(ts.isFavorite, 0) AS isFavorite,
-               COALESCE(ts.customActions, '') AS customActions,
-               COALESCE(a.sourceMissing, 0) AS sourceMissing,
+               COALESCE(MAX(ts.isCompleted), 0) AS isCompleted,
+               COALESCE(MAX(ts.isFavorite), 0) AS isFavorite,
+               COALESCE(MAX(ts.customActions), '') AS customActions,
+               COALESCE(MAX(a.sourceMissing), 0) AS sourceMissing,
                frs.updatedAt AS updatedAt
         FROM file_review_state frs
         LEFT JOIN assets a ON a.rootUri = frs.rootUri AND a.relativePath = frs.relativePath
         LEFT JOIN legacy_item_ids li ON li.assetId = a.id
         LEFT JOIN task_state ts ON ts.taskId = a.taskId
         WHERE frs.rootUri = :rootUri AND frs.relativePath IN (:relativePaths)
+        GROUP BY frs.relativePath
         """
     )
     abstract suspend fun getFileStates(
@@ -1242,6 +1414,16 @@ abstract class ListsDao {
      * fills as files arrive rather than in one pass, because there is no later point at which
      * every file is known; `OR IGNORE` is what lets both call sites run without asking which of
      * them got there first.
+     *
+     * **One Asset per file is named, and it is the first one to be named that keeps it.** The
+     * table's key is the Asset, which was the same thing as the file while a file could only be
+     * one Task's; now that two Todos may hold it, naming every Asset at a path would hand two
+     * Tasks the same id and a receiver two rows it cannot tell apart. So the row goes to one of
+     * them — the `NOT EXISTS` guard means whichever Asset is named first is the only one ever
+     * named, and every later Task over that file takes its own name from [legacyTaskId] instead,
+     * the same way a multi-Asset Task does. The rest of the file's readers are unaffected either
+     * way: the file-state reads fall back to the registration's own `publicId`, which is the same
+     * string, on every row that has no Asset to have copied it to.
      */
     @Query(
         """
@@ -1251,6 +1433,15 @@ abstract class ListsDao {
         JOIN file_review_state frs
           ON frs.rootUri = a.rootUri AND frs.relativePath = a.relativePath
         WHERE a.rootUri = :rootUri AND a.relativePath IN (:relativePaths)
+          AND a.id = (
+              SELECT MIN(a2.id) FROM assets a2
+              WHERE a2.rootUri = a.rootUri AND a2.relativePath = a.relativePath
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM legacy_item_ids li
+              JOIN assets named ON named.id = li.assetId
+              WHERE named.rootUri = a.rootUri AND named.relativePath = a.relativePath
+          )
         """
     )
     protected abstract suspend fun assignLegacyItemIds(rootUri: String, relativePaths: List<String>)
@@ -1311,24 +1502,533 @@ abstract class ListsDao {
     @Query("SELECT * FROM sources ORDER BY createdAt DESC, id DESC")
     abstract fun observeSources(): Flow<List<SourceEntity>>
 
+    // ---------------------------------------------------------------------------------------
+    // Upstreams (v16): the folders material comes from, as their own table.
+    //
+    // Read and written through their own handful of queries rather than through the Source ones
+    // above. The two are different objects with different lifetimes — an Upstream is written once
+    // when a folder is picked and never by an import, a Source only ever by one — and the whole
+    // point of v16 is that neither is allowed to answer for the other.
+    // ---------------------------------------------------------------------------------------
+
+    @Query("SELECT * FROM upstreams ORDER BY addedAt DESC, id DESC")
+    abstract fun observeUpstreams(): Flow<List<UpstreamEntity>>
+
+    /** The same, once, for a caller that has to look rather than watch. */
+    @Query("SELECT * FROM upstreams ORDER BY addedAt DESC, id DESC")
+    abstract suspend fun getUpstreams(): List<UpstreamEntity>
+
+    @Query("SELECT * FROM upstreams WHERE id = :id")
+    abstract suspend fun getUpstream(id: String): UpstreamEntity?
+
+    @Query("SELECT * FROM upstreams WHERE rootUri = :rootUri AND relativePath = :relativePath")
+    protected abstract suspend fun upstreamAt(rootUri: String, relativePath: String): UpstreamEntity?
+
+    @Query("SELECT * FROM upstreams WHERE rootUri = :rootUri")
+    protected abstract suspend fun upstreamsForRoot(rootUri: String): List<UpstreamEntity>
+
+    @Insert
+    protected abstract suspend fun insertUpstream(upstream: UpstreamEntity)
+
+    @Query("DELETE FROM upstreams WHERE id = :id")
+    abstract suspend fun deleteUpstream(id: String)
+
+    // --- dissolution ---------------------------------------------------------------------------
+
+    /**
+     * Deletes a Todo and everything reachable only through it, writing its judgments into
+     * `dissolved_task_state` first when [keepState] is set.
+     *
+     * **This is the only path in the app that deletes a Task, and it is the only one that should
+     * ever be.** A Task belongs to exactly one Todo, so when the intention goes the Tasks it
+     * produced go with it — which is what makes the *Todo* the honest unit of abandonment rather
+     * than deleting Tasks one at a time. Nothing here reads an Asset count, or anything else about
+     * a Task's shape: `ARCHITECTURE.md` forbids deriving lifetime from structure, and the one place
+     * that gets near it (an import told to drop a Task, step 2b) is an explicit policy a user names
+     * rather than an inference this function makes.
+     *
+     * **The order is the whole of the safety**, and two foreign keys enforce it rather than a
+     * comment doing so. `list_items.taskId` is `NO ACTION`, so a membership left behind fails the
+     * delete loudly instead of a Task being taken by cascade; `task_imports.sourceId` is `NO ACTION`
+     * too, so the provenance rows must fall with their Tasks before the Source can go.
+     *
+     * 1. read the Source, the Task count and the Lists that hold them — a snapshot's `sourceName`
+     *    and the report both need facts that will not exist a moment later;
+     * 2. snapshot, **before** anything is removed, or there is nothing left to copy;
+     * 3. memberships;
+     * 4. Tasks, which cascade `assets`, `task_state`, `task_imports` and the legacy id links;
+     * 5. the Source row;
+     * 6. tell each List that lost rows, so none of them silently gets shorter.
+     *
+     * Returns `null` when the Todo is already gone, having touched nothing. The caller reaches this
+     * from a card it just drew, so the race is theoretical — but a delete that guessed past a
+     * missing Source would be a delete that could not report what it did.
+     *
+     * Nothing here touches files on disk, `file_review_state`, `legacy_item_ids` or `review_events`.
+     * The first is not this operation's business. The rest are what makes a dissolution survivable:
+     * a file keeps its public id because `file_review_state.publicId` is keyed by path and outlives
+     * the Task, and history is append-oriented by design, so its rows stay and simply stop being
+     * reachable from anything.
+     */
+    @Transaction
+    open suspend fun deleteTodo(
+        sourceId: String,
+        keepState: Boolean,
+        now: Long
+    ): DissolutionReport? {
+        val source = getSource(sourceId) ?: return null
+        val taskCount = countTasksOfTodo(sourceId)
+        val held = listsHolding(sourceId)
+        if (keepState) snapshotDissolvedState(sourceId, now)
+        deleteListItemsOfTodoTasks(sourceId)
+        deleteTasksOfTodo(sourceId)
+        deleteSourceRow(sourceId)
+        for (row in held) {
+            noteDissolution(row.listId, row.itemCount, now, DissolutionReason.Dissolved.key)
+        }
+        return DissolutionReport(
+            sourceName = source.displayName,
+            deletedTaskCount = taskCount,
+            lists = held,
+            keptState = keepState
+        )
+    }
+
+    /**
+     * How many Tasks this Todo holds. Not `protected`: the confirmation reads it too, so the dialog
+     * can say *"3 Tasks and their decisions"* from the same statement the report will later be built
+     * from, rather than from a second count that could disagree with it.
+     */
+    @Query("SELECT COUNT(*) FROM task_imports WHERE sourceId = :sourceId")
+    abstract suspend fun countTasksOfTodo(sourceId: String): Int
+
+    /**
+     * Every List holding a Task of this Todo, and how many rows of it will go.
+     *
+     * Written against `sourceId` rather than a list of Task ids, so it does not care how large the
+     * Todo is: a file-as-Task Todo over a big folder holds one Task per file, and an `IN (:taskIds)`
+     * would meet the 999-variable ceiling [PathBindChunk] exists for. Joining the provenance rows is
+     * also exactly what the delete below does, so the two cannot drift apart about what "this Todo's
+     * Tasks" means.
+     *
+     * Read twice, for two jobs: by the caller before the dialog is shown, so the confirmation can
+     * name every List rather than total them, and inside the transaction, so each can be told what
+     * it lost.
+     */
+    @Query(
+        """
+        SELECT li.listId AS listId, l.title AS title, COUNT(*) AS itemCount
+        FROM list_items li
+        JOIN lists l ON l.id = li.listId
+        JOIN task_imports ti ON ti.taskId = li.taskId
+        WHERE ti.sourceId = :sourceId
+        GROUP BY li.listId
+        ORDER BY l.createdAt DESC, l.id DESC
+        """
+    )
+    abstract suspend fun listsHolding(sourceId: String): List<ListLosingItems>
+
+    /**
+     * The snapshot itself: one row per Task this Todo holds, keyed by the path the Task was made
+     * over.
+     *
+     * A `LEFT JOIN` to `task_state` with `COALESCE`, because a judgment that was never made is a
+     * fact worth keeping — an unchecked Task's history is what lets a recovery put the *unchecked*
+     * file back to unchecked without touching it, and an inner join would silently drop those rows
+     * and leave a recovery half-applied.
+     *
+     * `s.relativePath` — the Todo's own folder — is copied rather than left to be inferred from the
+     * group paths, because it is what decides which folder offers this history back.
+     */
+    @Query(
+        """
+        INSERT INTO dissolved_task_state
+            (sourceId, sourceName, rootUri, sourcePath, groupPath, importerKind,
+             isCompleted, isFavorite, customActions, dissolvedAt)
+        SELECT ti.sourceId, s.displayName, s.rootUri, s.relativePath, ti.groupPath,
+               s.importerKind, COALESCE(ts.isCompleted, 0), COALESCE(ts.isFavorite, 0),
+               COALESCE(ts.customActions, ''), :now
+        FROM task_imports ti
+        JOIN sources s ON s.id = ti.sourceId
+        LEFT JOIN task_state ts ON ts.taskId = ti.taskId
+        WHERE ti.sourceId = :sourceId
+        """
+    )
+    protected abstract suspend fun snapshotDissolvedState(sourceId: String, now: Long)
+
+    /**
+     * The same removal, for one Task rather than a whole Todo — what `drop` does to a Task whose
+     * content changed.
+     *
+     * **Deliberately the same three steps in the same order**, because a drop takes exactly what a
+     * dissolution takes from the Lists and nothing else: the memberships, then the Task (which
+     * cascades its Assets, its `task_state` and its provenance row), then the note each List is left
+     * with. The one thing it does *not* do is snapshot — a history belongs to a Todo, and a Task
+     * re-minted in place under a Todo that still exists has no dissolution to be recovered from.
+     *
+     * The reason on the note is the other difference, and it is the whole point of the reason
+     * column: a List that loses a membership here was not orphaned by a delete, and saying it was
+     * would be the note lying in the voice of the feature that exists to stop it lying.
+     */
+    protected suspend fun dropTask(taskId: String, now: Long) {
+        val held = listsHoldingTask(taskId)
+        deleteListItemsOfTask(taskId)
+        deleteTaskRow(taskId)
+        for (row in held) {
+            noteDissolution(row.listId, row.itemCount, now, DissolutionReason.Dropped.key)
+        }
+    }
+
+    /**
+     * Every List holding one Task, and how many rows of it will go.
+     *
+     * The per-Task twin of [listsHolding], and separate from it rather than parameterised over a
+     * task-id list: the two are asked at different times about different things, and the Todo-wide
+     * one is written against `sourceId` precisely so it never has to bind a list of ids.
+     */
+    @Query(
+        """
+        SELECT li.listId AS listId, l.title AS title, COUNT(*) AS itemCount
+        FROM list_items li
+        JOIN lists l ON l.id = li.listId
+        WHERE li.taskId = :taskId
+        GROUP BY li.listId
+        ORDER BY l.createdAt DESC, l.id DESC
+        """
+    )
+    protected abstract suspend fun listsHoldingTask(taskId: String): List<ListLosingItems>
+
+    @Query("DELETE FROM list_items WHERE taskId = :taskId")
+    protected abstract suspend fun deleteListItemsOfTask(taskId: String)
+
+    @Query("DELETE FROM tasks WHERE id = :taskId")
+    protected abstract suspend fun deleteTaskRow(taskId: String)
+
+    /**
+     * Forgets everything a Task was judged to be, keeping the Task.
+     *
+     * The `reset` tier's whole write. A row that is *updated* to empty rather than deleted, for the
+     * same reason every read joins `task_state` without a `COALESCE` on the state columns: a Task
+     * whose judgment is gone and a Task that was never judged are the same thing to every reader,
+     * and `updatedAt` is where the difference between "cleared now" and "never touched" is kept.
+     *
+     * The `WHERE` finds nothing when the Task has no row, which is the ordinary case for a Task
+     * nobody has judged — there is nothing to clear and nothing to create.
+     */
+    @Query(
+        """
+        UPDATE task_state
+        SET isCompleted = 0,
+            isFavorite = 0,
+            customActions = '',
+            updatedAt = :now
+        WHERE taskId = :taskId
+        """
+    )
+    protected abstract suspend fun clearTaskState(taskId: String, now: Long)
+
+    @Query(
+        "DELETE FROM list_items WHERE taskId IN " +
+            "(SELECT taskId FROM task_imports WHERE sourceId = :sourceId)"
+    )
+    protected abstract suspend fun deleteListItemsOfTodoTasks(sourceId: String)
+
+    @Query(
+        "DELETE FROM tasks WHERE id IN " +
+            "(SELECT taskId FROM task_imports WHERE sourceId = :sourceId)"
+    )
+    protected abstract suspend fun deleteTasksOfTodo(sourceId: String)
+
+    @Query("DELETE FROM sources WHERE id = :sourceId")
+    protected abstract suspend fun deleteSourceRow(sourceId: String)
+
+    /**
+     * Leaves the note that says this List lost rows, and which operation took them.
+     *
+     * The reason travels with the count rather than being inferred later, because it cannot be: the
+     * rows are gone by the time anyone reads the note, and the two causes leave nothing behind that
+     * tells them apart. See [DissolutionReason].
+     */
+    @Query(
+        """
+        UPDATE lists
+        SET lastDissolvedCount = :count,
+            lastDissolvedAt = :now,
+            lastDissolvedReason = :reason
+        WHERE id = :listId
+        """
+    )
+    protected abstract suspend fun noteDissolution(
+        listId: Long,
+        count: Int,
+        now: Long,
+        reason: String
+    )
+
+    /**
+     * Forgets a dissolution note, because the List it was about has taken on rows since.
+     *
+     * A note says *this List lost 3 items when that Todo was deleted*. It is about a moment, and a
+     * List that has gained a membership is no longer the List it was written about — after a
+     * re-sync puts the files back, a note still reading "3 items removed" is a screen contradicting
+     * itself. Cleared by the two operations that can add a membership to an existing List,
+     * [addTasksToList] and [applyReconcile], rather than by a screen or a timer: whether a List has
+     * moved on is a fact about its rows, and nothing outside this file can know it.
+     *
+     * Guarded at the call sites by the same condition that adds rows, so a re-sync that found
+     * nothing new leaves the note standing.
+     */
+    @Query("UPDATE lists SET lastDissolvedCount = NULL, lastDissolvedAt = NULL WHERE id = :listId")
+    protected abstract suspend fun clearDissolutionNote(listId: Long)
+
+    /**
+     * The histories one folder can offer back, newest first. One row per dissolved Todo, not per
+     * Task — [DissolvedHistory.taskCount] is how many judgments it holds.
+     *
+     * Scoped to the Todo's own folder rather than the grant root, because a recovery belongs to the
+     * place the intention was made: a Todo dissolved over `Holiday/` is offered when something is
+     * imported at `Holiday/`, not when anything is imported anywhere under the same grant.
+     *
+     * Ordered newest first so the picker opens on the most recent abandonment, which is the one a
+     * user who just changed their mind is looking for.
+     */
+    @Query(
+        """
+        SELECT sourceId AS sourceId,
+               MAX(sourceName) AS sourceName,
+               MAX(importerKind) AS importerKind,
+               COUNT(*) AS taskCount,
+               MAX(dissolvedAt) AS dissolvedAt
+        FROM dissolved_task_state
+        WHERE rootUri = :rootUri AND sourcePath = :sourcePath
+        GROUP BY sourceId
+        ORDER BY dissolvedAt DESC
+        """
+    )
+    abstract suspend fun dissolvedHistoriesAt(
+        rootUri: String,
+        sourcePath: String
+    ): List<DissolvedHistory>
+
+    /**
+     * Copies one history's judgments onto the Tasks a new import has just minted.
+     *
+     * **A recovery is a copy into the new Todo, not a resurrection of the old Tasks.** Nothing about
+     * the dissolved Tasks comes back — they had no ids worth keeping and no surroundings left to
+     * return to — so what moves is the judgment and the path it was about, onto whatever Task now
+     * sits at that path. That is also why a path the new import did not produce recovers nothing:
+     * the old List's missing rows stay missing, which is what "nothing missing from the old List
+     * comes back" means in practice.
+     *
+     * Match is `(rootUri, groupPath)` and nothing else. A history whose grouping rule differs from
+     * the new Todo's therefore matches nothing at all — dissolve a folder-as-Task Todo and re-import
+     * the same folder file-as-Task, and the group paths will not line up. That is honest rather than
+     * broken: the judgments were about *groups*, and the new Todo has no such groups. The picker is
+     * what should say so, by reporting how many rows a recovery would carry before it is chosen.
+     *
+     * **One history at a time**, enforced by taking a single [dissolvedSourceId]: two histories at
+     * one folder are two separate questions, and a run that took some Tasks from one and some from
+     * another would produce a Todo that never existed as an intention.
+     *
+     * Read then write, rather than one `UPDATE … FROM`: SQLite gained `UPDATE … FROM` in 3.33 and
+     * `minSdk = 24` ships 3.9, so the join is done here and the writes are addressed by id.
+     */
+    @Transaction
+    open suspend fun recoverStateFrom(
+        dissolvedSourceId: String,
+        newSourceId: String,
+        now: Long
+    ): Int {
+        val matches = recoveryMatches(dissolvedSourceId, newSourceId)
+        for (row in matches) {
+            writeRecoveredState(row.taskId, row.isCompleted, row.isFavorite, row.customActions, now)
+        }
+        return matches.size
+    }
+
+    /**
+     * The new Tasks one history has something to say about, and what it has to say.
+     *
+     * `JOIN sources` rather than trusting `task_imports` for the root, because provenance rows carry
+     * no `rootUri` of their own — the grant lives on the Todo — and a match across two grants would
+     * be a match between two different folders that happen to share a relative path.
+     */
+    @Query(
+        """
+        SELECT ti.taskId AS taskId,
+               d.isCompleted AS isCompleted,
+               d.isFavorite AS isFavorite,
+               d.customActions AS customActions
+        FROM task_imports ti
+        JOIN sources s ON s.id = ti.sourceId
+        JOIN dissolved_task_state d
+          ON d.rootUri = s.rootUri AND d.groupPath = ti.groupPath
+        WHERE ti.sourceId = :newSourceId AND d.sourceId = :dissolvedSourceId
+        """
+    )
+    protected abstract suspend fun recoveryMatches(
+        dissolvedSourceId: String,
+        newSourceId: String
+    ): List<RecoveredTaskState>
+
+    @Query(
+        """
+        UPDATE task_state
+           SET isCompleted = :isCompleted,
+               isFavorite = :isFavorite,
+               customActions = :customActions,
+               updatedAt = :now
+         WHERE taskId = :taskId
+        """
+    )
+    protected abstract suspend fun writeRecoveredState(
+        taskId: String,
+        isCompleted: Boolean,
+        isFavorite: Boolean,
+        customActions: String,
+        now: Long
+    )
+
+    /**
+     * Registers a folder as an Upstream, or returns the one already there.
+     *
+     * Registering says nothing beyond *here is where material is*: no importer, no tree, no run.
+     * Two Upstreams may nest freely, and an Upstream may contain any number of Todos, because an
+     * Upstream is a place and a Todo is a decision taken about part of one. The only thing refused
+     * is the same folder twice, which is answered by handing back the row that is already there —
+     * and that is the one place it still differs from [registerSource], which mints a second row
+     * because for an import a second row is a second intention rather than a duplicate.
+     */
+    @Transaction
+    open suspend fun registerUpstream(
+        rootUri: String,
+        relativePath: String,
+        displayName: String,
+        now: Long
+    ): UpstreamEntity {
+        upstreamAt(rootUri, relativePath)?.let { return it }
+        val upstream = UpstreamEntity(
+            id = UUID.randomUUID().toString(),
+            rootUri = rootUri,
+            relativePath = relativePath,
+            displayName = displayName,
+            addedAt = now
+        )
+        insertUpstream(upstream)
+        return upstream
+    }
+
+    /**
+     * The Upstreams that share a grant, for the removal check and for naming a folder.
+     *
+     * Public rather than protected, unlike [upstreamsForRoot]'s Source counterpart: with several
+     * folders granted at once there is no single "the root" left to ask about, so a caller that
+     * needs to know whether a grant is still in use asks about the grant.
+     */
+    open suspend fun upstreamsUnder(rootUri: String): List<UpstreamEntity> = upstreamsForRoot(rootUri)
+
+    /**
+     * The Sources surface's one query: every Source with the size of its catalog.
+     *
+     * A left join, so a Source that has been registered but not yet run — or whose run imported
+     * nothing — is still a row, reporting zero. Dropping it would make registering a Source look
+     * like it had failed.
+     */
+    @Query(
+        """
+        SELECT s.id AS id,
+               s.rootUri AS rootUri,
+               s.relativePath AS relativePath,
+               s.displayName AS displayName,
+               s.importerKind AS importerKind,
+               s.keepTree AS keepTree,
+               s.contentPolicy AS contentPolicy,
+               s.followUpstream AS followUpstream,
+               s.keepStateOnDelete AS keepStateOnDelete,
+               s.lastImportAt AS lastImportAt,
+               s.lastImportStatus AS lastImportStatus,
+               COUNT(ti.taskId) AS taskCount
+        FROM sources s
+        LEFT JOIN task_imports ti ON ti.sourceId = s.id
+        GROUP BY s.id
+        ORDER BY s.createdAt DESC, s.id DESC
+        """
+    )
+    abstract fun observeSourceSummaries(): Flow<List<SourceSummary>>
+
+    /** The same, once, for a caller that has to look rather than watch. */
+    @Query(
+        """
+        SELECT s.id AS id,
+               s.rootUri AS rootUri,
+               s.relativePath AS relativePath,
+               s.displayName AS displayName,
+               s.importerKind AS importerKind,
+               s.keepTree AS keepTree,
+               s.contentPolicy AS contentPolicy,
+               s.followUpstream AS followUpstream,
+               s.keepStateOnDelete AS keepStateOnDelete,
+               s.lastImportAt AS lastImportAt,
+               s.lastImportStatus AS lastImportStatus,
+               COUNT(ti.taskId) AS taskCount
+        FROM sources s
+        LEFT JOIN task_imports ti ON ti.sourceId = s.id
+        WHERE s.id = :sourceId
+        GROUP BY s.id
+        """
+    )
+    abstract suspend fun getSourceSummary(sourceId: String): SourceSummary?
+
     @Query("SELECT * FROM sources WHERE rootUri = :rootUri")
     protected abstract suspend fun sourcesForRoot(rootUri: String): List<SourceEntity>
 
-    @Query("SELECT * FROM sources WHERE rootUri = :rootUri AND relativePath = :relativePath")
-    protected abstract suspend fun sourceAt(rootUri: String, relativePath: String): SourceEntity?
+    /**
+     * The Sources registered at exactly this folder, oldest first.
+     *
+     * A list rather than a row, because one folder may back any number of Todos and this is how a
+     * caller finds them: an Upstream browser asking which Todos a folder already has, a dialog
+     * deciding what to say before a second run, a legacy resync asking which Source it came from.
+     * Ordered by registration so a caller that has to choose, or that has to name them all in a
+     * sentence, gets a stable answer rather than whichever row the query returned first.
+     */
+    @Query(
+        "SELECT * FROM sources WHERE rootUri = :rootUri AND relativePath = :relativePath " +
+            "ORDER BY createdAt, id"
+    )
+    abstract suspend fun sourcesAt(rootUri: String, relativePath: String): List<SourceEntity>
 
     @Insert
     protected abstract suspend fun insertSource(source: SourceEntity)
 
     /**
-     * Registers a folder Source, or refuses to.
+     * Registers a new Source over a folder — always a new one, and never refused.
      *
-     * Registration is rejected when another real Source's import root overlaps the requested one —
-     * parent over child or child over parent, by [scopesOverlap] — with the covering Source named in
-     * the answer. Non-overlap is what makes ownership a settled question rather than a race: a Task
-     * can change owner exactly once, from the legacy claim set to the one Source that covers its
-     * file, and never back. An already-registered root is the same Source, returned rather than
-     * re-inserted, so the idempotent "reuse" path and this one agree on the object.
+     * This is the whole of what the release changes about registration, and it is a *deletion*: the
+     * old rule refused a root that overlapped an existing one, and returned the existing row for an
+     * exact match. Both arms are gone, because both were the same claim — that a folder has one
+     * import — and a folder may now back any number of Todos. A second run over a folder is a second
+     * intention, the same market supplying another dish, and it gets its own Source and its own
+     * Tasks rather than joining the rows of the first.
+     *
+     * Nothing is checked before the insert, and there is nothing left to check: a file stopped
+     * belonging to exactly one Task, so an overlapping import root stopped being a collision and
+     * became an ordinary thing for a folder to have. Ownership is settled by the Task instead —
+     * `task_imports.taskId` is a primary key, so a Task has exactly one Source however many Sources
+     * cover its folder.
+     *
+     * The callers that *do* mean an existing Source do not come here. A refresh carries its
+     * `sourceId`; the legacy resync paths read [sourcesAt] and refuse rather than guess; and
+     * [createFolderList] keeps what the folder already had. Reuse is now a decision each caller
+     * makes with a reason, rather than a rule hidden inside registration.
+     *
+     * [keepTree] is normalised rather than trusted: see [normalizeKeepTree]. The caller offers it as
+     * an import option, and this is where the importer's opinion of it becomes the stored fact.
+     *
+     * [contentPolicy] and [followUpstream] arrive from different places on purpose. The policy is
+     * the answer the Create Tasks dialog collected for *this* run, and storing it here is what makes
+     * the next dialog open on it; following the upstream is not asked in that dialog at all, and
+     * comes from Settings as the standing preference a new Todo is born with — after which the
+     * Todo's own card is the only thing that changes it.
      */
     @Transaction
     open suspend fun registerSource(
@@ -1336,24 +2036,11 @@ abstract class ListsDao {
         relativePath: String,
         displayName: String,
         importerKind: ImporterKind,
+        keepTree: Boolean = true,
+        contentPolicy: ContentPolicy = ContentPolicy.Default,
+        followUpstream: Boolean = false,
         now: Long
-    ): RegisterSourceResult = registerSourceInternal(rootUri, relativePath, displayName, importerKind, now)
-
-    /**
-     * The body of [registerSource], split out so a composed operation such as [createFolderList] can
-     * register or reuse a Source inside its own transaction rather than nesting one.
-     */
-    protected open suspend fun registerSourceInternal(
-        rootUri: String,
-        relativePath: String,
-        displayName: String,
-        importerKind: ImporterKind,
-        now: Long
-    ): RegisterSourceResult {
-        sourceAt(rootUri, relativePath)?.let { return RegisterSourceResult.Registered(it) }
-        sourcesForRoot(rootUri)
-            .firstOrNull { scopesOverlap(it.relativePath, relativePath) }
-            ?.let { return RegisterSourceResult.Overlaps(it) }
+    ): SourceEntity {
         val source = SourceEntity(
             id = UUID.randomUUID().toString(),
             rootUri = rootUri,
@@ -1361,20 +2048,92 @@ abstract class ListsDao {
             displayName = displayName,
             importerKind = importerKind.key,
             importerVersion = 1,
-            createdAt = now
+            createdAt = now,
+            keepTree = normalizeKeepTree(importerKind, keepTree),
+            contentPolicy = contentPolicy.key,
+            followUpstream = followUpstream
         )
         insertSource(source)
-        return RegisterSourceResult.Registered(source)
+        return source
     }
 
     /**
-     * The real Source whose import root already covers [relativePath], or null.
+     * Records what an existing Source is called and how it is read.
      *
-     * Non-overlap guarantees at most one, so "a Folder-tab action inside a covering Source" has a
-     * single answer. A Source at the grant root (`relativePath = ''`) covers everything beneath it.
+     * Separate from [registerSource] because they answer two questions: that one brings a Source
+     * into existence, this one says what an existing Source's rule is. They are two writes because
+     * registration writes the row and nothing after it — a caller that only wants a row to hang a
+     * run on passes placeholders for the very fields this one sets, and this is where the answers
+     * the user actually gave replace them.
+     *
+     * The configuration is stored after a run rather than before it, so "nothing was changed" can
+     * still be said of a run that failed. [keepTree] is normalised here exactly as registration
+     * normalises it, so the column cannot hold a value [normalizeKeepTree] calls impossible however
+     * the caller arrived.
+     *
+     * [contentPolicy] is written back from the answer the dialog collected, which is the whole of
+     * "a Todo remembers what it was told": the dialog pre-selects it from this column, so the next
+     * run opens on what the user said last time rather than on what Settings happens to default to.
+     * It is a write even when the answer did not change, because the two are the same statement and
+     * a conditional write would be a second rule about when this one applies.
+     *
+     * `followUpstream` is deliberately **not** here. It is the one policy that acts without being
+     * asked at the moment it acts, and the dialog that carries this call has no control for it —
+     * [setFollowUpstream] on the Todo's own card is its only writer, and a run that quietly reset a
+     * switch it was never shown would be the app answering a question nobody asked it.
      */
-    open suspend fun findCoveringSource(rootUri: String, relativePath: String): SourceEntity? =
-        sourcesForRoot(rootUri).firstOrNull { isAncestorOrSame(it.relativePath, relativePath) }
+    open suspend fun configureSource(
+        id: String,
+        displayName: String,
+        importerKind: ImporterKind,
+        keepTree: Boolean,
+        contentPolicy: ContentPolicy = ContentPolicy.Default
+    ) = setSourceConfig(
+        id,
+        displayName,
+        importerKind.key,
+        normalizeKeepTree(importerKind, keepTree),
+        contentPolicy.key
+    )
+
+    /**
+     * The two standings a Todo card's overflow can change about the Todo itself.
+     *
+     * Both are writes to a policy, not to a run, and both are separate statements rather than one
+     * because the switches are independent: a user may want a Todo to follow its upstream and to
+     * keep its decisions when deleted, or either on its own.
+     */
+    @Query("UPDATE sources SET keepStateOnDelete = :keep WHERE id = :id")
+    abstract suspend fun setKeepStateOnDelete(id: String, keep: Boolean)
+
+    @Query("UPDATE sources SET followUpstream = :follow WHERE id = :id")
+    abstract suspend fun setFollowUpstream(id: String, follow: Boolean)
+
+    /**
+     * Every Source whose import root covers [relativePath], nearest first.
+     *
+     * A list, because covering stopped being a question with one answer. Two Todos may be rooted at
+     * the same folder, and a Todo may be rooted at an Upstream while another is rooted at a folder
+     * inside that Upstream's tree — the nested arrangement [scopesOverlap] used to refuse, and which
+     * is now an ordinary thing for a folder to have. A Source at the grant root (`relativePath = ''`)
+     * covers everything beneath it.
+     *
+     * Nearest first, because that is what "which Todo does this browsed folder belong to" wants:
+     * the deepest root is the one whose run covered the folder most directly. Ties are broken by
+     * registration order, so the answer is stable rather than whichever row the query returned.
+     *
+     * **A caller that means to *write* must not take the first element and move on.** With several
+     * Sources covering one path there is no fact of the matter about which one was meant, and
+     * choosing is worse than declining — see `requestResync`, which refuses and names them.
+     */
+    open suspend fun sourcesCovering(rootUri: String, relativePath: String): List<SourceEntity> =
+        sourcesForRoot(rootUri)
+            .filter { isAncestorOrSame(it.relativePath, relativePath) }
+            .sortedWith(
+                compareByDescending<SourceEntity> { it.relativePath.length }
+                    .thenBy { it.createdAt }
+                    .thenBy { it.id }
+            )
 
     /**
      * One import run: turn a [ImportPlan] into Tasks, Assets and provenance, inside one transaction.
@@ -1385,28 +2144,49 @@ abstract class ListsDao {
      * may only be set for Assets inside [coverage]; an Asset outside it was not looked at and has
      * nothing new said about it.
      *
-     * Nothing is ever deleted by a run, whatever the outcome: missing material is flagged, never
-     * removed, and a conflict leaves the affected Task untouched while the rest proceeds. The Source
+     * **The one thing a run can delete is a Task its Todo's `drop` policy says to replace** — an
+     * explicit, standing instruction the user gave about this material, and never an inference this
+     * function draws. Everything else holds: missing material is flagged, never removed; a conflict
+     * leaves the affected Task untouched while the rest proceeds; and an Asset is never deleted on
+     * any path, because a file Listea can no longer see is not a file Listea may forget. The Source
      * row's `lastImportAt` / `lastImportStatus` are the durable summary; the result is returned and
      * shown, then dropped.
+     *
+     * [contentPolicy] is the answer this run is being asked under, and null means the Todo's stored
+     * one. It is a parameter rather than a read of `sources.contentPolicy` because the two can
+     * legitimately differ for the length of one run: the import dialog asks the question and runs on
+     * the answer, while the Todo's own row is only written back afterwards. Reading the row here
+     * would answer with the value the run is replacing, and a user who chose *Replace the Task* and
+     * pressed Refresh would watch the tier do nothing — the control promising a consequence the run
+     * in front of them does not have.
      */
     @Transaction
     open suspend fun runImport(
         sourceId: String,
         coverage: String,
         plan: ImportPlan,
-        now: Long
-    ): ImportResult = runImportInternal(sourceId, coverage, plan, now)
+        now: Long,
+        recoverFrom: String? = null,
+        contentPolicy: ContentPolicy? = null
+    ): ImportResult = runImportInternal(sourceId, coverage, plan, now, recoverFrom, contentPolicy)
 
     /**
      * The body of [runImport], split out so a composed operation such as [createFolderList] can run
      * the import inside its own transaction rather than nesting one.
+     *
+     * [recoverFrom] names a dissolved Todo whose history this run's Tasks should be born knowing. It
+     * is a parameter here rather than a second call by the caller so that the writing and the
+     * recovering share one transaction: a run that wrote Tasks and then failed to load the
+     * decisions it was asked to load would be a run that half-did the thing it was asked to do, and
+     * there is nothing the caller could do with that.
      */
     protected open suspend fun runImportInternal(
         sourceId: String,
         coverage: String,
         plan: ImportPlan,
-        now: Long
+        now: Long,
+        recoverFrom: String? = null,
+        contentPolicy: ContentPolicy? = null
     ): ImportResult {
         val source = getSource(sourceId) ?: return ImportResult(outcome = ImportOutcome.FAILED)
         val importer = ImporterKind.fromKey(source.importerKind)
@@ -1418,16 +2198,52 @@ abstract class ListsDao {
             return ImportResult(outcome = ImportOutcome.FAILED)
         }
 
-        val owned = taskImportsForSource(sourceId).associateBy { it.groupPath }
+        val imports = taskImportsForSource(sourceId)
+        val owned = imports.associateBy { it.groupPath }.toMutableMap()
         val plannedPaths = plan.tasks.flatMap { it.assets }.map { it.rootRelativePath }.toSet()
 
         var created = 0
         var adopted = 0
         var reconciled = 0
+        var reset = 0
+        var dropped = 0
         var assetsCreated = 0
         var assetsUpdated = 0
         var assetsMissing = 0
         val conflicts = mutableListOf<ImportConflict>()
+
+        // What this run would change about each Task the Todo already holds, and what the Todo's
+        // own content policy makes of that change. Decided here, before a row is written, because
+        // the answer has to reach both of the loops below: the plan's Tasks, and the Assets the
+        // plan no longer names — and a Task whose content has all gone appears in the second and
+        // never in the first. One computation, one decision, both paths reading it.
+        val decisions = taskChanges(
+            coverage = coverage,
+            imports = imports,
+            assets = assetsForSource(sourceId),
+            planned = plan.tasks,
+            plannedPaths = plannedPaths
+        ).mapNotNull { change ->
+            val decision = decideContentDecision(
+                policy = contentPolicy ?: ContentPolicy.fromKey(source.contentPolicy),
+                added = change.added,
+                missing = change.missing,
+                assetCount = change.assetCount
+            )
+            if (decision == ContentDecision.KEEP) null else change to decision
+        }
+
+        // Drops are applied first, and before the plan is walked rather than during it: a dropped
+        // Task has to be gone from `owned` by the time the plan reaches its groupPath, so the run
+        // mints a replacement in the same pass instead of reconciling a Task it is about to delete.
+        // Nothing is minted here — the plan still does all of that — and a dropped Task the plan
+        // has nothing to say about (its content has all gone) simply leaves nothing behind.
+        for ((change, decision) in decisions) {
+            if (decision != ContentDecision.DROP) continue
+            dropTask(change.taskId, now)
+            owned.remove(change.groupPath)
+            dropped++
+        }
 
         for (task in plan.tasks) {
             val existing = owned[task.groupPath]
@@ -1448,6 +2264,16 @@ abstract class ListsDao {
             }
         }
 
+        // Resets come after the loop, because a Task under `reset` keeps its identity but not
+        // necessarily its place in the plan: a file-as-Task Task whose one file has gone is
+        // reconciled by no line above, and its judgment is exactly what the policy says to clear.
+        // A Task that was dropped is not reachable here — its replacement has a different id.
+        for ((change, decision) in decisions) {
+            if (decision != ContentDecision.RESET) continue
+            clearTaskState(change.taskId, now)
+            reset++
+        }
+
         // A file the plan no longer names, inside the scope that was authoritatively scanned, has
         // gone missing. Marked, never deleted, and never for an Asset outside the coverage: a
         // scoped refresh must not reach past the folder it scanned.
@@ -1461,9 +2287,19 @@ abstract class ListsDao {
 
         // A file registered before this run is owed its wire name; naming catches up once the Asset
         // exists, whichever arrived first. A fresh import with no registrations is a no-op.
-        if (plannedPaths.isNotEmpty()) {
-            assignLegacyItemIds(source.rootUri, plannedPaths.toList())
+        //
+        // Chunked, because this is the one statement in the app that can be asked to name a whole
+        // folder at once and the binding ceiling is real on the API levels this build supports
+        // (§14.10). A folder bigger than one chunk is not an error, it is a longer import.
+        plannedPaths.toList().chunked(PathBindChunk).forEach { chunk ->
+            assignLegacyItemIds(source.rootUri, chunk)
         }
+
+        // Last, and only if asked: the Tasks have to exist before a history can say anything about
+        // them, so this cannot move above the loop. An unmatched history is not a failure — it
+        // recovers fewer Tasks than it holds and the run reports the number it actually reached,
+        // which is what lets the dialog warn before the fact and the report be honest after it.
+        val recovered = recoverFrom?.let { recoverStateFrom(it, sourceId, now) } ?: 0
 
         updateSourceStatus(sourceId, now, if (conflicts.isEmpty()) ImportOutcome.COMPLETE.key else ImportOutcome.PARTIAL.key)
 
@@ -1472,6 +2308,9 @@ abstract class ListsDao {
             tasksCreated = created,
             tasksAdopted = adopted,
             tasksReconciled = reconciled,
+            tasksReset = reset,
+            tasksDropped = dropped,
+            tasksRecovered = recovered,
             assetsCreated = assetsCreated,
             assetsUpdated = assetsUpdated,
             assetsMarkedMissing = assetsMissing,
@@ -1488,6 +2327,38 @@ abstract class ListsDao {
         """
     )
     protected abstract suspend fun assetsForSource(sourceId: String): List<AssetEntity>
+
+    /**
+     * Whether a run over [coverage] would change anything this Todo holds — the question a Todo
+     * that follows its upstream asks before it writes anything at all.
+     *
+     * Read-only, and the same [taskChanges] the run itself decides on, asked through the same three
+     * reads. That is the point of it living here rather than in the caller: a card that said "up to
+     * date" while the run it was describing would reset three Tasks would be two answers to one
+     * question, and the one that acted would be the one nobody read.
+     *
+     * A plan costs nothing to hold: it is what the folder walk already produced, and this is the
+     * second reader of it. Nothing is written on either branch.
+     */
+    open suspend fun sourceHasChanges(
+        sourceId: String,
+        coverage: String,
+        plan: ImportPlan
+    ): Boolean {
+        val imports = taskImportsForSource(sourceId)
+        if (imports.isEmpty()) return plan.tasks.isNotEmpty()
+        val plannedPaths = plan.tasks.flatMap { it.assets }.map { it.rootRelativePath }.toSet()
+        return hasSourceChanges(
+            changes = taskChanges(
+                coverage = coverage,
+                imports = imports,
+                assets = assetsForSource(sourceId),
+                planned = plan.tasks,
+                plannedPaths = plannedPaths
+            ),
+            planned = plan.tasks
+        )
+    }
 
     @Query("SELECT * FROM task_imports WHERE sourceId = :sourceId")
     protected abstract suspend fun taskImportsForSource(sourceId: String): List<TaskImportEntity>
@@ -1527,8 +2398,38 @@ abstract class ListsDao {
         return id
     }
 
+    /**
+     * Any Asset at a locator, whichever Task holds it.
+     *
+     * Not "the" Asset, because there may be several: a file under two Todos is the content of two
+     * Tasks. Only used to ask whether *somebody* holds a file and whether that somebody is a Source
+     * at all — the question "does **this** Source already hold it" is [assetOfSourceAt]'s, and the
+     * two are asked in that order so that a second Todo's Task is never mistaken for a collision.
+     */
     @Query("SELECT * FROM assets WHERE rootUri = :rootUri AND relativePath = :relativePath")
     protected abstract suspend fun assetByLocator(rootUri: String, relativePath: String): AssetEntity?
+
+    /**
+     * The Asset this Source's own imports put at a locator, or null.
+     *
+     * Scoped by `task_imports` rather than by the locator alone, and that scoping *is* the release:
+     * a file reached through another Todo is that Todo's Task and says nothing about this one. What
+     * is left for this query to find is this Source holding a file under a Task its own grouping
+     * rule no longer produces, which is a real disagreement and still a conflict.
+     */
+    @Query(
+        """
+        SELECT a.* FROM assets a
+        JOIN task_imports ti ON ti.taskId = a.taskId
+        WHERE ti.sourceId = :sourceId AND a.rootUri = :rootUri AND a.relativePath = :relativePath
+        LIMIT 1
+        """
+    )
+    protected abstract suspend fun assetOfSourceAt(
+        sourceId: String,
+        rootUri: String,
+        relativePath: String
+    ): AssetEntity?
 
     @Query("SELECT * FROM assets WHERE taskId = :taskId")
     protected abstract suspend fun assetsForTask(taskId: String): List<AssetEntity>
@@ -1553,6 +2454,18 @@ abstract class ListsDao {
 
     @Query("UPDATE sources SET lastImportAt = :at, lastImportStatus = :status WHERE id = :id")
     protected abstract suspend fun updateSourceStatus(id: String, at: Long, status: String)
+
+    @Query(
+        "UPDATE sources SET displayName = :displayName, importerKind = :importerKind, " +
+            "keepTree = :keepTree, contentPolicy = :contentPolicy WHERE id = :id"
+    )
+    protected abstract suspend fun setSourceConfig(
+        id: String,
+        displayName: String,
+        importerKind: String,
+        keepTree: Boolean,
+        contentPolicy: String
+    )
 
     /**
      * The catalog's SQL half: a Task's state and Asset measurements, aggregated per Task. The
@@ -1623,6 +2536,21 @@ abstract class ListsDao {
     @Query("SELECT * FROM task_state WHERE taskId IN (:taskIds)")
     abstract suspend fun getTaskStates(taskIds: List<String>): List<TaskStateEntity>
 
+    /**
+     * The same, as a live read: the decisions a review round draws while it is open.
+     *
+     * A round freezes *which* items it walks, but it must not freeze what has been decided about
+     * them — checking a Task or tagging it is the normal way through a round, and a surface that
+     * drew its controls from the queue it built on entry would write every tap to the database
+     * and show nothing. `task_state` is what Room invalidates on, so a decision taken here, on a
+     * List behind it or in a folder round elsewhere re-emits and is drawn in the same frame.
+     *
+     * A filter and not a `@Transaction` list read, because this one is watched: it has to stay a
+     * single observable query whose only moving part is the rows a round is actually holding.
+     */
+    @Query("SELECT * FROM task_state WHERE taskId IN (:taskIds)")
+    abstract fun observeTaskStates(taskIds: List<String>): Flow<List<TaskStateEntity>>
+
     private class ReconcileDelta(val created: Int, val updated: Int)
 
     /** A Task this Source already owns: update it in place, adding new Assets and measuring old ones. */
@@ -1672,6 +2600,17 @@ abstract class ListsDao {
     /**
      * A planned Task this Source has no row for yet. Its file locators decide whether it is brand
      * new, adopted from the legacy claim set, or in conflict with an existing Task.
+     *
+     * **Another Source holding a file is not a conflict.** It is the ordinary case this release
+     * exists for: a second Todo over a folder plans its own Tasks over the same files, and the two
+     * decisions about one picture are meant to be separate. So the question asked per file is not
+     * "does anybody hold this" but "does *this* Source already hold it" — [assetOfSourceAt] — and
+     * only that answer can stop a Task being written.
+     *
+     * What is left as a conflict is the Source disagreeing with itself: a file it already holds
+     * under a Task whose grouping rule now puts that file elsewhere. That is a real contradiction
+     * and it is settled the same way it always was, by not writing the Task and saying which one
+     * holds the file.
      */
     private suspend fun resolveNewTask(
         source: SourceEntity,
@@ -1681,18 +2620,22 @@ abstract class ListsDao {
     ): NewTaskDelta {
         var adoptTaskId: String? = null
         for (asset in task.assets) {
-            val existing = assetByLocator(source.rootUri, asset.rootRelativePath) ?: continue
-            val ownerTaskId = existing.taskId
-            val owner = taskImportForTask(ownerTaskId)
-            if (owner != null) {
-                // Owned by a Source. A locator already claimed is never silently moved.
+            assetOfSourceAt(source.id, source.rootUri, asset.rootRelativePath)?.let { owned ->
                 return NewTaskDelta(
                     conflict = ImportConflict(
                         relativePath = asset.rootRelativePath,
-                        ownerLabel = if (owner.sourceId == source.id) "this Source" else "another Source",
-                        taskId = ownerTaskId
+                        ownerLabel = "this Source",
+                        taskId = owned.taskId
                     )
                 )
+            }
+
+            val existing = assetByLocator(source.rootUri, asset.rootRelativePath) ?: continue
+            val ownerTaskId = existing.taskId
+            if (taskImportForTask(ownerTaskId) != null) {
+                // Held by another Source's Task. A Task of this Source's own is written beside it,
+                // sharing the file and sharing nothing else.
+                continue
             }
             // A free file-backed Task: legacy-claimed, or minted by an older migration before the
             // claim set existed. A file-as-Task run planning exactly this one file can adopt it; a
@@ -1720,10 +2663,11 @@ abstract class ListsDao {
             )
             deleteLegacyClaim(adoptTaskId)
             val asset = task.assets.single()
-            val existing = assetByLocator(source.rootUri, asset.rootRelativePath)
-            if (existing != null) {
-                updateAssetMetrics(existing.id, asset.uri, asset.sizeBytes, asset.lastModified)
-            }
+            // The adopted Task's *own* Asset, not whichever row the locator happens to return now
+            // that a file may sit under several Tasks at once.
+            assetsForTask(adoptTaskId)
+                .firstOrNull { it.rootUri == source.rootUri && it.relativePath == asset.rootRelativePath }
+                ?.let { updateAssetMetrics(it.id, asset.uri, asset.sizeBytes, asset.lastModified) }
             return NewTaskDelta(adopted = true, assetsUpdated = 1)
         }
 

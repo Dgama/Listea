@@ -10,8 +10,8 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -25,6 +25,7 @@ import androidx.compose.material3.ScaffoldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -58,15 +59,47 @@ object ListeaDimens {
 }
 
 /**
- * The three places the app is *about*. Everything else is reached from one of them and is nested
- * beneath it.
+ * The places the app is *about*. Everything else is reached from one of them and is nested beneath
+ * it.
+ *
+ * Declaration order is bar order - [ListeaBottomNavigation] draws the entries in it - and it reads
+ * in the order the work happens: material is brought in from an **Upstream**, the Tasks it produced
+ * are what there is **Todo**, the Lists are built out of those, and Settings configures the lot.
+ *
+ * The names the user sees and the names the model uses are deliberately different. An Upstream is a
+ * `SourceEntity`, and a Todo is that Source's catalog; see `docs/iterations/v0.3.0.md`. Renaming the
+ * model as well would touch every query, migration and wire value for no behavioural gain.
+ *
+ * **[label] is the tab and [title] is the bar above it**, and they are not always the same word:
+ * the Upstreams tab titles itself "Listea" because it is where the app opens. They are separate
+ * fields rather than one so that a screen may say something more specific than its tab without
+ * having to hide the tab's name.
+ *
+ * **The constant names are persisted.** [destination] is held by `rememberSaveable`, and Compose
+ * serialises a `Serializable` enum by constant name into the saved-state bundle, so a rename here
+ * would throw on process-death restore from a bundle written by the previous build. Every
+ * destination is therefore declared with an explicit [TopLevelDestinationSaver], which keys on
+ * [name] and falls back to the first entry rather than failing.
  */
 enum class TopLevelDestination(val label: String, val title: String, val icon: ImageVector) {
-    Folder("Folder", "Listea", Icons.Filled.Folder),
+    Upstreams("Upstreams", "Listea", Icons.Filled.Folder),
+    Todo("Todo", "Todo", Icons.Filled.CheckCircle),
     Lists("Lists", "Lists", Icons.AutoMirrored.Filled.List),
-    Sources("Sources", "Sources", Icons.Filled.Refresh),
     Settings("Settings", "Settings", Icons.Filled.Settings)
 }
+
+/**
+ * Restores a [TopLevelDestination] by name, tolerating a name that no longer exists.
+ *
+ * `rememberSaveable`'s default for an enum is to name the constant and call `valueOf` on restore,
+ * which throws when the constant has been renamed - and the bundle outlives the build that wrote
+ * it. The saved state here is only "which tab was open", so falling back to the first entry loses
+ * a tab selection and nothing else, which is strictly better than crashing on launch.
+ */
+val TopLevelDestinationSaver: Saver<TopLevelDestination, String> = Saver(
+    save = { it.name },
+    restore = { name -> TopLevelDestination.entries.firstOrNull { it.name == name } }
+)
 
 /**
  * The one shell every screen is rendered inside.

@@ -25,9 +25,11 @@ import java.util.UUID
         SourceEntity::class,
         TaskImportEntity::class,
         LegacySourceTaskEntity::class,
-        LegacyTaskIdEntity::class
+        LegacyTaskIdEntity::class,
+        UpstreamEntity::class,
+        DissolvedTaskStateEntity::class
     ],
-    version = 14,
+    version = 19,
     exportSchema = true
 )
 abstract class ListeaDatabase : RoomDatabase() {
@@ -640,6 +642,226 @@ abstract class ListeaDatabase : RoomDatabase() {
         }
 
         /**
+         * V15 gives a Source the first of its per-importer options.
+         *
+         * `1` — keep the folder tree — is the default because it is what the catalog already does:
+         * `catalogAtScope` descends a Source's `groupPath` strings, so every file-as-Task Source
+         * registered before this migration was already being read as a tree, and no existing row's
+         * shape changes when it becomes an explicit column.
+         *
+         * Folder-as-Task Sources are the exception, and are set to `0` in the same statement. Their
+         * Tasks are one per child folder, which is flat by construction, and
+         * `normalizeKeepTree` refuses to store anything else — so leaving them at the default would
+         * put a value in the column that the code which reads it considers impossible, and a Todo
+         * opened from such a Source would offer to descend a tree that has no parents in it.
+         *
+         * A not-null column with a default, so nothing has to be backfilled in a second pass and
+         * the table is never briefly in a state the entities cannot describe.
+         */
+        internal val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
+                    "ALTER TABLE sources ADD COLUMN keepTree INTEGER NOT NULL DEFAULT 1"
+                )
+                connection.execSQL(
+                    "UPDATE sources SET keepTree = 0 WHERE importerKind = 'folder-as-task'"
+                )
+            }
+        }
+
+        /**
+         * V16 splits one row's two jobs: a registered folder becomes an Upstream, and a Source
+         * becomes only what an import run writes.
+         *
+         * Three statements, in this order.
+         *
+         * 1. The table, in the shape [UpstreamEntity] declares and `16.json` records.
+         * 2. **Every existing Source becomes an Upstream.** Before v16 there was no other way for a
+         *    folder to be in the app, so every Source row is one somebody pointed the app at. This
+         *    is what keeps the Upstreams list on screen across the upgrade: it showed Sources
+         *    before and shows Upstreams after, and the rows are the same rows.
+         * 3. **Sources no import ever ran on are dropped.** They were the "Add Upstream" writes —
+         *    registered, named, and never read — and under the words the app now uses they were
+         *    never Todos at all: a Todo is what an import produced. Keeping them would put a row
+         *    in the Todo tab that no run ever created, which is the confusion this version exists
+         *    to remove. The guard on `task_imports` is belt and braces: an import is the only
+         *    writer of `lastImportAt`, so the two conditions cannot disagree, and if they ever did
+         *    the foreign key would refuse the delete rather than orphan a Task's provenance.
+         *
+         * Nothing else moves. `tasks`, `assets`, `task_state`, `list_items` and every decision in
+         * them are untouched, and the Sources that survive keep their ids — so a List built from
+         * one still names the same Tasks afterwards.
+         */
+        internal val MIGRATION_15_16 = object : Migration(15, 16) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS upstreams (" +
+                        "id TEXT NOT NULL, rootUri TEXT NOT NULL, " +
+                        "relativePath TEXT NOT NULL, displayName TEXT NOT NULL, " +
+                        "addedAt INTEGER NOT NULL, PRIMARY KEY(id))"
+                )
+                connection.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS " +
+                        "index_upstreams_rootUri_relativePath " +
+                        "ON upstreams (rootUri, relativePath)"
+                )
+                connection.execSQL(
+                    "INSERT OR IGNORE INTO upstreams " +
+                        "(id, rootUri, relativePath, displayName, addedAt) " +
+                        "SELECT id, rootUri, relativePath, displayName, createdAt FROM sources"
+                )
+                connection.execSQL(
+                    "DELETE FROM sources WHERE lastImportAt IS NULL " +
+                        "AND id NOT IN (SELECT sourceId FROM task_imports)"
+                )
+            }
+        }
+
+        /**
+         * V17 lets one folder back several Todos, and one file be the content of several Tasks.
+         *
+         * Both were `UNIQUE` indices, and both were the same claim made twice: that a file belongs
+         * to one import and therefore to one Task. That claim is what this version retires. Two
+         * Todos over one folder are two intentions — the same market supplying two dishes — and a
+         * file under each is two Tasks whose decisions are allowed to disagree.
+         *
+         * Three statements, and no table is rebuilt, because neither change is a change of *columns*:
+         *
+         * 1. `sources` keeps an index on `(rootUri, relativePath)` and loses only its uniqueness.
+         *    The pair is still how a caller finds the Sources at a folder; it is simply no longer
+         *    how the schema forbids a second one. Dropped and recreated rather than altered,
+         *    because SQLite has no way to relax a constraint in place.
+         * 2. `assets` keeps a unique index and changes what it is unique *over*: one Task holds at
+         *    most one Asset per file, which is the invariant that was ever worth keeping, since two
+         *    Assets of one Task at one path would be two answers to the same question.
+         * 3. A plain `(rootUri, relativePath)` index is added, because the reads that resolve a
+         *    file to its Tasks — `file_review_state`'s joins among them — now find several rows
+         *    where they used to find one, and they must not do it by table scan.
+         *
+         * Every existing row already satisfies the new constraint: before this version one file had
+         * exactly one Asset, so `(taskId, rootUri, relativePath)` was already unique. Nothing is
+         * copied, nothing is deleted, and every id survives — a List built from a Task still names
+         * the same Task afterwards.
+         */
+        internal val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("DROP INDEX IF EXISTS index_sources_rootUri_relativePath")
+                connection.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_sources_rootUri_relativePath " +
+                        "ON sources (rootUri, relativePath)"
+                )
+                connection.execSQL("DROP INDEX IF EXISTS index_assets_rootUri_relativePath")
+                connection.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS " +
+                        "index_assets_taskId_rootUri_relativePath " +
+                        "ON assets (taskId, rootUri, relativePath)"
+                )
+                connection.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_assets_rootUri_relativePath " +
+                        "ON assets (rootUri, relativePath)"
+                )
+            }
+        }
+
+        /**
+         * V18 lets a Todo be dissolved without its judgments being lost, and lets a List say what a
+         * dissolution took out of it.
+         *
+         * Four statements, all additive. No table is rebuilt, no column is rewritten, and every id
+         * and decision on the device survives — including the four real Todos this migration runs
+         * over first.
+         *
+         * 1. `sources.keepStateOnDelete`, defaulted to `0`. It is a *default* for the delete
+         *    dialog's checkbox rather than a decision taken on the user's behalf, and `0` is the
+         *    value that preserves today's behaviour: before this version nothing could delete a
+         *    Todo at all, so there was no state-preserving path to preserve. The same reasoning as
+         *    `MIGRATION_14_15`'s `keepTree` — not-null with a default, so nothing is backfilled in
+         *    a second pass and the table is never briefly in a state the entities cannot describe.
+         * 2. `lists.lastDissolvedCount` / `lastDissolvedAt`, both nullable and both left null.
+         *    Nothing has been dissolved out of any existing List, and null is how the entity says
+         *    so; there is no "zero" that means the same thing, because a dissolution that removed
+         *    nothing is not a thing that happens.
+         * 3. `dissolved_task_state`, in the shape [DissolvedTaskStateEntity] declares and `18.json`
+         *    records. Written out one statement at a time, for the same reason
+         *    [createImportTables] is: a column that changes in the entity is a line that has to
+         *    change here, and the two can be diffed against the exported schema by eye.
+         *
+         * The two indices on the new table are the two reads. `sourceId` is both the recovery
+         * picker's grouping and the handle `recoverStateFrom` narrows by, and `(rootUri,
+         * sourcePath)` is what answers "which histories does *this* folder offer?" — a recovery
+         * belongs to the folder the intention was made at. Neither is unique: a Todo dissolved
+         * twice at one folder leaves two histories, and that is exactly what "load from one history
+         * at a time" is choosing between.
+         */
+        internal val MIGRATION_17_18 = object : Migration(17, 18) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
+                    "ALTER TABLE sources ADD COLUMN keepStateOnDelete INTEGER NOT NULL DEFAULT 0"
+                )
+                connection.execSQL("ALTER TABLE lists ADD COLUMN lastDissolvedCount INTEGER")
+                connection.execSQL("ALTER TABLE lists ADD COLUMN lastDissolvedAt INTEGER")
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS dissolved_task_state (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "sourceId TEXT NOT NULL, sourceName TEXT NOT NULL, " +
+                        "rootUri TEXT NOT NULL, sourcePath TEXT NOT NULL, " +
+                        "groupPath TEXT NOT NULL, importerKind TEXT NOT NULL, " +
+                        "isCompleted INTEGER NOT NULL, isFavorite INTEGER NOT NULL, " +
+                        "customActions TEXT NOT NULL, dissolvedAt INTEGER NOT NULL)"
+                )
+                connection.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_dissolved_task_state_sourceId " +
+                        "ON dissolved_task_state (sourceId)"
+                )
+                connection.execSQL(
+                    "CREATE INDEX IF NOT EXISTS " +
+                        "index_dissolved_task_state_rootUri_sourcePath " +
+                        "ON dissolved_task_state (rootUri, sourcePath)"
+                )
+            }
+        }
+
+        /**
+         * V19 gives a Todo the two standings it can take on its own material: what a change to one
+         * of its Tasks' content means, and whether new material flows in on its own.
+         *
+         * Three `ALTER`s and nothing else. All three columns are not-null *with* a default, so SQLite
+         * fills every existing row in the statement itself and no second pass runs over the table
+         * — the same shape `MIGRATION_14_15`'s `keepTree` and `MIGRATION_17_18`'s
+         * `keepStateOnDelete` already use, and for the same reason: the table is never briefly in a
+         * state the entity cannot describe.
+         *
+         * `'keep'` and `0` are the behaviour-preserving values, which is what `docs/settings.md`
+         * requires of anything added after a feature shipped. Before this version a run over a Todo
+         * changed no Task's state and no run ever started by itself, so a fresh install and the
+         * Todos already on a device must go on doing exactly that. The defaults are also where the
+         * two columns get their *meaning*: `keep` is the tier that reconciles without touching a
+         * judgment, and a Todo that does not follow its upstream is the only kind there has ever
+         * been.
+         *
+         * The third lands on `lists`, and unlike the other two it is not a policy at all: it is the
+         * reason a List that lost memberships was left with, which is why its default is the one
+         * cause that could have written such a note before this version — `'dissolved'`, a Todo
+         * deleted. The `drop` tier gives a second operation the same consequence, and a List that
+         * reported rows vanishing without saying why is the screen `docs/file-management.md`
+         * refuses; backfilling this to anything else would have rewritten what the existing notes
+         * say.
+         */
+        internal val MIGRATION_18_19 = object : Migration(18, 19) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
+                    "ALTER TABLE sources ADD COLUMN contentPolicy TEXT NOT NULL DEFAULT 'keep'"
+                )
+                connection.execSQL(
+                    "ALTER TABLE sources ADD COLUMN followUpstream INTEGER NOT NULL DEFAULT 0"
+                )
+                connection.execSQL(
+                    "ALTER TABLE lists ADD COLUMN lastDissolvedReason TEXT NOT NULL DEFAULT 'dissolved'"
+                )
+            }
+        }
+
+        /**
          * The four tables V14 introduces, in the shape the entities declare and `14.json` records.
          *
          * Written out one statement at a time, for the same reason [createTaskTables] is: a column
@@ -936,7 +1158,12 @@ abstract class ListeaDatabase : RoomDatabase() {
                     MIGRATION_10_11,
                     MIGRATION_11_12,
                     MIGRATION_12_13,
-                    MIGRATION_13_14
+                    MIGRATION_13_14,
+                    MIGRATION_14_15,
+                    MIGRATION_15_16,
+                    MIGRATION_16_17,
+                    MIGRATION_17_18,
+                    MIGRATION_18_19
                 )
                     .build()
                     .also { instance = it }

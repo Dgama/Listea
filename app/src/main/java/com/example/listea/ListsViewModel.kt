@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.sync.Mutex
@@ -24,21 +25,31 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.example.listea.data.CatalogRow
 import com.example.listea.data.DecisionTarget
+import com.example.listea.data.DissolutionReport
+import com.example.listea.data.DissolvedHistory
 import com.example.listea.data.FileReviewStateEntity
 import com.example.listea.data.FolderDiff
+import com.example.listea.data.ListLosingItems
+import com.example.listea.data.FolderListImportConflict
 import com.example.listea.data.fileIdentity
+import com.example.listea.data.ImportResult
 import com.example.listea.data.ItemAction
 import com.example.listea.data.ListDetail
 import com.example.listea.data.ListEntity
 import com.example.listea.data.ListItemEntity
 import com.example.listea.data.ListSummary
 import com.example.listea.data.ListeaDatabase
+import com.example.listea.data.ListsDao
 import com.example.listea.data.newItemPublicId
-import com.example.listea.data.RegisterSourceResult
 import com.example.listea.data.ReviewItem
 import com.example.listea.data.ScannedFile
+import com.example.listea.data.SharedFileState
 import com.example.listea.data.SourceEntity
+import com.example.listea.data.SourceSummary
+import com.example.listea.data.TaskStateEntity
+import com.example.listea.data.UpstreamEntity
 import com.example.listea.data.decisions
 import com.example.listea.data.encodeActionIds
 import com.example.listea.data.rootRelativePathOf
@@ -90,6 +101,20 @@ sealed interface ResyncRequest {
     data class Confirm(val diff: FolderDiff) : ResyncRequest
 
     /**
+     * Changes were found, but no Source covers this list's folder, so applying them would register
+     * one. Registration is a write, so it is asked for in the same words §11.2 asks with, and
+     * declining leaves the list, the folder and `sources` exactly as they were.
+     *
+     * Its own state rather than a sentence inside [Confirm], because accepting a replace is not
+     * accepting an import: the two are different writes and a user may want one without the other.
+     */
+    data class ImportConsent(
+        val diff: FolderDiff,
+        val sourceRoot: String,
+        val importer: String
+    ) : ResyncRequest
+
+    /**
      * Reconciliation is already applied. Offers the optional, destructive follow-up of dropping
      * every source-backed item in the list that currently has no source file. Keeping them is the
      * default; nothing is deleted unless the user picks removal.
@@ -97,6 +122,72 @@ sealed interface ResyncRequest {
     data class CleanupMissing(val listId: Long, val missingCount: Int) : ResyncRequest
 
     data class Error(val message: String) : ResyncRequest
+}
+
+/**
+ * What an Upstream's Create Tasks action, and a Todo's Refresh Import, are showing.
+ *
+ * One state machine for both because they are one operation with one difference: Create Tasks may
+ * register a Source, a refresh runs against a Source that already exists. Both walk the same tree,
+ * plan it the same way and write through the same run, so there is one writer and one report. The
+ * difference is what the dialog offers: refreshing cannot change the configuration, so it shows the
+ * one that is already stored instead of asking for it again.
+ */
+sealed interface ImportFolderRequest {
+    /** The folder is being walked. Nothing has been written. */
+    data object Reading : ImportFolderRequest
+
+    /**
+     * The tree is read and nothing has been written. The dialog names the folder the run would
+     * cover, and — unless this is a refresh — collects the whole of [ImportOptions] before anything
+     * commits.
+     *
+     * [options] carries the values the dialog opens with: the Source's own name and importer when
+     * refreshing, and the folder's name with the default grouping when creating. It is a starting
+     * point rather than the answer — the user edits it, and [confirmImportFolder] is what decides.
+     *
+     * [existingTodos] names the Todos already registered at this folder, and is a **notice, not a
+     * refusal**. Running Create Tasks over a folder that has a Todo is how a second intention is
+     * expressed — the same market supplying another dish — and it is allowed. Saying so up front is
+     * what keeps it from looking like a mistake: the dialog is about to create a thing the folder
+     * already has, and the one moment that can be said cheaply is before the button is pressed.
+     * Empty for a refresh, which is running against the Todo it names.
+     *
+     * [histories] is what Todos were dissolved at this folder and never recovered from. It is the
+     * one thing this dialog can offer that a fresh folder cannot: the judgments of an intention that
+     * was abandoned here. **At most one may be chosen** — a run that took some Tasks from one
+     * history and some from another would produce a Todo that never existed as an intention — and
+     * the picker is what enforces that by being a choice rather than a set of checkboxes. Empty when
+     * nothing was ever dissolved here, which is the ordinary case and shows no control at all.
+     */
+    data class Confirm(
+        val folderLabel: String,
+        val fileCount: Int,
+        val folderCount: Int,
+        val refresh: Boolean,
+        val options: ImportOptions,
+        val existingTodos: List<String> = emptyList(),
+        val histories: List<DissolvedHistory> = emptyList()
+    ) : ImportFolderRequest
+
+    /** The run is writing. */
+    data object Importing : ImportFolderRequest
+
+    /**
+     * The run's answer, shown and then dropped: there is no import history for it to live in.
+     *
+     * [recoveredFrom] names the history the user chose to be born knowing, or null if they chose to
+     * start fresh. The count of what it actually reached is on [ImportResult.tasksRecovered], and
+     * the two are not the same question: a name with a count of zero is a recovery that matched
+     * nothing, which is a thing the user asked for and so a thing the report has to answer.
+     */
+    data class Report(
+        val result: ImportResult,
+        val importer: ImporterKind,
+        val recoveredFrom: String? = null
+    ) : ImportFolderRequest
+
+    data class Error(val message: String) : ImportFolderRequest
 }
 
 /**
@@ -137,12 +228,18 @@ sealed interface SourceFreshness {
 data class ListFreshness(val listId: Long, val state: SourceFreshness)
 
 /**
- * What a folder-scoped Quick Review is working on.
+ * What a Quick Review round is working on, before it has one.
  *
  * Quick Review used to be gated on a List: it reviewed the owning List's rows, so it had to check
  * that List was not stale before it could show anything, and a folder with no List had nothing to
- * review at all. It now resolves the folder itself, which removes both problems at once — the
- * folder *is* the source, so there is no snapshot to be stale, and no List needs to exist.
+ * review at all. It now resolves the scope itself, which removes both problems at once — the scope
+ * *is* the source, so there is no snapshot to be stale, and no List needs to exist.
+ *
+ * Two scopes resolve into this: a browsed folder ([observeFolderReview]) and a whole Todo
+ * ([observeTaskReview]). They differ in what they read and agree on everything after that — the
+ * same items, the same decisions, the same write path — so the states below are the union of what
+ * either can be in, not a description of one of them. [Unavailable] and [NotImported] belong to the
+ * folder path alone; a round opened on a Todo has already found its material.
  */
 sealed interface FolderReview {
     /** The folder is being read and its files resolved. No decision is visible yet. */
@@ -152,11 +249,18 @@ sealed interface FolderReview {
     data object Unavailable : FolderReview
 
     /**
-     * The folder's direct files, each carrying whatever has already been decided about it and
-     * what it measures. Everything the folder holds: which of them a round actually queues is the
-     * screen's decision, not this one's.
+     * The folder's scope and everything the catalog offers in it, each item carrying whatever has
+     * already been decided about it and what it measures. Which of them a round actually queues is
+     * the screen's decision, not this one's.
+     *
+     * [notice] is why there is nothing to queue, and is only ever non-null when [items] is empty:
+     * the two are one answer, computed from one read, so a screen can never show a reason next to a
+     * queue that contradicts it.
      */
-    data class Ready(val items: List<ReviewItem>) : FolderReview
+    data class Ready(
+        val items: List<ReviewItem>,
+        val notice: ScopeNotice? = null
+    ) : FolderReview
 
     /**
      * Nothing imported here: no Source covers this folder, so Quick Review would be reviewing
@@ -165,14 +269,6 @@ sealed interface FolderReview {
      */
     data class NotImported(val sourceRoot: String, val importer: String) : FolderReview
 }
-
-/**
- * What changing the root folder would cost, held until the user has seen it.
- *
- * [titles] is every list that would be deleted: the ones created on the root and the ones created
- * on folders below it. Empty means the change is free.
- */
-data class RootChangePreview(val rootUri: String, val titles: List<String>)
 
 /**
  * Where a "delete checked files" run has got to.
@@ -262,6 +358,53 @@ sealed interface PostWebhookDeletion {
     data class Error(val message: String) : PostWebhookDeletion
 }
 
+/**
+ * Where dissolving a Todo has got to.
+ *
+ * A third destructive run, and a third state machine rather than a reuse of either of the other
+ * two, because none of them destroys the same thing: [DeleteCheckedRequest] destroys *files* the
+ * user can point at, [PostWebhookDeletion] destroys the files one payload carried, and this
+ * destroys the only thing Listea really owns — an intention and the Tasks that carry it. The two
+ * file machines are also, in the end, guardians of a rule this one does not share: nothing here
+ * touches the device. Every row it removes is in Listea's own database, which is why this run
+ * cannot half-succeed on the filesystem and why it can offer to keep what it is removing.
+ *
+ * [Confirm] is shown and its answer read, and the answer is the checkbox: [keepState] is the
+ * user's decision about the snapshot, taken at the only moment it is legible.
+ */
+sealed interface DeleteTodoRequest {
+    /** Reading what the Todo holds and which Lists would lose rows. Writes nothing. */
+    data object Reading : DeleteTodoRequest
+
+    /**
+     * What would go, named rather than counted.
+     *
+     * [taskCount] is what the Todo holds; [lists] names every List that would lose memberships and
+     * how many, because a List quietly getting shorter is the failure `docs/file-management.md`
+     * already refuses for files. [keepState] is pre-selected from the Todo's own stored default
+     * ([SourceEntity.keepStateOnDelete]), and it is a checkbox rather than a fixed policy for the
+     * same reason: the consequence is a later Todo at this folder being able to load these
+     * decisions, and that is a thought a user can only have here.
+     */
+    data class Confirm(
+        val sourceId: String,
+        val sourceName: String,
+        val taskCount: Int,
+        val lists: List<ListLosingItems>,
+        val keepState: Boolean
+    ) : DeleteTodoRequest
+
+    data object Deleting : DeleteTodoRequest
+
+    /**
+     * [report] is what actually went, so the screen can name the Lists again rather than assuming
+     * the ones it listed.
+     */
+    data class Done(val report: DissolutionReport) : DeleteTodoRequest
+
+    data class Error(val message: String) : DeleteTodoRequest
+}
+
 /** Holds the List screens' state. Talks to the DAO directly; there is no repository layer yet. */
 /**
  * One automatic delivery held at the confirmation, with the answer it is waiting for.
@@ -286,15 +429,45 @@ private class FileDeletionOutcome(
     val recordFailed: Boolean
 )
 
+/**
+ * What a Todo was found to hold, read in one go for the confirmation dialog.
+ *
+ * The two reads travel together because they are two halves of one question — *what goes* and *who
+ * notices* — and the dialog cannot be drawn with only one of them. Not a data class: nothing
+ * compares two of these.
+ */
+private class TodoHeld(
+    val taskCount: Int,
+    val lists: List<ListLosingItems>
+)
+
 /** What a deletion that worked but could not be filed away has to admit to. Shared, so both
  * dialogs admit to it in the same words. */
 private const val DeletionNotRecordedMessage =
     "The files were deleted, but Listea could not record that. Use \"Update from folder\" on " +
         "the Lists they came from."
 
-class ListsViewModel(application: Application) : AndroidViewModel(application) {
+/**
+ * [dao], [folders] and [ioDispatcher] are seams for one test and are defaulted to the real thing
+ * everywhere else: `ConsentGateViewModelTest` has to drive the consent gate at the level it lives
+ * at, and a Robolectric run has neither a database it can watch nor a SAF grant it can read, nor a
+ * `viewModelScope` that finishes when the test says so.
+ *
+ * `@JvmOverloads` is load-bearing, not tidiness. Kotlin generates no constructor for a class with
+ * defaulted parameters except the full one and a synthetic bitmask one, so adding these parameters
+ * silently deleted the single-argument constructor the app is actually built with —
+ * `ViewModelProvider.AndroidViewModelFactory` looks the ViewModel up as
+ * `modelClass.getConstructor(Application.class)` and throws `NoSuchMethodException` from inside
+ * `setContent` when it is not there, which is a crash before anything renders rather than a wrong
+ * screen. The annotation restores the one-argument overload. `AndroidFactoryTest` holds it down.
+ */
+class ListsViewModel @JvmOverloads constructor(
+    application: Application,
+    private val dao: ListsDao = ListeaDatabase.get(application).listsDao(),
+    private val folders: FolderSource = SafFolderSource(application),
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+) : AndroidViewModel(application) {
 
-    private val dao = ListeaDatabase.get(application).listsDao()
     private val settingsStore = SettingsStore(application)
 
     /**
@@ -322,11 +495,58 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
     val sources: StateFlow<List<SourceEntity>> = dao.observeSources()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    /**
+     * The registered Upstreams, for the Upstreams surface.
+     *
+     * Nothing is joined onto them and nothing is counted: an Upstream is a folder, and v16 exists
+     * because the app used to read a folder and a decision made about one off the same row. What a
+     * card can say about one is its name, where it sits, and whether the grant is still held — the
+     * last of which is the screen's to answer, because only it has a Context.
+     */
+    val upstreams: StateFlow<List<UpstreamEntity>> = dao.observeUpstreams()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /**
+     * The Sources as the Sources screen reads them: with the count of Tasks each one owns.
+     *
+     * A second flow rather than a wider [sources], because the two are read by different surfaces
+     * with different needs — the Folder tab asks which Source covers a folder and has no use for a
+     * count it would then have to join for. Both are the same `sources` table, so neither can drift
+     * from the other about which Sources exist.
+     */
+    val sourceSummaries: StateFlow<List<SourceSummary>> = dao.observeSourceSummaries()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
     private val _folderListRequest = MutableStateFlow<FolderListRequest?>(null)
     val folderListRequest: StateFlow<FolderListRequest?> = _folderListRequest.asStateFlow()
 
     private val _resyncRequest = MutableStateFlow<ResyncRequest?>(null)
     val resyncRequest: StateFlow<ResyncRequest?> = _resyncRequest.asStateFlow()
+
+    /**
+     * Bumped once each time an import run has committed, from any entry point: Quick Review's
+     * consent, the Folder tab's Import Folder, or a Source's Refresh Import. Screens that read the
+     * catalog re-subscribe on every bump, which is what makes the Tasks a run just created show up.
+     *
+     * A counter published by the *write* rather than by the tap. Quick Review used to count its own
+     * taps, which re-subscribed it the moment the dialog closed and read the catalog back before the
+     * import had run.
+     */
+    private val _importVersion = MutableStateFlow(0)
+    val importVersion: StateFlow<Int> = _importVersion.asStateFlow()
+
+    private val _importFolderRequest = MutableStateFlow<ImportFolderRequest?>(null)
+    val importFolderRequest: StateFlow<ImportFolderRequest?> = _importFolderRequest.asStateFlow()
+
+    /**
+     * Why a catalog selection could not be written into a List, waiting to be acknowledged.
+     *
+     * One channel for both ways a selection reaches a List — a new one and an existing one — for
+     * the reason they can fail: the selection names a Task the catalog can no longer reach, and
+     * that failure does not depend on which of the two was being asked for.
+     */
+    private val _listCreationError = MutableStateFlow<String?>(null)
+    val listCreationError: StateFlow<String?> = _listCreationError.asStateFlow()
 
     /**
      * Delivery results waiting to be acknowledged, oldest first. Held here rather than on a screen
@@ -390,11 +610,12 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
     /** The in-flight automatic check, kept so a newer one can replace it rather than race it. */
     private var freshnessJob: Job? = null
 
-    private val _rootChangePreview = MutableStateFlow<RootChangePreview?>(null)
-    val rootChangePreview: StateFlow<RootChangePreview?> = _rootChangePreview.asStateFlow()
-
     private val _deleteCheckedRequest = MutableStateFlow<DeleteCheckedRequest?>(null)
     val deleteCheckedRequest: StateFlow<DeleteCheckedRequest?> = _deleteCheckedRequest.asStateFlow()
+
+    /** Where a Todo dissolution has got to, or null when none is being asked about. */
+    private val _deleteTodoRequest = MutableStateFlow<DeleteTodoRequest?>(null)
+    val deleteTodoRequest: StateFlow<DeleteTodoRequest?> = _deleteTodoRequest.asStateFlow()
 
     /**
      * What a delivered webhook is offering to clean up, or null when nothing is.
@@ -444,8 +665,23 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
     private var pendingFolderList: PendingFolderList? = null
     private var pendingResync: PendingResync? = null
 
+    /**
+     * A folder walked but not yet imported. The snapshot is held rather than re-scanned so that the
+     * count the user agreed to is the count that is imported.
+     */
+    private var pendingImport: PendingImport? = null
+
     /** The exact files the confirmation dialog is describing, held until it is answered. */
     private var pendingDeletion: List<String> = emptyList()
+
+    /**
+     * The Todo the confirmation is describing, held until it is answered.
+     *
+     * Only the id, because everything else about it is re-read inside the transaction that removes
+     * it — a Todo can gain Tasks between the dialog opening and the answer coming back, and the
+     * delete is about what the Todo *is* rather than about the listing the user was shown.
+     */
+    private var pendingDeleteSourceId: String? = null
 
     /**
      * The same, for the offer a delivered webhook makes, with the root its paths are relative to.
@@ -459,27 +695,61 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
 
     private data class PendingResync(val listId: Long, val files: List<ScannedFile>)
 
+    /**
+     * A Create Tasks run that has been read but not written.
+     *
+     * The tree is held so the run does not re-read a folder the user has just been shown a count of,
+     * and so what is imported is what the dialog described even if the folder moves underneath it.
+     *
+     * [sourceId] is which of the two runs this is, and it is the *only* difference that matters at
+     * the write. A refresh knows the Todo it is refreshing and must land in that one; Create Tasks
+     * has no Todo yet and mints one. There is no third case, because a folder may back any number
+     * of Todos, so an import that resolved "the Source over this folder" could not say which
+     * intention it had just extended.
+     */
+    private data class PendingImport(
+        val rootUri: String,
+        val folderPath: String,
+        val tree: FolderSnapshot,
+        val options: ImportOptions,
+        val sourceId: String? = null
+    )
+
     private data class PendingFolderList(
         val title: String,
         val rootUri: String,
         val relativePath: String,
         val files: List<ScannedFile>,
-        val replacedIds: List<Long>
+        val replacedIds: List<Long>,
+        val replacedTitles: List<String>,
+        val replacesExact: Boolean
     )
 
     /**
-     * Every folder-backed scope under [rootUri] plus per-folder subtree progress: two observations
-     * for the whole screen, never one per visible row. The indexing pass runs off the main thread
-     * and only when the data changes.
+     * Every folder-backed scope under [rootUri], per-folder subtree progress, per-file ticks, and
+     * which Todos hold each path: four observations for the whole screen, never one per visible row.
+     * The indexing pass runs off the main thread and only when the data changes.
      */
     fun observeFolderOwnership(rootUri: String): Flow<FolderOwnership> =
         combine(
             dao.observeFolderScopes(rootUri),
             dao.observeFolderScopeItems(rootUri),
-            dao.observeFileCompletion(rootUri)
-        ) { scopes, items, files ->
-            buildFolderOwnership(scopes, items, files)
+            dao.observeFileCompletion(rootUri),
+            dao.observeFileClaims(rootUri)
+        ) { scopes, items, files, claims ->
+            buildFolderOwnership(scopes, items, files, claims)
         }.flowOn(Dispatchers.Default)
+
+    /**
+     * Which Todos have a Task over one file, and what each of them decided — the drill-in behind a
+     * marked file row.
+     *
+     * Read on demand rather than observed with the rest of the browser, because it is asked one
+     * file at a time and only when somebody opens one: a folder of shared files would otherwise
+     * carry a row per Task over every one of them into every listing.
+     */
+    suspend fun sharedFileStates(rootUri: String, relativePath: String): List<SharedFileState> =
+        dao.getSharedFileStates(rootUri, relativePath)
 
     /**
      * One list, with its rows resolved into review items.
@@ -524,56 +794,127 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         // "what was unchecked on entry" snapshot with it and silently re-narrowing the queue to
         // exclude everything just reviewed. Staying on the last resolved value until the next one
         // arrives is what makes a paused review resume as the same round.
-        val files = withContext(Dispatchers.IO) { resolveFolderFiles(rootUri, folderPath) }
+        val files = withContext(ioDispatcher) { resolveFolderFiles(rootUri, folderPath) }
         if (files == null) {
             emit(FolderReview.Unavailable)
-            return@flow
-        }
-        if (files.isEmpty()) {
-            emit(FolderReview.Ready(emptyList()))
             return@flow
         }
 
         // Nothing imported here: the consent dialog, not a silent empty round. Once a Source covers
         // the folder the question is never asked again, which is why it is a per-folder check.
-        val source = dao.findCoveringSource(rootUri, folderPath)
+        //
+        // Asked before the listing decides anything, because a folder-as-Task scope has no listing
+        // behind its Tasks: browsing the folder that holds them *is* the case where the browsed
+        // folder has no direct files, and resolving that to an empty round would leave the whole
+        // groupPath-ordered branch of [folderReviewQueue] unreachable. A folder with no files and no
+        // Source covering it is still not asked, though: there is nothing a file-as-Task import over
+        // it would bring in, so consent there would be a dialog that imports nothing.
+        val source = dao.sourcesCovering(rootUri, folderPath).firstOrNull()
         if (source == null) {
-            emit(FolderReview.NotImported(folderPath.ifEmpty { "the selected folder" }, "file-as-Task"))
+            if (files.isEmpty()) {
+                emit(FolderReview.Ready(emptyList()))
+            } else {
+                emit(FolderReview.NotImported(folderPath.ifEmpty { "the selected folder" }, "file-as-Task"))
+            }
             return@flow
         }
 
         val paths = files.map { it.rootRelativePath }
-        dao.registerFiles(
-            paths.map {
-                FileReviewStateEntity(
-                    // Generated per resolution but kept only on the first, because registerFiles
-                    // ignores conflicts: a file's id is assigned the first time Listea sees it
-                    // under this root and is not renewed by later visits to the same folder.
-                    publicId = newItemPublicId(fileIdentity(it), now()),
-                    rootUri = rootUri,
-                    relativePath = it,
-                    updatedAt = now()
-                )
-            }
-        )
-        // Reading them is proof they are there, which un-flags anything deleted and put back.
-        dao.markFilesPresent(rootUri, paths)
+        if (paths.isNotEmpty()) {
+            dao.registerFiles(
+                paths.map {
+                    FileReviewStateEntity(
+                        // Generated per resolution but kept only on the first, because registerFiles
+                        // ignores conflicts: a file's id is assigned the first time Listea sees it
+                        // under this root and is not renewed by later visits to the same folder.
+                        publicId = newItemPublicId(fileIdentity(it), now()),
+                        rootUri = rootUri,
+                        relativePath = it,
+                        updatedAt = now()
+                    )
+                }
+            )
+            // Reading them is proof they are there, which un-flags anything deleted and put back.
+            dao.markFilesPresent(rootUri, paths)
+        }
         // The queue is built from catalog Tasks, not minted here. Registration is a browse concern
         // and stays; creating a Task is an import's job and does not happen on this path.
         val rows = dao.getCatalogTasks(source.id)
-        val states = dao.getFileStates(rootUri, paths)
-        emit(FolderReview.Ready(folderReviewQueue(rootUri, folderPath, files, rows, states)))
+        val states = if (paths.isEmpty()) emptyList() else dao.getFileStates(rootUri, paths)
+        val queue = folderReviewQueue(rootUri, folderPath, files, rows, states)
+        if (queue.isEmpty()) {
+            // Nothing to walk, so nothing to watch: the notice is one answer read once, and
+            // subscribing to an empty set of ids would be a subscription to nothing.
+            emit(FolderReview.Ready(items = queue, notice = scopeNoticeOf(rows, folderPath)))
+            return@flow
+        }
+        // The queue's *membership* is frozen — this round is over the files that were here when it
+        // opened, which is what the screen's own snapshot then narrows further — but its decisions
+        // follow the state live. A checkbox or a tag tapped on this surface writes to the Task, and
+        // until this the flow had already emitted its one value: the write landed and the control
+        // never moved. Room invalidates on `task_state`, so the re-emission arrives in the frame.
+        emitAll(
+            dao.observeTaskStates(queue.map { it.taskId }).map { fresh ->
+                FolderReview.Ready(items = withLiveDecisions(queue, fresh))
+            }
+        )
+    }
+
+    /**
+     * The round a Todo starts at [scope]: the Tasks that lie exactly there, narrowed by eligibility.
+     *
+     * "Exactly there" is [directChildOf], the same test the catalog screen descends by and the same
+     * one a folder round has always used, so what a scope shows and what a Quick Review over it
+     * queues are one answer and not two. A scope's subfolders are places to go, not material to
+     * review: standing at a Todo's root and being handed every Task beneath it is the behaviour this
+     * narrowing removes.
+     *
+     * The notification for an empty scope is [scopeNoticeOf] on the *whole* catalog rather than on
+     * the narrowed rows, because the two reasons a scope can be empty include one — a Task whose
+     * whole lies above the scope — that the narrowed rows no longer contain evidence of.
+     *
+     * **[scope] is grant-relative and a Todo's root is not the grant's.** A run started inside a
+     * subfolder prefixes every `groupPath` it writes with that subfolder — `task_imports.groupPath`
+     * is `childRelativePath(source.relativePath, …)` — so the Todo's own root is the Source's
+     * `relativePath` and not `""`. Asking with `""` finds nothing in such a Todo and reports an
+     * empty level, which is what a Todo opened at the wrong origin used to do.
+     *
+     * [flat] because a flat Todo has one level and it is every Task the Todo holds, whatever depth
+     * their paths sit at. [catalogLevel] is the same answer the catalog draws, so the round and the
+     * list it was started from cannot disagree about what is on screen.
+     *
+     * [rootUri] is still needed, and is the one thing that can be wrong: a decision about a Task is
+     * written against its file, and the file is named relative to a grant. The screen does not open
+     * this round at all when the grant is gone.
+     */
+    fun observeTaskReview(
+        sourceId: String,
+        rootUri: String,
+        scope: String,
+        flat: Boolean = false
+    ): Flow<FolderReview> = flow {
+        val rows = dao.getCatalogTasks(sourceId)
+        val here = catalogLevel(rows, scope, flat)
+        val queue = taskReviewQueue(rootUri, here)
+        if (queue.isEmpty()) {
+            emit(FolderReview.Ready(items = queue, notice = scopeNoticeOf(rows, scope, flat)))
+            return@flow
+        }
+        // The same live decisions as a folder round, and for the same reason: this flow used to
+        // emit exactly once, so a checkbox or a tag tapped on a Todo round was written to the
+        // database and drawn nowhere — the value was still whatever the queue was built with.
+        emitAll(
+            dao.observeTaskStates(queue.map { it.taskId }).map { fresh ->
+                FolderReview.Ready(items = withLiveDecisions(queue, fresh))
+            }
+        )
     }
 
     /**
      * Reads a browsed folder's direct files. Blocking: call on IO. Null when it cannot be read.
      */
-    private fun resolveFolderFiles(rootUri: String, folderPath: String): List<FolderFile>? {
-        val folder = resolveLinkedFolder(getApplication(), rootUri.toUri(), folderPath)
-            ?: return null
-        val contents = readFolder(getApplication(), folder.uri) ?: return null
-        return folderFilesOf(folderPath, contents)
-    }
+    private fun resolveFolderFiles(rootUri: String, folderPath: String): List<FolderFile>? =
+        folders.readDirectFiles(rootUri, folderPath)
 
     // There is no createList any more. Lists are made from the Folder tab, since a List is a review
     // context over Tasks and the only way to hand it any is to point it at a folder. A List with no
@@ -588,25 +929,6 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteList(listId: Long) = launchDb { dao.deleteList(listId) }
-
-    /** Reads what giving up [rootUri] would delete. Writes nothing. */
-    fun previewRootChange(rootUri: String) = launchDb {
-        val affected = dao.getFolderLists(rootUri).map { it.title }.sorted()
-        _rootChangePreview.value = RootChangePreview(rootUri, affected)
-    }
-
-    fun dismissRootChangePreview() {
-        _rootChangePreview.value = null
-    }
-
-    /**
-     * Deletes the lists belonging to a root the user has chosen to give up, items and all.
-     *
-     * Destructive and irreversible, so it is called only after an explicit confirmation and only
-     * once a different root has actually been granted — backing out of the folder picker leaves
-     * everything exactly as it was.
-     */
-    fun discardListsForRoot(rootUri: String) = launchDb { dao.deleteListsForRoot(rootUri) }
 
     /** How many checked files a delete would take, for the card that offers it. */
     fun observeCheckedFileCount(rootUri: String): Flow<Int> =
@@ -629,7 +951,7 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
             return@launchDb
         }
 
-        val writable = withContext(Dispatchers.IO) {
+        val writable = withContext(ioDispatcher) {
             hasPersistedWriteAccess(getApplication(), rootUri.toUri())
         }
         if (!writable) {
@@ -693,7 +1015,7 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         rootUri: String,
         paths: List<String>
     ): FileDeletionOutcome {
-        val result = withContext(Dispatchers.IO) {
+        val result = withContext(ioDispatcher) {
             deleteCheckedFiles(getApplication(), rootUri.toUri(), paths)
         }
         val recorded = runCatching {
@@ -709,6 +1031,90 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
     fun dismissDeleteCheckedRequest() {
         pendingDeletion = emptyList()
         _deleteCheckedRequest.value = null
+    }
+
+    /**
+     * Step 1 of dissolving a Todo: read what it holds and which Lists would lose rows. Reads only.
+     *
+     * The Lists are gathered here rather than inside the delete so the confirmation can *name* them,
+     * which is the same rule [requestCheckedFileDeletion] follows: a destructive operation shows the
+     * listing, not a total. They are gathered again inside the transaction anyway, because that is
+     * what tells each List afterwards what it lost — the two reads are the same query for the same
+     * reason, and neither can be dropped for the other.
+     */
+    fun requestDeleteTodo(sourceId: String) = launchDb {
+        _deleteTodoRequest.value = DeleteTodoRequest.Reading
+
+        val source = dao.getSource(sourceId)
+        if (source == null) {
+            _deleteTodoRequest.value =
+                DeleteTodoRequest.Error("This Todo is no longer registered. Nothing was changed.")
+            return@launchDb
+        }
+
+        val held = runCatching {
+            TodoHeld(
+                taskCount = dao.countTasksOfTodo(sourceId),
+                lists = dao.listsHolding(sourceId)
+            )
+        }.getOrNull()
+        if (held == null) {
+            _deleteTodoRequest.value =
+                DeleteTodoRequest.Error("Could not read this Todo. Nothing was changed.")
+            return@launchDb
+        }
+
+        pendingDeleteSourceId = sourceId
+        _deleteTodoRequest.value = DeleteTodoRequest.Confirm(
+            sourceId = sourceId,
+            sourceName = source.displayName.ifEmpty { sourceNameFor(source.relativePath) },
+            taskCount = held.taskCount,
+            lists = held.lists,
+            // The Todo's stored default, which the dialog may then change. The decision is the
+            // checkbox's; this is only where it starts.
+            keepState = source.keepStateOnDelete
+        )
+    }
+
+    /**
+     * Step 2: the Todo goes.
+     *
+     * [keepState] is the answer to the checkbox, taken as the argument rather than read back off the
+     * state, because the state is what the screen is *drawing* and this is what the user said. The
+     * write itself is one transaction in the DAO — the snapshot, the memberships, the Tasks, the
+     * Source and the notes to each List all commit together or not at all, which is the only reason
+     * a half-dissolved Todo cannot exist.
+     */
+    fun confirmDeleteTodo(keepState: Boolean) = launchDb {
+        val sourceId = pendingDeleteSourceId
+        if (sourceId == null) return@launchDb
+        pendingDeleteSourceId = null
+        _deleteTodoRequest.value = DeleteTodoRequest.Deleting
+
+        val report = runCatching {
+            writeOrder.withLock { dao.deleteTodo(sourceId, keepState, now()) }
+        }.getOrNull()
+
+        if (report == null) {
+            // Two causes and one sentence, because they are the same sentence: `deleteTodo` returns
+            // null only before it writes anything, whether because the Source had already gone or
+            // because the transaction threw. Either way nothing was changed, and claiming a delete
+            // this run did not perform is the one thing the message must not do.
+            _deleteTodoRequest.value =
+                DeleteTodoRequest.Error("The Todo could not be deleted. Nothing was changed.")
+            return@launchDb
+        }
+
+        // Every screen that re-collects on this is looking at a database whose Tasks moved under it:
+        // the catalog, the Quick Review queue, the List detail page and the browser's completion
+        // marks all read rows this transaction just removed.
+        _importVersion.value += 1
+        _deleteTodoRequest.value = DeleteTodoRequest.Done(report)
+    }
+
+    fun cancelDeleteTodo() {
+        pendingDeleteSourceId = null
+        _deleteTodoRequest.value = null
     }
 
     /**
@@ -753,7 +1159,7 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         // Checked before the offer rather than after it, for the same reason the Settings flow
         // checks it before listing: being asked to confirm a deletion that was never permitted
         // is worse than being told up front that it is not.
-        val writable = withContext(Dispatchers.IO) {
+        val writable = withContext(ioDispatcher) {
             hasPersistedWriteAccess(getApplication(), rootUri.toUri())
         }
         if (!writable) {
@@ -884,7 +1290,7 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
 
         val existing = dao.getFolderLists(rootUri)
 
-        val files = withContext(Dispatchers.IO) { scanFolderFiles(getApplication(), folderUri) }
+        val files = withContext(ioDispatcher) { folders.scanFiles(folderUri) }
         if (files == null) {
             _folderListRequest.value =
                 FolderListRequest.Error("Could not read that folder. Nothing was changed.")
@@ -898,69 +1304,500 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
             val otherPath = other.sourceRelativePath ?: return@filter false
             scopesOverlap(relativePath, otherPath)
         }
+        val replacedTitles = conflicts.map { it.title }
+        val replacesExact = conflicts.any { it.sourceRelativePath == relativePath }
         pendingFolderList = PendingFolderList(
             title = folderName,
             rootUri = rootUri,
             relativePath = relativePath,
             files = files,
-            replacedIds = conflicts.map { it.id }
+            replacedIds = conflicts.map { it.id },
+            replacedTitles = replacedTitles,
+            replacesExact = replacesExact
         )
 
-        // The first Create List on material no Source covers asks before it writes: the
-        // confirmation names the root it proposes and the importer it will use, and nothing is
-        // registered, imported or created until it is accepted.
-        if (dao.findCoveringSource(rootUri, relativePath) == null) {
-            _folderListRequest.value = FolderListRequest.ImportConsent(
+        // folderListStep is the whole of this decision, held apart and tested so a List is never
+        // deleted by a dialog that never named it (N1): import consent and replace confirmation
+        // are two different acceptances, asked one at a time, never folded into each other.
+        val isImported = dao.sourcesCovering(rootUri, relativePath).isNotEmpty()
+        when (folderListStep(isImported, hasConflicts = conflicts.isNotEmpty())) {
+            FolderListStep.NEEDS_IMPORT_CONSENT -> _folderListRequest.value = FolderListRequest.ImportConsent(
                 folderName = folderName,
                 fileCount = files.size,
                 sourceRoot = relativePath.ifEmpty { "the selected folder" },
                 importer = "file-as-Task"
             )
-            return@launchDb
-        }
-
-        if (conflicts.isEmpty()) {
-            commitPendingFolderList()
-        } else {
-            _folderListRequest.value = FolderListRequest.Confirm(
+            FolderListStep.NEEDS_REPLACE_CONFIRM -> _folderListRequest.value = FolderListRequest.Confirm(
                 folderName = folderName,
                 fileCount = files.size,
-                replacedTitles = conflicts.map { it.title },
-                replacesExact = conflicts.any { it.sourceRelativePath == relativePath }
+                replacedTitles = replacedTitles,
+                replacesExact = replacesExact
             )
+            FolderListStep.COMMIT -> commitPendingFolderList()
         }
     }
 
-    /** Step 2: the user accepted replacing the overlapping lists. */
+    /** Step 2 (or step 3, after an import consent): the user accepted replacing the overlapping lists. */
     fun confirmListForFolder() = launchDb { commitPendingFolderList() }
 
-    /** Step 2 for the import consent: accepted, so the import and List creation proceed. */
-    fun confirmImportForFolder() = launchDb { commitPendingFolderList() }
+    /**
+     * Step 2 for the import consent: accepted, so the import proceeds. If the same folder also
+     * overlaps existing lists, that is still a separate, unaccepted write - the replace confirmation
+     * is shown next, naming them, exactly as it would have been shown had the folder already been
+     * imported. Only a folder with nothing to replace commits directly from here.
+     */
+    fun confirmImportForFolder() = launchDb {
+        val pending = pendingFolderList ?: return@launchDb
+        when (folderListStep(isImported = true, hasConflicts = pending.replacedIds.isNotEmpty())) {
+            FolderListStep.NEEDS_REPLACE_CONFIRM -> _folderListRequest.value = FolderListRequest.Confirm(
+                folderName = pending.title,
+                fileCount = pending.files.size,
+                replacedTitles = pending.replacedTitles,
+                replacesExact = pending.replacesExact
+            )
+            FolderListStep.COMMIT -> commitPendingFolderList()
+            FolderListStep.NEEDS_IMPORT_CONSENT -> Unit // unreachable: isImported is forced true here
+        }
+    }
 
     /**
      * The write a Quick Review consent accepted: register a file-as-Task Source over the folder and
      * run the import. Once it has run, entering Quick Review is immediate again.
      */
     fun importFolderForReview(rootUri: String, folderPath: String) = launchDb {
-        val tree = withContext(Dispatchers.IO) {
-            resolveLinkedFolder(getApplication(), rootUri.toUri(), folderPath)
-                ?.let { scanFolderTree(getApplication(), it.uri) }
-        }
-        val source = when (
-            val result = dao.registerSource(
-                rootUri,
-                folderPath,
-                folderPath.ifEmpty { "Root" },
-                ImporterKind.FILE_AS_TASK,
-                now()
-            )
-        ) {
-            is RegisterSourceResult.Registered -> result.source
-            is RegisterSourceResult.Overlaps -> result.covering
-        }
+        val tree = withContext(ioDispatcher) { folders.scanTree(rootUri, folderPath) }
+        val source = dao.registerSource(
+            rootUri = rootUri,
+            relativePath = folderPath,
+            displayName = folderPath.ifEmpty { "Root" },
+            importerKind = ImporterKind.FILE_AS_TASK,
+            now = now()
+        )
         if (tree != null) {
             dao.runImport(source.id, folderPath, plan(ImporterKind.FILE_AS_TASK, folderPath, tree), now())
         }
+        // Signal the write, not the tap: published after the transaction has committed, so a
+        // collector that re-reads on it sees Tasks that exist.
+        _importVersion.value += 1
+    }
+
+    /**
+     * Step 1 of Create Tasks: read the picked folder and say what a run would cover. Writes nothing,
+     * and the walk happens once — the tree is held so the import itself does not re-read a folder
+     * the user has just been shown a count of.
+     */
+    fun requestCreateTasks(rootUri: String, folderPath: String) = launchDb {
+        pendingImport = null
+        _importFolderRequest.value = ImportFolderRequest.Reading
+
+        val tree = scanFolderTreeAt(rootUri, folderPath)
+        if (tree == null) {
+            _importFolderRequest.value =
+                ImportFolderRequest.Error("Could not read this folder. Nothing was changed.")
+            return@launchDb
+        }
+
+        val label = folderLabelFor(rootUri, folderPath)
+        val options = ImportOptions(
+            importer = ImporterKind.FILE_AS_TASK,
+            displayName = label,
+            // Seeded from Settings rather than from any Todo, because there is no Todo yet: this is
+            // the answer the user usually gives, offered here so they do not have to give it again.
+            contentPolicy = settings.value.defaultContentPolicy
+        )
+        pendingImport = PendingImport(rootUri, folderPath, tree, options)
+        _importFolderRequest.value = ImportFolderRequest.Confirm(
+            folderLabel = label,
+            fileCount = tree.files.size,
+            folderCount = tree.directories.size,
+            refresh = false,
+            options = options,
+            // Named after the label is decided, so a folder and the Todo over it read as the same
+            // words in the same dialog rather than as a path and a name.
+            existingTodos = dao.sourcesAt(rootUri, folderPath).map { it.displayName },
+            histories = dao.dissolvedHistoriesAt(rootUri, folderPath)
+        )
+    }
+
+    /**
+     * Step 1 of a Todo's Refresh Import: walk the Source's own root again and report what a run
+     * would cover. The configuration is the Source's, not the caller's — re-importing a
+     * folder-as-Task Source as file-as-Task would not be a refresh, it would be a different Source
+     * wearing the same row — so the dialog opens on the stored values and offers no way to change
+     * them.
+     */
+    fun requestSourceRefresh(sourceId: String) = launchDb {
+        pendingImport = null
+        _importFolderRequest.value = ImportFolderRequest.Reading
+
+        val source = dao.getSource(sourceId)
+        val importer = source?.let { ImporterKind.fromKey(it.importerKind) }
+        if (source == null || importer == null) {
+            _importFolderRequest.value =
+                ImportFolderRequest.Error("This Source is no longer registered. Nothing was changed.")
+            return@launchDb
+        }
+
+        val tree = scanFolderTreeAt(source.rootUri, source.relativePath)
+        if (tree == null) {
+            _importFolderRequest.value =
+                ImportFolderRequest.Error("Could not read this Source's folder. Nothing was changed.")
+            return@launchDb
+        }
+
+        val options = ImportOptions(
+            importer = importer,
+            displayName = source.displayName,
+            keepTree = source.keepTree,
+            // This Todo's own answer, not Settings': a refresh is about a Todo that exists and has
+            // already said what a change to its material means.
+            contentPolicy = ContentPolicy.fromKey(source.contentPolicy)
+        )
+        pendingImport = PendingImport(source.rootUri, source.relativePath, tree, options, source.id)
+        _importFolderRequest.value = ImportFolderRequest.Confirm(
+            folderLabel = source.displayName.ifEmpty { sourceNameFor(source.relativePath) },
+            fileCount = tree.files.size,
+            folderCount = tree.directories.size,
+            refresh = true,
+            options = options
+            // Deliberately no histories: a refresh runs over a Todo that is still here, and a
+            // recovery overwrites a Task's judgment. Loading a history into a live Todo would take
+            // the decisions made since and quietly replace them with older ones. Recovery is for a
+            // Todo being born, which is why only Create Tasks offers it.
+        )
+    }
+
+    /**
+     * Step 2: accepted, so the run happens under the chosen configuration.
+     *
+     * The importer choice exists because it is the whole point of this release: the same folder
+     * read as one Task per file and as one Task per child folder are two different judgements about
+     * the same material, and only the person looking at it can say which one they mean. It is not
+     * offered for a refresh, where the Source has already answered.
+     */
+    fun confirmImportFolder(
+        options: ImportOptions,
+        recoverFrom: DissolvedHistory? = null
+    ) = launchDb {
+        val pending = pendingImport ?: return@launchDb
+        applyImport(pending, options, recoverFrom)
+    }
+
+    fun dismissImportFolderRequest() {
+        pendingImport = null
+        _importFolderRequest.value = null
+    }
+
+    /**
+     * Registers a picked folder as an Upstream, before any Tasks exist under it.
+     *
+     * Adding an Upstream and creating Tasks are two steps on purpose. Picking a folder answers
+     * "where does material come from", which is a fact the user can state without further
+     * decisions; how its contents group into Tasks is a second question, asked by the Create Tasks
+     * dialog, and answering it beforehand would mean a folder could never be looked at before
+     * something was committed about it.
+     *
+     * The importer and the tree are therefore placeholders — file-as-Task, tree kept — and Create
+     * Tasks overwrites both with what the user chooses. A folder that is already registered under
+     * this grant is returned rather than registered twice, so re-picking the same folder adds no
+     * second row.
+     */
+    fun registerUpstream(rootUri: String, relativePath: String) = launchDb {
+        val upstream = dao.registerUpstream(
+            rootUri = rootUri,
+            relativePath = relativePath,
+            displayName = folderNameFor(rootUri, relativePath),
+            now = now()
+        )
+        _newUpstream.value = upstream
+    }
+
+    /**
+     * The Upstream just added, so the screen can open it.
+     *
+     * An event rather than a piece of screen state: the picking happens outside Compose, in the
+     * folder picker's own activity, so there is no callback in scope to navigate from and nothing
+     * for the screen to hang the answer on. The screen that acts on it clears it, and the flow is
+     * only ever set by a pick that actually committed a folder.
+     */
+    private val _newUpstream = MutableStateFlow<UpstreamEntity?>(null)
+    val newUpstream: StateFlow<UpstreamEntity?> = _newUpstream.asStateFlow()
+
+    fun consumeNewUpstream() {
+        _newUpstream.value = null
+    }
+
+    /**
+     * The one writer both Create Tasks and Refresh Import go through, so there is one run, one
+     * report and one place the registration rule is applied.
+     *
+     * Which Todo the run lands in is [PendingImport.sourceId], and it is the whole of the difference
+     * between the two: a refresh continues the Todo whose card was tapped, and Create Tasks mints a
+     * new one. There is deliberately no fallback from the first to the second. A folder may back any
+     * number of Todos, so "the Source over this folder" is not a question with an answer, and a
+     * refresh that resolved it by covering would write a run into an intention the user did not
+     * name. A refresh whose Todo has since gone says so instead.
+     *
+     * [recoverFrom] is at most one dissolved history to load judgments from, passed whole rather
+     * than by id so the report can name it: a recovery that matched nothing has to say *which*
+     * history matched nothing, and at a folder with two of them the id alone would not. It is
+     * decided here rather than stored on the Source, because recovering is something a user does
+     * *to this run* and not a property of the Todo it creates: a Todo that recovered once is not
+     * thereby a Todo that always recovers, and the next import at this folder is a new question
+     * with a new answer.
+     *
+     * Registration is not refused for anything any more. A second run over a folder is a second
+     * intention — the same market supplying another dish — and the Tasks it plans are its own, so
+     * there is no overlap left to reject. See [ListsDao.registerSource].
+     *
+     * The configuration is recorded after the run, and only once the run has happened: a run that
+     * failed changed nothing, and a name saying otherwise would be the one thing it did.
+     *
+     * One of those four values is not only a record, and it is passed into the run rather than left
+     * to the write below: `contentPolicy` is an instruction *for this run*. The name and the
+     * grouping describe what the Todo is, so a failed run must not leave them changed; the policy
+     * describes what this run should do, so reading it back from a row the write has not reached
+     * yet would make the dialog's answer apply one run late — the user picks *Replace the Task*,
+     * presses Refresh, and watches a `keep` run report nothing replaced.
+     */
+    private suspend fun applyImport(
+        pending: PendingImport,
+        options: ImportOptions,
+        recoverFrom: DissolvedHistory? = null
+    ) {
+        _importFolderRequest.value = ImportFolderRequest.Importing
+        pendingImport = null
+
+        val importer = options.importer
+        // A blank name is not a name. Falling back here rather than in the dialog keeps the rule in
+        // one place, and the fallback is the same one the folder would have been offered under, so
+        // a user who clears the field gets what they were shown.
+        val name = options.displayName.trim().ifEmpty { sourceNameFor(pending.folderPath) }
+        val source = if (pending.sourceId == null) {
+            dao.registerSource(
+                rootUri = pending.rootUri,
+                relativePath = pending.folderPath,
+                displayName = name,
+                importerKind = importer,
+                keepTree = options.keepTree,
+                contentPolicy = options.contentPolicy,
+                followUpstream = settings.value.followUpstreamNewTodos,
+                now = now()
+            )
+        } else {
+            val refreshed = dao.getSource(pending.sourceId)
+            if (refreshed == null) {
+                _importFolderRequest.value = ImportFolderRequest.Error(
+                    "This Todo is no longer registered. Nothing was changed."
+                )
+                return
+            }
+            refreshed
+        }
+
+        val result = runCatching {
+            dao.runImport(
+                source.id,
+                pending.folderPath,
+                plan(importer, pending.folderPath, pending.tree),
+                now(),
+                recoverFrom = recoverFrom?.sourceId,
+                // The dialog's answer, not the row's: the write-back below records it, and a run
+                // that waited for that write would apply the tier the user just replaced.
+                contentPolicy = options.contentPolicy
+            )
+        }.getOrNull()
+
+        if (result == null) {
+            _importFolderRequest.value =
+                ImportFolderRequest.Error("The import could not be written. Nothing was changed.")
+            return
+        }
+
+        dao.configureSource(
+            id = source.id,
+            displayName = name,
+            importerKind = importer,
+            keepTree = options.keepTree,
+            contentPolicy = options.contentPolicy
+        )
+
+        _importVersion.value += 1
+        _importFolderRequest.value = ImportFolderRequest.Report(
+            result = result,
+            importer = importer,
+            recoveredFrom = recoverFrom?.sourceName
+        )
+    }
+
+    /**
+     * A Todo that follows its upstream, kept in step — the one write in the app that happens
+     * without being asked at the moment it happens.
+     *
+     * Asked on *entry* to the Todo and nowhere else, because that is the moment the user has said
+     * they are looking at this material: a background schedule would act on Todos nobody has opened
+     * and a switch thrown weeks ago would be the only record of why.
+     *
+     * Three gates before anything is written, in this order. The Todo must say it follows its
+     * upstream — the flag is the whole permission. The folder must scan. And the scan must find
+     * something, which is [ListsDao.sourceHasChanges]: a walk of an unchanged folder costs a read
+     * and produces nothing, and that is the ordinary case, so it is the one that has to be cheap.
+     *
+     * When it does find something the run is [applyImport] — the same single writer Create Tasks
+     * and Refresh Import share — so there is still one run, one transaction and one report. The
+     * report is shown, and it is deliberate: a write nobody watched has to say what it did, and the
+     * user is on the screen it is about.
+     */
+    fun syncTodoUpstream(sourceId: String) = launchDb {
+        val source = dao.getSource(sourceId) ?: return@launchDb
+        if (!source.followUpstream) return@launchDb
+
+        val importer = ImporterKind.fromKey(source.importerKind) ?: return@launchDb
+        val tree = scanFolderTreeAt(source.rootUri, source.relativePath) ?: return@launchDb
+        if (!dao.sourceHasChanges(sourceId, source.relativePath, plan(importer, source.relativePath, tree))) {
+            return@launchDb
+        }
+
+        // The Todo's own stored answers, not Settings': this is a run over a Todo that exists, and
+        // the dialog that would have asked is not being shown. These are the same four values
+        // [requestSourceRefresh] puts in front of the user, taken without the dialog in between —
+        // which is what makes the dialog and this run one configuration rather than two.
+        val options = ImportOptions(
+            importer = importer,
+            displayName = source.displayName,
+            keepTree = source.keepTree,
+            contentPolicy = ContentPolicy.fromKey(source.contentPolicy)
+        )
+        applyImport(
+            pending = PendingImport(
+                rootUri = source.rootUri,
+                folderPath = source.relativePath,
+                tree = tree,
+                options = options,
+                sourceId = source.id
+            ),
+            options = options
+        )
+    }
+
+    /**
+     * What a Source is called when nobody has named it: the folder's own name, or the picked folder
+     * itself when the Source *is* the whole of what was picked.
+     *
+     * Not the relative path: a path is how the app finds the folder, and a Todo list titled
+     * `2026-09-11/bilibili` is the app talking to itself. The dialog opens with this in the name
+     * field, so the user sees a name rather than an empty box and can still replace it.
+     */
+    private fun sourceNameFor(folderPath: String): String =
+        folderPath.substringAfterLast('/').ifEmpty { "Picked folder" }
+
+    /**
+     * What a folder is called: its own name, as the device gives it, or else the path's last
+     * segment.
+     *
+     * [sourceNameFor] can only name a folder by its path, and a picked folder's own path is empty —
+     * the grant root *is* the folder — so every Upstream added by picking would be called "Picked
+     * folder". The provider knows the real name, and asking it is what lets the Upstreams list and
+     * the Create Tasks dialog say "2026-09-11" rather than making the user type it in to replace a
+     * placeholder.
+     */
+    private suspend fun folderNameFor(rootUri: String, folderPath: String): String =
+        withContext(ioDispatcher) { folders.folderName(rootUri, folderPath) }
+            ?: sourceNameFor(folderPath)
+
+    /**
+     * The name a Create Tasks run is offered under: the Upstream it is running over, when it is that
+     * Upstream's own folder, else the folder's own name.
+     *
+     * Running over an Upstream's root is the case the Upstreams screen leads to, and the Upstream has
+     * already been named — by the user when it was added, or by [folderNameFor] when it was picked.
+     * Offering a different name there would let one folder carry two names, one on the card and one
+     * on the Todo the run creates, with nothing to say which was meant. A run started deeper, from a
+     * folder inside an Upstream, is about that folder and is named for itself.
+     */
+    private suspend fun folderLabelFor(rootUri: String, folderPath: String): String =
+        dao.sourcesAt(rootUri, folderPath)
+            .firstOrNull()
+            ?.displayName
+            ?.takeIf { it.isNotBlank() }
+            ?: folderNameFor(rootUri, folderPath)
+
+    /** Walks a root-relative folder from a SAF grant, or null when it cannot be resolved or read. */
+    private suspend fun scanFolderTreeAt(rootUri: String, folderPath: String): FolderSnapshot? =
+        withContext(ioDispatcher) { folders.scanTree(rootUri, folderPath) }
+
+    /**
+     * One Source's whole catalog, re-read on every collection.
+     *
+     * Cold on purpose: the catalog is a projection of `task_imports` that changes only when an
+     * import runs, and a screen that re-collects on [importVersion] is then looking at what the last
+     * run actually wrote rather than at what a Room `Flow` had cached. A Task selection made from a
+     * stale read would create a List of Tasks that are no longer what the user was shown.
+     */
+    fun observeCatalog(sourceId: String): Flow<List<CatalogRow>> = flow {
+        emit(dao.getCatalogTasks(sourceId))
+    }
+
+    /**
+     * Creates a List from Tasks picked in a Source's catalog.
+     *
+     * Membership, not judgment: it resolves no files, scans nothing and imports nothing (§8.1), and
+     * eligibility deliberately does not gate it — a List has always been able to hold a Task that
+     * cannot be review-submitted, and refusing here would break that to enforce a rule about review.
+     *
+     * Fails whole rather than partially. A selection that names a Task the catalog can no longer
+     * reach throws inside the DAO's transaction, so the List is either exactly the selection or does
+     * not exist; there is no half-list to explain.
+     */
+    fun createListFromCatalog(title: String, taskIds: List<String>, onCreated: (Long) -> Unit) =
+        launchDb {
+            if (taskIds.isEmpty()) return@launchDb
+            val defaults = settingsStore.read()
+            val created = runCatching {
+                dao.createListFromTasks(
+                    title = title.trim().ifEmpty { "New list" },
+                    taskIds = taskIds,
+                    webhookEnabled = defaults.defaultWebhookEnabled,
+                    webhookUrl = defaults.defaultWebhookUrl,
+                    now = now()
+                )
+            }.getOrNull()
+
+            if (created == null) {
+                _listCreationError.value =
+                    "These Tasks could not all be found any more. No list was created."
+                return@launchDb
+            }
+            onCreated(created)
+        }
+
+    /**
+     * Puts a selection of Tasks into a List that already exists.
+     *
+     * The gesture the shared-Task model is for: Tasks gathered from one Todo, or from two, landing
+     * in a List that may already hold Tasks of its own. What it adds is memberships and nothing
+     * else — no Task is created, no decision is touched, and a Task the List already shows is
+     * skipped rather than doubled.
+     *
+     * [onAdded] receives how many memberships were actually written, so a caller can say the Tasks
+     * were already there instead of claiming to have added them. Zero is a success and not a
+     * failure: nothing was wrong with the selection, it was simply already in the list.
+     */
+    fun addTasksToCatalogList(listId: Long, taskIds: List<String>, onAdded: (Int) -> Unit) =
+        launchDb {
+            if (taskIds.isEmpty()) return@launchDb
+            val added = runCatching { dao.addTasksToList(listId, taskIds, now()) }.getOrNull()
+
+            if (added == null) {
+                _listCreationError.value =
+                    "These Tasks could not all be found any more. Nothing was added."
+                return@launchDb
+            }
+            onAdded(added)
+        }
+
+    fun dismissListCreationError() {
+        _listCreationError.value = null
     }
 
     fun dismissFolderListRequest() {
@@ -986,10 +1823,19 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         pendingFolderList = null
-        _folderListRequest.value = if (created.isSuccess) {
-            null
-        } else {
-            FolderListRequest.Error("Could not create the list. Nothing was changed.")
+        // The one failure worth naming. A folder already inside a Source is a normal state to be
+        // in, not a fault, and the generic sentence below tells the user nothing about it: what
+        // they need to hear is which Source holds these files and where the Tasks they wanted can
+        // be picked instead. Every other failure keeps the sentence that says only that nothing
+        // happened, because nothing else about it is something the user can act on.
+        _folderListRequest.value = when (val failure = created.exceptionOrNull()) {
+            null -> null
+            is FolderListImportConflict -> FolderListRequest.Error(
+                "This folder is already inside the Source " +
+                    coverLabel(failure.sourceRelativePath) +
+                    ". Pick its Tasks from that Source's Catalog instead. Nothing was changed."
+            )
+            else -> FolderListRequest.Error("Could not create the list. Nothing was changed.")
         }
     }
 
@@ -1047,6 +1893,17 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
      * Step 1 of a manual update: rescan the linked folder and compare. Writes nothing.
      * Deliberately does not go anywhere near the webhook path. Its scan is authoritative, so it
      * publishes freshness too rather than leaving a stale badge next to a fresh dialog.
+     *
+     * Two cases a re-sync cannot meet on its own are settled here rather than thrown from inside
+     * the write (§8.3):
+     *
+     * - **no Source covers the folder.** Appending a file needs its Task resolved, which means an
+     *   import, which means registering a Source — a write, so it goes through the same consent the
+     *   first Create List does, and declining costs nothing.
+     * - **the folder is inside a folder-as-Task Source.** Appending a file as its own Task there
+     *   would contradict that Source's grouping, so the update is refused by name and nothing is
+     *   appended. This is the one re-sync that has no answer, and saying so up front is better than
+     *   a generic failure from inside a transaction.
      */
     fun requestResync(listId: Long) = launchDb {
         _resyncRequest.value = ResyncRequest.Scanning
@@ -1055,6 +1912,29 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         val list = dao.getList(listId)
         if (list == null || list.sourceRootUri == null || list.sourceRelativePath == null) {
             _resyncRequest.value = ResyncRequest.Error("This list is not linked to a folder.")
+            return@launchDb
+        }
+
+        // A re-sync is a write, and with several Todos over one folder there is no fact of the
+        // matter about which one an old folder-backed list came from. Declining and naming them is
+        // better than picking the nearest and silently extending an intention nobody asked for;
+        // the modern path into these Tasks is the Todo's own Refresh Import, which knows its id.
+        val covering = dao.sourcesCovering(list.sourceRootUri, list.sourceRelativePath)
+        if (covering.size > 1) {
+            _resyncRequest.value = ResyncRequest.Error(
+                "This list's folder is imported " + covering.size + " times — as " +
+                    covering.joinToString(", ") { todoLabel(it) } +
+                    ". Open the Todo you meant and refresh it from there. Nothing was changed."
+            )
+            return@launchDb
+        }
+        val owner = covering.firstOrNull()
+        if (owner != null && owner.importerKind != ImporterKind.FILE_AS_TASK.key) {
+            _resyncRequest.value = ResyncRequest.Error(
+                "This list's folder is inside the folder-as-Task Source " +
+                    coverLabel(owner) + ", which groups files into Tasks of its own. " +
+                    "Nothing was changed."
+            )
             return@launchDb
         }
 
@@ -1078,7 +1958,15 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         pendingResync = PendingResync(listId, files)
-        _resyncRequest.value = ResyncRequest.Confirm(diff)
+        _resyncRequest.value = if (owner == null) {
+            ResyncRequest.ImportConsent(
+                diff = diff,
+                sourceRoot = list.sourceRelativePath.ifEmpty { "the selected folder" },
+                importer = "file-as-Task"
+            )
+        } else {
+            ResyncRequest.Confirm(diff)
+        }
     }
 
     /**
@@ -1090,10 +1978,7 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun scanLinkedFolder(list: ListEntity): List<ScannedFile>? {
         val rootUri = list.sourceRootUri ?: return null
         val relativePath = list.sourceRelativePath ?: return null
-        return withContext(Dispatchers.IO) {
-            resolveLinkedFolder(getApplication(), rootUri.toUri(), relativePath)
-                ?.let { scanFolderFiles(getApplication(), it.uri) }
-        }
+        return withContext(ioDispatcher) { folders.scanTree(rootUri, relativePath)?.files }
     }
 
     /** The one place a diff becomes a freshness verdict, so both entry points agree. */
@@ -1109,15 +1994,110 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         _sourceFreshness.value = ListFreshness(listId, state)
     }
 
-    /** Step 2: apply the whole reconciliation in one transaction, or nothing at all. */
+    /**
+     * Step 2: apply the whole reconciliation in one transaction, or nothing at all.
+     *
+     * Registration is *not* part of this, and that is deliberate: the Source is resolved and
+     * checked before the transaction opens, so a re-sync can only ever reuse a Source that already
+     * exists. Registering one is [confirmResyncImport]'s job, behind a dialog that says so.
+     */
     fun confirmResync() = launchDb {
         val pending = pendingResync ?: return@launchDb
-        val applied = runCatching { dao.applyReconcile(pending.listId, pending.files, now()) }
+        val source = coveringSourceOf(pending.listId)
+        if (source == null) {
+            pendingResync = null
+            _resyncRequest.value = ResyncRequest.Error(
+                "This list's folder is not imported any more. Nothing was changed."
+            )
+            return@launchDb
+        }
+        applyResync(pending, source)
+    }
+
+    /**
+     * Step 2 for the import consent: accepted, so the Source is registered and the apply follows.
+     *
+     * The registration is its own write outside the reconcile transaction, which is what lets a
+     * decline leave nothing behind and what keeps the two failures separable: a Source that could
+     * not be registered has imported nothing, and the reconcile never ran.
+     */
+    fun confirmResyncImport() = launchDb {
+        val pending = pendingResync ?: return@launchDb
+        val list = dao.getList(pending.listId)
+        val rootUri = list?.sourceRootUri
+        val listPath = list?.sourceRelativePath
+        if (rootUri == null || listPath == null) {
+            pendingResync = null
+            _resyncRequest.value = ResyncRequest.Error("This list is not linked to a folder.")
+            return@launchDb
+        }
+
+        // Same refusal as [requestResync], for the same reason: this is the write. Registered fresh
+        // otherwise, which is what the consent asked for and what an import with no Todo yet means.
+        val existing = dao.sourcesAt(rootUri, listPath)
+        if (existing.size > 1) {
+            pendingResync = null
+            _resyncRequest.value = ResyncRequest.Error(
+                "This list's folder is imported " + existing.size + " times — as " +
+                    existing.joinToString(", ") { todoLabel(it) } +
+                    ". Open the Todo you meant and refresh it from there. Nothing was changed."
+            )
+            return@launchDb
+        }
+        val source = existing.firstOrNull() ?: dao.registerSource(
+            rootUri = rootUri,
+            relativePath = listPath,
+            displayName = listPath.ifEmpty { "Root" },
+            importerKind = ImporterKind.FILE_AS_TASK,
+            now = now()
+        )
+        applyResync(pending, source)
+    }
+
+    /**
+     * How a Source is named inside a sentence: the same word the Sources screen titles it with, in
+     * quotes.
+     *
+     * Quoted because the copy around every one of these already says "the Source". A Source whose
+     * import root is the granted root has an empty path, and standing "the selected folder" in
+     * unquoted read as "already inside the Source the selected folder", which does not parse.
+     * Quoting also makes it plain that this names one particular Source rather than describing the
+     * folder, and matching the Sources screen is what lets the user go and find it.
+     */
+    private fun coverLabel(relativePath: String): String =
+        "\"" + relativePath.ifEmpty { "Selected folder" } + "\""
+
+    private fun coverLabel(source: SourceEntity): String = coverLabel(source.relativePath)
+
+    /**
+     * How a Todo is named inside a sentence, when two of them sit over one folder and the path
+     * cannot tell them apart. The card's own name, quoted, matching what the Todo tab shows.
+     */
+    private fun todoLabel(source: SourceEntity): String =
+        "\"" + source.displayName.ifBlank { source.relativePath.ifEmpty { "Selected folder" } } + "\""
+
+    /**
+     * The covering Source for a list's folder, or null when nothing covers it — and null too when
+     * several do, because a caller reaching the apply with an ambiguous folder is a caller about to
+     * write into one of two intentions at random. [requestResync] refuses that case by name before
+     * ever getting here, so this is the belt to that pair of braces.
+     */
+    private suspend fun coveringSourceOf(listId: Long): SourceEntity? {
+        val list = dao.getList(listId) ?: return null
+        val rootUri = list.sourceRootUri ?: return null
+        val relativePath = list.sourceRelativePath ?: return null
+        return dao.sourcesCovering(rootUri, relativePath).singleOrNull()
+    }
+
+    private suspend fun applyResync(pending: PendingResync, source: SourceEntity) {
+        val applied = runCatching {
+            dao.applyReconcile(pending.listId, source, pending.files, now())
+        }
         pendingResync = null
 
         if (applied.isFailure) {
             _resyncRequest.value = ResyncRequest.Error("Could not update the list. Nothing was changed.")
-            return@launchDb
+            return
         }
 
         // Everything the scan found has now been acknowledged, so the warning clears here rather
@@ -1198,6 +2178,35 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setAutoCheckSourceFreshness(enabled: Boolean) = launchDb {
         settingsStore.setAutoCheckSourceFreshness(enabled)
+    }
+
+    /**
+     * The two per-import policies' defaults, seeded into the next Todo rather than applied to any
+     * existing one. A Todo's own answers are changed on its card, beside the Todo they are about.
+     */
+    /**
+     * The two standings a Todo card can change about the Todo itself.
+     *
+     * Both are the Todo's own policy and not a run's, which is why they write to `sources` and
+     * nothing else: neither has anything to say until a run happens. Neither re-reads or re-runs
+     * anything either — a switch that fired an import would be a switch that does something the
+     * moment it is touched, and the point of [ListsDao.setFollowUpstream] is the run that happens
+     * when the *Todo* is next opened.
+     */
+    fun setTodoFollowUpstream(sourceId: String, follow: Boolean) = launchDb {
+        dao.setFollowUpstream(sourceId, follow)
+    }
+
+    fun setTodoKeepStateOnDelete(sourceId: String, keep: Boolean) = launchDb {
+        dao.setKeepStateOnDelete(sourceId, keep)
+    }
+
+    fun setDefaultContentPolicy(policy: ContentPolicy) = launchDb {
+        settingsStore.setDefaultContentPolicy(policy)
+    }
+
+    fun setFollowUpstreamNewTodos(enabled: Boolean) = launchDb {
+        settingsStore.setFollowUpstreamNewTodos(enabled)
     }
 
     fun setQuickReviewWebhookEnabled(enabled: Boolean) = launchDb {
@@ -1675,7 +2684,7 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
     ): DeliveryResult {
         _webhookProgress.value = describing
         return try {
-            withContext(Dispatchers.IO) { postWebhook(url, payload) }
+            withContext(ioDispatcher) { postWebhook(url, payload) }
         } finally {
             _webhookProgress.value = null
         }

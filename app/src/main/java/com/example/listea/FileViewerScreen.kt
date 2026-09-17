@@ -64,9 +64,24 @@ fun FileViewerScreen(
 
     MediaShell(
         modifier = modifier,
-        title = entry.name,
-        position = if (index >= 0) "${index + 1} / ${files.size}" else null,
-        onBack = onClose,
+        navigator = MediaNavigator(
+            title = entry.name,
+            onBack = onClose,
+            counter = if (index >= 0) "${index + 1} / ${files.size}" else null,
+            // The gallery has no second level: the files beside this one *are* the queue, so the
+            // two arrows are the whole of its navigation and a side with no neighbour is drawn
+            // disabled rather than offered and refused.
+            onPrevious = if (index > 0) {
+                { currentUri = files[index - 1].uri.toString() }
+            } else {
+                null
+            },
+            onNext = if (index in 0 until files.lastIndex) {
+                { currentUri = files[index + 1].uri.toString() }
+            } else {
+                null
+            }
+        ),
         chromeVisible = chromeVisible,
         media = {
             SwipeCard(
@@ -92,7 +107,7 @@ fun FileViewerScreen(
         },
         // A gallery has no business actions: no completion, no favourite, no custom slots.
         // The one control is the one that answers "what am I looking at?".
-        controls = { MediaInfoBar("File info") { infoOpen = true } }
+        taskBar = { MediaInfoBar("File info") { infoOpen = true } }
     )
 
     if (infoOpen) {

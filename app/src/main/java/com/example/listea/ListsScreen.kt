@@ -11,11 +11,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
@@ -42,7 +44,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.listea.data.DissolutionReason
 import com.example.listea.data.ListSummary
+import com.example.listea.data.SourceSummary
 
 /**
  * The Lists destination and the two screens nested under it.
@@ -58,7 +62,15 @@ fun ListsScreen(
     openListId: Long? = null,
     onOpenListChange: (Long?) -> Unit = {},
     reviewListId: Long? = null,
-    onReviewListChange: (Long?) -> Unit = {}
+    onReviewListChange: (Long?) -> Unit = {},
+    /**
+     * Starting a List from here, given the Todo its Tasks should come from.
+     *
+     * The index's own way in, and it has to be the index's: the Tasks are browsed in the Todo tab,
+     * which this screen has no way to reach. Null where the shell is not offering one, so the
+     * screen can still be previewed without it.
+     */
+    onBuildList: ((SourceSummary) -> Unit)? = null
 ) {
     when {
         reviewListId != null -> ReviewScreen(
@@ -71,7 +83,8 @@ fun ListsScreen(
         openListId == null -> ListsIndex(
             modifier = modifier,
             viewModel = viewModel,
-            onOpenList = { onOpenListChange(it) }
+            onOpenList = { onOpenListChange(it) },
+            onBuildList = onBuildList
         )
 
         else -> ListDetailScreen(
@@ -88,20 +101,23 @@ fun ListsScreen(
 private fun ListsIndex(
     modifier: Modifier,
     viewModel: ListsViewModel,
-    onOpenList: (Long) -> Unit
+    onOpenList: (Long) -> Unit,
+    onBuildList: ((SourceSummary) -> Unit)?
 ) {
     val summaries by viewModel.summaries.collectAsStateWithLifecycle()
+    val sources by viewModel.sourceSummaries.collectAsStateWithLifecycle()
     var renaming by remember { mutableStateOf<ListSummary?>(null) }
     var deleting by remember { mutableStateOf<ListSummary?>(null) }
+    var pickingSource by remember { mutableStateOf(false) }
     var filter by rememberSaveable { mutableStateOf(ListFilter.All) }
 
     val visible = remember(summaries, filter) { summaries.filter(filter::accepts) }
 
-    // The screen title lives in the shell's app bar now; this group is the filters, and only the
-    // filters. There is no "New list" control: a List is made from the Folder tab, by pointing one
-    // at a folder, because a List that is not over a folder has no way to be given an item and so
-    // no way to ever be anything but empty. See [ListsViewModel] for why that is a product
-    // boundary rather than a rule about Lists.
+    // The screen title lives in the shell's app bar now; this group is the filters, and a way to
+    // start a list. It is not a List over a folder any more — a List is an order over Tasks, and
+    // which folder those Tasks came from is a fact about them rather than about it. So making one
+    // is picking a Todo to take Tasks from and then picking the Tasks, which is why this button
+    // asks a question and hands the rest to the Todo tab rather than opening a form here.
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -114,6 +130,17 @@ private fun ListsIndex(
                     onClick = { filter = option },
                     label = { Text(option.label, maxLines = 1) }
                 )
+            }
+            if (onBuildList != null) {
+                TextButton(onClick = { pickingSource = true }) {
+                    Icon(
+                        Icons.Filled.Add,
+                        contentDescription = null,
+                        modifier = Modifier.height(ListeaDimens.IconSize)
+                    )
+                    Spacer(Modifier.width(ListeaDimens.RowGap))
+                    Text("New list", maxLines = 1)
+                }
             }
         }
         HorizontalDivider()
@@ -153,6 +180,14 @@ private fun ListsIndex(
         )
     }
 
+    if (pickingSource && onBuildList != null) {
+        SourcePickerDialog(
+            sources = sources,
+            onPick = { pickingSource = false; onBuildList(it) },
+            onDismiss = { pickingSource = false }
+        )
+    }
+
     deleting?.let { target ->
         AlertDialog(
             onDismissRequest = { deleting = null },
@@ -168,6 +203,70 @@ private fun ListsIndex(
             }
         )
     }
+}
+
+/**
+ * Which Todo the new List takes its Tasks from.
+ *
+ * One Todo per List, at the moment of starting. A List may hold Tasks from any number of Todos —
+ * that is the whole point of a List being an order over Tasks — but a selection has to be made
+ * somewhere, and the somewhere is a Todo's catalog. Starting from two at once would need a screen
+ * that browses every Todo together, and the Tasks of one Todo are not reachable from another's.
+ *
+ * So this is the first half of a two-step gesture, not a constraint on the result: build from this
+ * Todo, then add the other Todo's Tasks to the same List from that Todo's own catalog.
+ */
+@Composable
+private fun SourcePickerDialog(
+    sources: List<SourceSummary>,
+    onPick: (SourceSummary) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Take Tasks from which Todo?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)) {
+                if (sources.isEmpty()) {
+                    Text(
+                        "There are no Todos yet. A Todo is made by running Create Tasks on a " +
+                            "folder, in the Upstreams tab."
+                    )
+                } else {
+                    Text(
+                        "You pick the Tasks on the next screen. Tasks from any other Todo can be " +
+                            "added to the same list afterwards.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    sources.forEach { source ->
+                        OutlinedCard(
+                            onClick = { onPick(source) },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(ListeaDimens.CardCorner)
+                        ) {
+                            Column(Modifier.padding(ListeaDimens.RowGap)) {
+                                Text(
+                                    source.displayName,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    countLabel(source.taskCount, "Task"),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
 }
 
 /**
@@ -226,6 +325,15 @@ private fun ListCard(
                         lastDeliveryCode = summary.lastDeliveryCode
                     )
                 )
+                // Only when there is something to explain. A List that lost rows is otherwise
+                // indistinguishable from one that never had them, and this line is the whole of
+                // what the app knows about why it is shorter than the user remembers.
+                summary.lastDissolvedCount?.let { count ->
+                    StatusLine(
+                        dissolutionNote(count, summary.lastDissolvedAt, DissolutionReason.fromKey(summary.lastDissolvedReason)),
+                        tone = StatusTone.Warning
+                    )
+                }
             }
             Box {
                 IconButton(onClick = { menuOpen = true }) {
@@ -304,4 +412,25 @@ fun TextPromptDialog(
             TextButton(onClick = onDismiss) { Text("Cancel") }
         }
     )
+}
+
+/**
+ * Why a List is shorter than the user remembers, in one line.
+ *
+ * Shared by the index card and the detail screen so the two can never disagree about the same
+ * event. [at] is nullable only because the two columns are written together and read together;
+ * a note without a time is not a state this app produces.
+ *
+ * Two operations remove memberships and they are not the same thing to a user: a Todo they deleted
+ * themselves, and a Task a Todo replaced because its content moved. The sentence says which, from
+ * [DissolutionReason] — a note that named the wrong one would be worse than no note, because a user
+ * who never deleted anything would go looking for the delete.
+ */
+internal fun dissolutionNote(count: Int, at: Long?, reason: DissolutionReason): String {
+    val cause = when (reason) {
+        DissolutionReason.Dissolved -> "when a Todo was deleted"
+        DissolutionReason.Dropped -> "when their content moved"
+    }
+    return countLabel(count, "item") + " removed " + cause +
+        (at?.let { " · " + formatTimestamp(it) } ?: "")
 }

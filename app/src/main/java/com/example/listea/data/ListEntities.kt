@@ -8,6 +8,31 @@ import androidx.room.PrimaryKey
 import com.example.listea.domain.Templates
 import java.util.UUID
 
+/**
+ * What took rows out of a List, for the note it is left with.
+ *
+ * Two operations have the same consequence and different causes. A Todo deleted takes its Tasks
+ * with it; a Task dropped under a `drop` content policy is replaced, and the Lists that held it
+ * lose a membership the user never asked to lose. Both are worth saying, and saying *why* is the
+ * whole of what the note is for — a List that reports rows vanishing without a reason is the
+ * screen `docs/file-management.md` refuses to show about files.
+ *
+ * Stored as [key], so a build that does not know a value reads the delete's own wording rather than
+ * showing nothing — the same shape and the same reason as [com.example.listea.ContentPolicy].
+ */
+enum class DissolutionReason(val key: String) {
+    /** A Todo was deleted, and these were the memberships its Tasks held. */
+    Dissolved("dissolved"),
+
+    /** A Task's content changed under a `drop` policy, so it was replaced. */
+    Dropped("dropped");
+
+    companion object {
+        fun fromKey(key: String?): DissolutionReason =
+            entries.firstOrNull { it.key == key } ?: Dissolved
+    }
+}
+
 @Entity(tableName = "lists")
 data class ListEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -24,6 +49,37 @@ data class ListEntity(
     val lastDeliveryStatus: String? = null,
     val lastDeliveryCode: Int? = null,
     val lastDeliveryError: String? = null,
+
+    /**
+     * How many memberships the last dissolution took out of this List, and when.
+     *
+     * Deliberately the same shape as the delivery quartet above — a record of *what happened last*,
+     * not an audit log, so a second dissolution replaces the first note. A List whose member Task
+     * was deleted has to be able to say so: the alternative is that rows simply disappear, and the
+     * user is left with a List that is quietly shorter than it was, which the project's other
+     * destructive operation (`docs/file-management.md`) refuses to do to files.
+     *
+     * Both null means nothing has ever been dissolved out of this List.
+     */
+    val lastDissolvedCount: Int? = null,
+    val lastDissolvedAt: Long? = null,
+
+    /**
+     * Which of the two operations took those rows out.
+     *
+     * The note's sentence names a cause — *"removed when a Todo was deleted"* — and v0.4.0 step 2b
+     * gave a second operation the same consequence: a Task dropped under a `drop` content policy
+     * leaves the Lists that held it, and they lose rows just as quietly. Without this column the
+     * sentence would have to lie about one of them, which is the failure the note exists to prevent.
+     *
+     * Stored as [DissolutionReason.key], non-null with the delete's own key as the default, because
+     * that is the only cause a `lists` row could have been written with before 2b existed — so the
+     * notes already on a device keep reading exactly as they did, and the read needs no fallback.
+     * Unlike the two columns beside it this one is *not* cleared when a List moves on: nothing reads
+     * it unless a count is standing next to it, and a stale value that nothing can reach is not
+     * worth a write on the path that adds rows.
+     */
+    val lastDissolvedReason: String = DissolutionReason.Dissolved.key,
 
     /**
      * Folder link. Null on manually created lists. [sourceRootUri] is the persisted SAF root tree
@@ -269,6 +325,54 @@ data class FileCompletion(val relativePath: String, val isCompleted: Boolean)
  * way the decision columns are read: from the `assets` row that names the same file.
  */
 data class FileTaskId(val relativePath: String, val taskId: String)
+
+/**
+ * One Todo's claim on one path under one grant, through one of its Tasks. Query result, not a
+ * table — see [ListsDao.observeFileClaims].
+ *
+ * [relativePath] is the thing the browser can show a row for, and [groupPath] is the thing the Task
+ * was actually made over. They are equal exactly when the row *is* that Task — a file-as-Task Task's
+ * own file, a folder-as-Task Task's own folder — and unequal when the row is one of the files such
+ * a Task covers. That single comparison is the whole of the distinction the browser has to draw,
+ * and it is deliberately left to Kotlin rather than projected as a flag: one home, one unit test.
+ *
+ * No `rootUri` here because the query is already scoped to one, and no `Task` count because the
+ * user acts on the Todo.
+ */
+data class FileClaim(
+    val relativePath: String,
+    val groupPath: String,
+    val sourceId: String,
+    val sourceName: String,
+    val taskId: String,
+    val taskName: String
+)
+
+/**
+ * One Task over a shared file, with the Todo that owns it and what that Todo decided. Query result,
+ * not a table — see [ListsDao.getSharedFileStates].
+ *
+ * [sourceName] and [taskName] are the labels to show rather than the ids to act on; [taskId] is
+ * what a caller that means to open the Task needs, and [sourceId] is what it needs to open the
+ * Todo. The three decision columns are the same triple [ReviewDecisions] carries, still in storage
+ * form — an id list in [customActions], not labels — for the reason that type gives.
+ *
+ * [isOwnTask] is the capacity, and it is the same fact [FileClaim] carries: true when this Todo's
+ * Task *is* this file, false when the Task is over a folder and this file is one of the files it
+ * covers. The two are not the same claim about a file — one is an intention about it, the other is
+ * an intention about a folder that happens to reach it — and a drill-in that asserted the first for
+ * both sent the user looking for a Task that was not there.
+ */
+data class SharedFileState(
+    val sourceId: String,
+    val sourceName: String,
+    val taskId: String,
+    val taskName: String,
+    val isOwnTask: Boolean,
+    val isCompleted: Boolean,
+    val isFavorite: Boolean,
+    val customActions: String
+)
 
 /**
  * Every decision a review can hold about one item, apart from where they are stored.
@@ -659,7 +763,20 @@ data class ListSummary(
     /** Same webhook fields the Folder cards show, so both screens read identically. */
     val webhookEnabled: Boolean,
     val lastDeliveryStatus: String?,
-    val lastDeliveryCode: Int?
+    val lastDeliveryCode: Int?,
+
+    /**
+     * What the last dissolution took out of this List, and when — null when nothing has.
+     *
+     * On the summary as well as the row, because a List quietly getting shorter is precisely the
+     * thing the index has to be able to say, and the index reads summaries. Cleared by the List
+     * gaining a membership, not by time: see `ListsDao.clearDissolutionNote`.
+     */
+    val lastDissolvedCount: Int? = null,
+    val lastDissolvedAt: Long? = null,
+
+    /** Which operation that was — see [DissolutionReason]. Read only when the count is not null. */
+    val lastDissolvedReason: String = DissolutionReason.Dissolved.key
 ) {
     val isComplete: Boolean get() = completedAt != null
 }

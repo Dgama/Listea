@@ -23,8 +23,10 @@ import com.example.listea.data.newActionId
  * Deliberately not in Room. These belong to the app, not to a list, and keeping them out of the
  * database is what lets an action be renamed without touching a single item row.
  *
- * The active browsing root stays in [FolderStore]: it is a SAF grant, it already persists
- * reliably, and moving it here would buy nothing.
+ * The folders the app may look at are not here either, and no longer in a preferences file of their
+ * own: since v16 they are rows in `upstreams`, so that one folder can carry several Todos and the
+ * app can hold more than one folder at all. The SAF grant is still what makes one readable — the
+ * row and the permission are two halves of the same fact, and neither replaces the other.
  */
 data class AppSettings(
     val folderQuickReviewEnabled: Boolean = true,
@@ -139,6 +141,35 @@ data class AppSettings(
      * Listea's own database, and it is one confirmation away from doing it right after a swipe.
      */
     val askDeleteAfterWebhook: Boolean = false,
+
+    /**
+     * What a new Todo's Tasks do when their content changes: `keep`, `reset` or `drop`.
+     *
+     * A *seed*, not a policy — the answer is given per Todo in the Create Tasks dialog, written
+     * back there, and has no say afterwards. Settings is where a user states the answer they
+     * usually give, so the dialog opens on it rather than on a value they have to replace every
+     * time; an existing Todo's own stored answer is what its dialog opens on instead.
+     *
+     * `keep` by default, per the rule in `docs/settings.md`: before v0.4.0 step 2 a re-import
+     * changed no Task's state at all, so `keep` is where a fresh install and an untouched Settings
+     * page already are. `reset` is deliberately not the default however useful it is — a default
+     * cannot be seen at the moment it acts, and this one clears judgments.
+     */
+    val defaultContentPolicy: ContentPolicy = ContentPolicy.Default,
+
+    /**
+     * Whether a Todo still to be created follows its upstream.
+     *
+     * The same kind of statement as [defaultContentPolicy] and seeded the same way, but this one
+     * is a standing instruction rather than a default: once it is on the Todo, entering it runs the
+     * import that keeps it in step, and the dialog on that first run is the only time it was ever
+     * asked about. Off, which is what every version before this one did.
+     *
+     * The two are not offered together in the dialog for the reason above: a policy is a choice
+     * about a run the user is looking at, and this is a choice about runs that have not happened.
+     * The Todo card's own overflow is where it is changed.
+     */
+    val followUpstreamNewTodos: Boolean = false,
 
     /**
      * Whether leaving a review delivers a webhook for the queue that was just reviewed.
@@ -315,6 +346,9 @@ class SettingsStore(context: Context) {
                     ?: defaults.webhookOnReviewExit,
                 askDeleteAfterWebhook = prefs[KEY_ASK_DELETE_AFTER_WEBHOOK]
                     ?: defaults.askDeleteAfterWebhook,
+                defaultContentPolicy = ContentPolicy.fromKey(prefs[KEY_CONTENT_POLICY]),
+                followUpstreamNewTodos = prefs[KEY_FOLLOW_UPSTREAM]
+                    ?: defaults.followUpstreamNewTodos,
                 sharedFileArrangement = prefs[KEY_SHARED_ARRANGEMENT]
                     ?: defaults.sharedFileArrangement
             )
@@ -420,6 +454,12 @@ class SettingsStore(context: Context) {
     suspend fun setAskDeleteAfterWebhook(enabled: Boolean) =
         put { it[KEY_ASK_DELETE_AFTER_WEBHOOK] = enabled }
 
+    suspend fun setDefaultContentPolicy(policy: ContentPolicy) =
+        put { it[KEY_CONTENT_POLICY] = policy.key }
+
+    suspend fun setFollowUpstreamNewTodos(enabled: Boolean) =
+        put { it[KEY_FOLLOW_UPSTREAM] = enabled }
+
     suspend fun setSharedFileArrangement(shared: Boolean) =
         put { it[KEY_SHARED_ARRANGEMENT] = shared }
 
@@ -489,6 +529,8 @@ class SettingsStore(context: Context) {
         val KEY_REVIEW_UNCHECKED_ONLY = booleanPreferencesKey("review_unchecked_only")
         val KEY_WEBHOOK_ON_REVIEW_EXIT = booleanPreferencesKey("webhook_on_review_exit")
         val KEY_ASK_DELETE_AFTER_WEBHOOK = booleanPreferencesKey("ask_delete_after_webhook")
+        val KEY_CONTENT_POLICY = stringPreferencesKey("default_content_policy")
+        val KEY_FOLLOW_UPSTREAM = booleanPreferencesKey("follow_upstream_new_todos")
         val KEY_SHARED_ARRANGEMENT = booleanPreferencesKey("shared_file_arrangement")
         val KEY_GLOBAL_ARRANGEMENT = stringPreferencesKey("global_file_arrangement")
         val KEY_FOLDER_ARRANGEMENTS = stringPreferencesKey("folder_file_arrangements")

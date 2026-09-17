@@ -29,6 +29,46 @@ enum class ImporterKind(val key: String) {
     }
 }
 
+/**
+ * What a Create Tasks run is configured with: the grouping rule, what the Source is called, and
+ * whether the folder tree survives into how the Todo is presented.
+ *
+ * The three travel together because they are one answer to one question — "make Tasks out of this
+ * folder, like this" — and are answered in a single dialog. [displayName] is what the user typed, and
+ * it names the Source rather than any Task: the Tasks inside keep whatever the importer calls them.
+ *
+ * [keepTree] is only meaningful for [ImporterKind.FILE_AS_TASK]; [normalizeKeepTree] is what makes
+ * that true everywhere it is read, so the stored column and this option cannot disagree.
+ *
+ * [contentPolicy] is the odd one of the four, and it is here for a reason worth stating: it is not
+ * a decision about *this* folder's shape at all, it is the Todo's standing answer to what a change
+ * to its Tasks' content means. It travels with the others because it is asked in the same dialog,
+ * and it is written back to the Todo afterwards so the next dialog opens on it — see
+ * `ListsDao.configureSource`. Its absence from a refresh is not an absence of the question: a
+ * refresh's dialog opens on the stored answer and offers it unchanged.
+ */
+data class ImportOptions(
+    val importer: ImporterKind = ImporterKind.FILE_AS_TASK,
+    val displayName: String = "",
+    val keepTree: Boolean = true,
+    val contentPolicy: ContentPolicy = ContentPolicy.Default
+)
+
+/**
+ * [keepTree] as an importer actually honours it.
+ *
+ * A folder-as-Task Source produces one Task per child folder and nothing else, so it has no tree to
+ * keep: its catalog is flat the moment it is written, whatever the option says. The control that
+ * offers it is hidden for that importer, but hiding a control is a presentation fact and cannot be
+ * what makes the stored column honest — this is. It is silent by design: the user never had the
+ * choice, so there is nothing to report back to them about losing it.
+ */
+fun normalizeKeepTree(importer: ImporterKind, keepTree: Boolean): Boolean =
+    when (importer) {
+        ImporterKind.FILE_AS_TASK -> keepTree
+        ImporterKind.FOLDER_AS_TASK -> false
+    }
+
 /** One file, as an importer wants to attach it to a Task. Root-relative, ordered. */
 data class PlannedAsset(
     val rootRelativePath: String,

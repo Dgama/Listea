@@ -35,6 +35,24 @@ fun hasPersistedReadAccess(context: Context, rootUri: Uri): Boolean =
         .any { it.uri == rootUri && it.isReadPermission }
 
 /**
+ * Every root the app currently holds a persisted read grant for, as URI strings.
+ *
+ * This is what "available" means for an Upstream or a Todo card: not "does this row exist", which
+ * is always true, but "can anything under it still be opened". Read from the platform rather than
+ * from a store of our own, because the grants *are* the truth — the user can revoke one from
+ * Android's own settings while Listea is closed, and a cached list would go on offering folders
+ * that can no longer be read.
+ *
+ * A set rather than a lookup function because it is read once per screen for every row on it, and
+ * each call to [hasPersistedReadAccess] walks the whole permission list.
+ */
+fun heldRootUris(context: Context): Set<String> =
+    context.contentResolver.persistedUriPermissions
+        .filter { it.isReadPermission }
+        .map { it.uri.toString() }
+        .toSet()
+
+/**
  * True when the grant on the root also covers writing, which deleting a file needs.
  *
  * Separate from [hasPersistedReadAccess] because it can legitimately be false on a root that

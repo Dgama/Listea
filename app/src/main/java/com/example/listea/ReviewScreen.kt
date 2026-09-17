@@ -1,20 +1,16 @@
 package com.example.listea
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -22,7 +18,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.runtime.Composable
@@ -39,15 +34,13 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.exoplayer.ExoPlayer
 import coil3.ImageLoader
-import com.example.listea.data.ItemAction
 import com.example.listea.data.ReviewAsset
-import com.example.listea.data.ReviewBlock
 import com.example.listea.data.ReviewItem
 import com.example.listea.domain.ListId
 import com.example.listea.domain.ReviewContext
@@ -142,8 +135,9 @@ fun reviewItemInfo(
 /**
  * Sequential one-item-at-a-time review of a whole list, in its stored order.
  *
- * Swipe left  = mark the current item completed, then advance.
- * Swipe right = step back only; it never changes any completion state.
+ * Swipe left  = advance one page; off a Task's last page, mark it completed and advance.
+ * Swipe right = step back one page; off a Task's first page, step back a Task. It never changes
+ *               any completion state.
  *
  * The session walks Tasks, but the position it remembers is the membership row's: what the list
  * page resumes is which entry the user was on, and only a row id names one of those.
@@ -443,10 +437,16 @@ fun rememberSessionDelivered(sessionKey: Any): MutableState<Boolean> =
  * [onQueueFinished] is called with the queue's item ids the moment the last card is swiped off,
  * for the mode that reports a finished queue of its own. Null for a mode that does not.
  *
- * The session itself is three things stacked, per §6: a [TaskNavigator] that says where you are,
- * a [TaskReviewSurface] that is one Task's review, and inside that a [AssetNavigator] and a
- * [TaskReviewControls] that can each be extended without the other knowing. All this function
- * does is decide *which* Task is being shown and hand it down.
+ * The session itself is one [MediaShell] with its three bands filled in, per §6: a [MediaNavigator]
+ * that says where you are at both levels, a [TaskCompletionBar] that decides the Task, a
+ * [ReviewAssetControls] band that tags the file, and an [AssetRun] between them that is the file
+ * itself. All this function does is decide *which* Task is being shown, *which* of its files, and
+ * hand both down.
+ *
+ * The gesture is arbitrated here rather than in the asset run, because it is the one thing that
+ * belongs to both levels: [AssetRun] spends it on pages and reports back only when the run is at
+ * an end, so what reaches [dispatch] is already a Task-level action. The explicit controls take
+ * the same route — the bar's arrows call [dispatch] too — so the two cannot drift apart.
  */
 @Composable
 fun ReviewSession(
@@ -464,6 +464,14 @@ fun ReviewSession(
 ) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     var currentTaskId by rememberSaveable(sessionKey) { mutableStateOf<String?>(null) }
+    // Which file of the Task is on screen. Keyed on the Task rather than reset by an effect, so
+    // arriving at another one shows its *first* file on the very first frame instead of flashing
+    // the page the last Task was left on. Saved with the session, so a rotation keeps the page.
+    //
+    // Held here, beside the Task the queue is on, because the navigator bar states both at once:
+    // the two levels are one control group, and a selection living inside the viewer would have to
+    // be reported back up for the bar to draw it and driven back down for the arrows to move it.
+    var assetIndex by rememberSaveable(currentTaskId) { mutableStateOf(0) }
     var finished by rememberSaveable(sessionKey) { mutableStateOf(false) }
     // Not saved: reopening Info after a rotation would be answering a question nobody asked.
     var infoOpen by remember { mutableStateOf(false) }
@@ -515,9 +523,10 @@ fun ReviewSession(
     }
 
     val item = items[index]
-    // The status and navigation bars follow Listea's own, so hiding the chrome really does give
-    // the whole display to the media.
-    MediaSystemBars(chromeVisible)
+    // The frame takes real room here, so the system bars are never hidden: there is no full-bleed
+    // picture for them to be hiding *from*. They are still forced light, which is the other half
+    // of what this does — what sits under them is the navigator's scrim, not the app's surface.
+    MediaSystemBars(chromeVisible = true)
 
     // Landing on a Task is what moves the List's cursor; [id] rather than [taskId] because the
     // cursor names an entry, and §6 leaves it that way on purpose.
@@ -528,10 +537,11 @@ fun ReviewSession(
 
     val navigation = taskNavigation(items, index)
 
-    // The semantic-action boundary: a gesture and an explicit control both resolve to a
-    // [TaskAction], and this is where an action becomes its Task-level operation. The viewer
-    // arbitrates raw input against its own gestures and hands back a callback; it never learns
-    // which action a swipe means, and nothing here learns which gesture produced an action.
+    // The semantic-action boundary, and it sits a level above the Task on purpose: a swipe and an
+    // explicit control both arrive here as a [TaskAction], and this is where one becomes its
+    // Task-level operation. Nothing below it knows what a swipe means — the Asset run spends the
+    // gesture on pages and only reports a leave at a run's end — and nothing here learns which
+    // gesture produced the action, so the arrows and the swipe cannot drift apart.
     fun dispatch(action: TaskAction) {
         when (action) {
             TaskAction.CompleteTask -> {
@@ -556,193 +566,164 @@ fun ReviewSession(
         }
     }
 
-    TaskNavigator(
+    // The page state is clamped rather than repaired: a re-sync can take a file away under a
+    // selection that was already made, and the honest answer is to show what is still there
+    // instead of writing state from a composition.
+    val assets = assetsOf(item)
+    val currentAsset = assetIndex.coerceIn(0, maxOf(assets.lastIndex, 0))
+    // A level with nothing to move between is not a level, so a one-file Task keeps the bar it has
+    // always had: no file name beside the title, no `(1 / 1)`, no inner pair of arrows.
+    val hasAssetLevel = assets.size > 1
+    val assetForward = assetStep(assets.size, currentAsset, forward = true)
+    val assetBack = assetStep(assets.size, currentAsset, forward = false)
+
+    MediaShell(
         modifier = modifier,
-        title = item.title,
-        // Where you are in this queue, which for Quick Review is the folder's items and not the
-        // owning list's total. Completion progress is a list's business and lives on its page.
-        position = "${index + 1} / ${items.size}",
-        onBack = onBack,
-        chromeVisible = chromeVisible,
-        // Stepping here is navigation and nothing else, which is what §7 asks of these controls
-        // and what the swipe deliberately is not. Neither of them submits, completes or records:
-        // a null on a side is that arrow drawn disabled, because there is nowhere to go.
-        navigation = MediaNavigation(
+        navigator = MediaNavigator(
+            title = item.title,
+            onBack = onBack,
+            subtitle = assets.getOrNull(currentAsset)?.name?.takeIf { hasAssetLevel },
+            // What the Task is marked with, under its name and above the file's. It sits on the
+            // frame rather than in the file's own band because it says something about the *Task*
+            // and not about the page: a tag is set and read from the same Task whichever Asset is
+            // on screen, and a tap that clears the picture must not take the answer with it.
+            //
+            // [settings] is the same flow the action chips below are drawn from, so a chip and its
+            // badge cannot disagree, and it is the live one — the round re-reads its decisions on
+            // every write now, so toggling a chip fills this in the same frame.
+            tags = { ItemActionTags(item, settings) },
+            // The queue's own position, and inside it the page's. For Quick Review this is the
+            // folder's items and not the owning list's total: completion progress is a list's
+            // business and lives on its page.
+            counter = if (hasAssetLevel) {
+                "${index + 1}(${currentAsset + 1}/${assets.size})/${items.size}"
+            } else {
+                "${index + 1} / ${items.size}"
+            },
+            // Stepping here is navigation and nothing else, which is what §7 asks of these
+            // controls and what the swipe deliberately is not. Neither of them submits, completes
+            // or records: a null on a side is that arrow drawn disabled, because there is nowhere
+            // to go.
             onPrevious = navigation.previous?.let { { dispatch(TaskAction.PreviousTask) } },
-            onNext = navigation.next?.let { { dispatch(TaskAction.NextTask) } }
-        )
+            onNext = navigation.next?.let { { dispatch(TaskAction.NextTask) } },
+            onPreviousAsset = assetBack?.let { page -> { assetIndex = page } },
+            onNextAsset = assetForward?.let { page -> { assetIndex = page } },
+            hasAssetSteps = hasAssetLevel
+        ),
+        chromeVisible = chromeVisible,
+        // The checkbox never leaves, however far the file's own controls are put away: it is the
+        // one thing a review is for, and a round cannot be finished by a tap that hid the control
+        // that finishes it.
+        framePersists = true,
+        taskBar = {
+            TaskCompletionBar(
+                item = item,
+                reviewBlocked = item.reviewBlocked,
+                onToggleCompleted = { completed ->
+                    if (completed) {
+                        // The frame's own control, so checking it here is a judgment and
+                        // unchecking it is not: §5 records what somebody committed, and there is
+                        // no retraction for a template to record. The uncheck still has to
+                        // happen — it just moves state.
+                        viewModel.submitItemReview(item, terms)
+                    } else {
+                        viewModel.setItemCompleted(item, false)
+                    }
+                }
+            )
+        },
+        assetControls = {
+            ReviewAssetControls(
+                item = item,
+                // Observed by the caller rather than threaded through every screen: renaming an
+                // action in Settings relabels the chips immediately, with no restart and no item
+                // touched.
+                settings = settings,
+                onToggleAction = { action, enabled ->
+                    viewModel.setItemAction(item, action, enabled)
+                },
+                onInfo = { infoOpen = true }
+            )
+        }
     ) {
-        TaskReviewSurface(
+        AssetRun(
             item = item,
-            index = index,
+            selectedIndex = currentAsset,
             player = player,
             imageLoader = imageLoader,
             settings = settings,
-            onSwipeForward = { dispatch(TaskAction.CompleteTask) },
+            // A blocked Task cannot be swiped forward into a judgment; the end of the queue is
+            // already this exact state, so it is the same inert forward edge, not a special one.
+            // Its untouchable content is still browsable, which is why this gates only the end of
+            // the run and not the run itself.
+            canLeaveForward = item.reviewBlocked == null,
+            canLeaveBack = navigation.canGoPrevious,
+            onLeaveForward = { dispatch(TaskAction.CompleteTask) },
             // Backwards is never a judgment: it steps the queue and changes nothing about the
             // Task that was left behind.
-            onSwipeBack = { dispatch(TaskAction.PreviousTask) },
+            onLeaveBack = { dispatch(TaskAction.PreviousTask) },
+            onSelectAsset = { assetIndex = it },
             onTap = { chromeVisible = !chromeVisible },
-            onToggleCompleted = { completed ->
-                if (completed) {
-                    // The surface's own control, so checking it here is a judgment and unchecking
-                    // it is not: §5 records what somebody committed, and there is no retraction
-                    // for a template to record. The uncheck still has to happen — it just moves
-                    // state.
-                    viewModel.submitItemReview(item, terms)
-                } else {
-                    viewModel.setItemCompleted(item, false)
-                }
-            },
-            onToggleAction = { action, enabled ->
-                viewModel.setItemAction(item, action, enabled)
-            },
-            onInfo = { infoOpen = true }
+            modifier = Modifier.fillMaxSize()
         )
     }
 
     if (infoOpen) {
         ReviewItemInfoSheet(
             info = reviewItemInfo(item, settings, chrome.listTitle),
+            // The file the sheet's rows and its two offers are about. Without it a Task standing
+            // for several files has no single source to save or share and the offers disappear —
+            // which is exactly what a folder-as-Task used to do.
+            asset = assets.getOrNull(currentAsset),
             onDismiss = { infoOpen = false }
         )
     }
 }
 
 /**
- * The top of the hierarchy: which Task of the queue is in front of the user, and how to leave.
- *
- * It is the presentation the review modes already shared — [MediaShell] drawing a bar over the
- * media — with the naming made honest. What that bar was called before was the *item's*, and the
- * item was whichever of a file, a stored row and a queue entry the code happened to have in hand.
- * A navigator moves between Tasks. That is what it has ever done and all it does here.
- *
- * It renders nothing of its own. [MediaShell] holds the frame and owns the chrome-visible state,
- * because it is the thing that knows how much room the bars take and what the media is therefore
- * left with; the navigator supplies what goes *in* the bar.
- *
- * [navigation] is what makes this a navigator rather than a viewer: the bar gains explicit
- * previous/next controls beside the counter. Navigation's entry point is always an explicit
- * control and never a gesture, per §7 - the swipe bindings belong to the Task Review template and
- * mean what that template says they mean, which for the built-in one is a judgment rather than a
- * step. The two agree only about where the ends of the queue are.
- */
-@Composable
-fun TaskNavigator(
-    modifier: Modifier,
-    title: String,
-    position: String,
-    onBack: () -> Unit,
-    chromeVisible: Boolean,
-    navigation: MediaNavigation? = null,
-    media: @Composable () -> Unit
-) {
-    MediaShell(
-        modifier = modifier,
-        title = title,
-        position = position,
-        onBack = onBack,
-        chromeVisible = chromeVisible,
-        navigation = navigation,
-        media = media
-    )
-}
-
-/**
- * One Task, reviewed: the Asset in front of the user, and the controls that judge it.
- *
- * The two halves are deliberately siblings under it rather than one calling the other. The Asset
- * side knows about pixels — zoom, pan, playback, whether there is anything to render at all — and
- * the control side knows about decisions. Nothing on the control side needs to know what the Asset
- * viewer is doing, which is what lets a second viewer be added without touching a chip.
- *
- * Behaviour is unchanged from when both were inlined in [ReviewSession]: forward is a submission,
- * back is a step, a tap toggles the chrome.
- */
-@Composable
-private fun TaskReviewSurface(
-    item: ReviewItem,
-    index: Int,
-    player: ExoPlayer,
-    imageLoader: ImageLoader,
-    settings: AppSettings,
-    onSwipeForward: () -> Unit,
-    onSwipeBack: () -> Unit,
-    onTap: () -> Unit,
-    onToggleCompleted: (Boolean) -> Unit,
-    onToggleAction: (ItemAction, Boolean) -> Unit,
-    onInfo: () -> Unit
-) {
-    // The media fills the box and the controls are drawn *over* it, exactly as the shell draws the
-    // chrome over the media. A Column that gave the bar its own room would shrink every photograph
-    // and every video by the height of a row of chips, which is the layout the whole media surface
-    // exists to have stopped doing.
-    Box(Modifier.fillMaxSize()) {
-        AssetNavigator(
-            item = item,
-            assets = assetsOf(item),
-            player = player,
-            imageLoader = imageLoader,
-            settings = settings,
-            // A blocked Task cannot be swiped forward into a judgment; the end of the queue is
-            // already this exact state, so it is the same inert forward edge, not a special one.
-            canSwipeForward = item.reviewBlocked == null,
-            canSwipeBack = index > 0,
-            onSwipeForward = onSwipeForward,
-            onSwipeBack = onSwipeBack,
-            onTap = onTap,
-            modifier = Modifier.fillMaxSize()
-        )
-        TaskReviewControls(
-            item = item,
-            settings = settings,
-            reviewBlocked = item.reviewBlocked,
-            onToggleCompleted = onToggleCompleted,
-            onToggleAction = onToggleAction,
-            onInfo = onInfo,
-            modifier = Modifier.align(Alignment.BottomCenter)
-        )
-    }
-}
-
-/**
- * The boundary between a Task and the content it is of.
+ * The boundary between a Task and the content it is of, and the run of pages inside it.
  *
  * It exists, in the composition and in the state model, for every Task — including the many that
- * have exactly one Asset and so nothing for it to navigate. That is the point of drawing it now:
- * v0.2 has one Asset per Task by construction, so the day a Task carries two, the only thing that
- * has to change is what happens *inside* this boundary. Adding it then would mean adding it to
- * every screen that shows a Task at once.
+ * have exactly one Asset and so nothing for it to navigate. That is the point of drawing it:
+ * v0.2 had one Asset per Task by construction, and the day a Task carries two, what changes is
+ * only what happens *inside* this boundary. Adding it later would have meant adding it to every
+ * screen that shows a Task at once.
  *
- * It owns the Asset collection and is the single viewer-dispatch point. A Task with no Asset — a
+ * It reads the Asset collection and the single viewer-dispatch point. A Task with no Asset — a
  * manually typed entry — is not an error and is not hidden: it renders [PreviewPlaceholder]
- * directly, because there is no Asset for a viewer to take. A Task with its one Asset hands it to
- * the viewer, which is the fixed choice today; v0.3 adds `media -> MediaViewer / pdf -> PdfViewer`
- * here as one branch, without touching the review surface, the Task navigator, the write path or
+ * directly, because there is no Asset for a viewer to take; v0.3 adds
+ * `media -> MediaViewer / pdf -> PdfViewer` here as one branch, without touching the write path or
  * the webhook boundary.
  *
- * It renders no selector while there is one Asset — a selector for one Asset is not a navigator —
- * and while there are several it owns the selection, which resets to the first Asset on every Task
- * change. The Task is the judgment unit; carrying "Asset 3" from one Task to the next is
- * meaningless when their Assets are different things.
+ * **The Task is the container and the Asset is the page.** A horizontal swipe moves a page at a
+ * time and leaves the Task only at a run's two ends, through [onLeaveForward] and [onLeaveBack].
+ * That is what keeps the two levels distinguishable: on a one-Asset Task — still the overwhelming
+ * majority — there is no interior page, so every swipe leaves and nothing about it changes.
+ * Browsing a Task's files is not a judgment, and the caller is never asked to choose between the
+ * two.
+ *
+ * The selection is the caller's, not this composable's. It is drawn in the navigator bar, above
+ * the media, where the two levels sit side by side with the queue's own position — and a page
+ * marker that could be moved from two places would have to be reported up and driven back down
+ * anyway, which is a state holder with extra steps. What this owns is the gesture: [onSelectAsset]
+ * is a page, and [onLeaveForward] and [onLeaveBack] are the ends of the run.
  */
 @Composable
-private fun AssetNavigator(
+fun AssetRun(
     item: ReviewItem,
-    assets: List<ReviewAsset>,
+    selectedIndex: Int,
     player: ExoPlayer,
     imageLoader: ImageLoader,
     settings: AppSettings,
-    canSwipeForward: Boolean,
-    canSwipeBack: Boolean,
-    onSwipeForward: () -> Unit,
-    onSwipeBack: () -> Unit,
+    canLeaveForward: Boolean,
+    canLeaveBack: Boolean,
+    onLeaveForward: () -> Unit,
+    onLeaveBack: () -> Unit,
+    onSelectAsset: (Int) -> Unit,
     onTap: () -> Unit,
     modifier: Modifier
 ) {
-    // View state, not round membership: keyed by the Task so it survives rotation and process death
-    // and is dropped with the Task, which is the reset on every Task change.
-    var selectedIndex by rememberSaveable(item.taskId) { mutableStateOf(0) }
+    val assets = assetsOf(item)
     val asset = assets.getOrNull(selectedIndex)
 
     if (asset == null) {
@@ -750,115 +731,34 @@ private fun AssetNavigator(
         // completable exactly like a file's, but with nothing to render.
         SwipeCard(
             key = item.taskId,
-            canSwipeForward = canSwipeForward,
-            canSwipeBack = canSwipeBack,
-            onSwipeForward = onSwipeForward,
-            onSwipeBack = onSwipeBack,
+            canSwipeForward = canLeaveForward,
+            canSwipeBack = canLeaveBack,
+            onSwipeForward = onLeaveForward,
+            onSwipeBack = onLeaveBack,
             modifier = modifier,
             onTap = onTap
         ) { zoom ->
             LaunchedEffect(zoom) { zoom.contentAspect = null }
             PreviewPlaceholder(Modifier.fillMaxSize().mediaZoom(zoom), "Manual item", item.title)
         }
-    } else {
-        Box(modifier) {
-            AssetViewer(
-                taskId = item.taskId,
-                asset = asset,
-                player = player,
-                imageLoader = imageLoader,
-                settings = settings,
-                canSwipeForward = canSwipeForward,
-                canSwipeBack = canSwipeBack,
-                onSwipeForward = onSwipeForward,
-                onSwipeBack = onSwipeBack,
-                onTap = onTap,
-                modifier = Modifier.fillMaxSize()
-            )
-            if (assets.size > 1) {
-                AssetSelector(
-                    count = assets.size,
-                    selectedIndex = selectedIndex,
-                    onSelect = { selectedIndex = it },
-                    modifier = Modifier.align(Alignment.TopCenter)
-                )
-            }
-        }
+        return
     }
-}
 
-/**
- * The pages of one Task, as a row of dots.
- *
- * Deliberately not a `‹ N / M ›` counter: the Task Navigator owns that shape, and a selector that
- * looked like it would be two controls meaning different things wearing one face. A dot can only
- * mean "which page of this Task", which is all it is asked to mean.
- */
-@Composable
-private fun AssetSelector(
-    count: Int,
-    selectedIndex: Int,
-    onSelect: (Int) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Row(
-        modifier = modifier.padding(ListeaDimens.RowGap),
-        horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
-    ) {
-        repeat(count) { index ->
-            Box(
-                Modifier
-                    .size(10.dp)
-                    .clip(CircleShape)
-                    .background(
-                        if (index == selectedIndex) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.outline
-                        }
-                    )
-                    .clickable { onSelect(index) }
-            )
-        }
-    }
-}
+    // Asked once per composition and read by the card and by both directions of the gesture, so
+    // the three cannot disagree about there being a page to move to.
+    val forward = assetStep(assets.size, selectedIndex, forward = true)
+    val back = assetStep(assets.size, selectedIndex, forward = false)
 
-/**
- * One Asset, as large as it will go: the gestures that move through the queue, and the renderer.
- *
- * It owns the zoom, the pan and the playback, and it decides nothing about the Task the Asset
- * belongs to — no completion, no action, no ViewModel. The gestures it hosts are *navigation*
- * gestures, which is why the callbacks are handed to it rather than made here: whether a swipe is
- * a judgment or just a step is a fact about the surface, not about the picture.
- *
- * It receives a [ReviewAsset], not the Task it stands in for: the viewer's boundary is the content
- * it renders, and nothing here reaches back into the Task for a field the Asset does not carry.
- *
- * The key is the task id, so landing on a Task recentres the card and drops the zoom exactly as
- * landing on an item always has — that is the behaviour, and only the identity behind it moved.
- */
-@Composable
-private fun AssetViewer(
-    taskId: String,
-    asset: ReviewAsset,
-    player: ExoPlayer,
-    imageLoader: ImageLoader,
-    settings: AppSettings,
-    canSwipeForward: Boolean,
-    canSwipeBack: Boolean,
-    onSwipeForward: () -> Unit,
-    onSwipeBack: () -> Unit,
-    onTap: () -> Unit,
-    modifier: Modifier
-) {
     SwipeCard(
-        key = taskId,
-        canSwipeForward = canSwipeForward,
-        canSwipeBack = canSwipeBack,
-        onSwipeForward = onSwipeForward,
-        onSwipeBack = onSwipeBack,
+        // The page and not just the Task: the key is what recentres the card and drops the zoom,
+        // so every file in a run arrives at its own fitted size and a swipe that stayed inside the
+        // Task still animates rather than leaving the card off-screen.
+        key = item.taskId to selectedIndex,
+        canSwipeForward = forward != null || canLeaveForward,
+        canSwipeBack = back != null || canLeaveBack,
+        onSwipeForward = { if (forward != null) onSelectAsset(forward) else onLeaveForward() },
+        onSwipeBack = { if (back != null) onSelectAsset(back) else onLeaveBack() },
         modifier = modifier,
-        // The one control that is not in a bar, because it is the control *for* the bars.
         onTap = onTap
     ) { zoom ->
         ItemPreview(
@@ -873,42 +773,36 @@ private fun AssetViewer(
 }
 
 /**
- * What can be done *about* the Task: mark it completed, tag it, ask what it is.
+ * Which page of a Task a horizontal swipe moves to, or null when the swipe leaves the Task.
  *
- * The one part of the surface that writes. Every control goes through the caller's ViewModel
- * calls, which is what keeps a decision reached in Quick Review indistinguishable from one
- * reached in Review — including the webhook it may fire. Nothing here navigates; that belongs to
- * the navigator above it.
+ * Forward off the last Asset is the Task-level action and back off the first is the Task-level
+ * step; what either of those *means* is the caller's business, which is why this says only that a
+ * swipe leaves. A Task with nothing to page never has an interior step, so every swipe leaves —
+ * and a single-Asset Task, still the overwhelming majority, behaves exactly as it did before there
+ * was anything to page.
+ *
+ * An [index] outside the Task's pages has nowhere to go either: that is the honest answer for a
+ * selection left behind by a Task whose Assets changed under it.
  */
-@Composable
-private fun TaskReviewControls(
-    item: ReviewItem,
-    settings: AppSettings,
-    reviewBlocked: ReviewBlock?,
-    onToggleCompleted: (Boolean) -> Unit,
-    onToggleAction: (ItemAction, Boolean) -> Unit,
-    onInfo: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    ReviewActionBar(
-        item = item,
-        // Observed by the caller rather than threaded through every screen: renaming an action in
-        // Settings relabels the chips immediately, with no restart and no item touched.
-        settings = settings,
-        reviewBlocked = reviewBlocked,
-        onToggleCompleted = onToggleCompleted,
-        onToggleAction = onToggleAction,
-        onInfo = onInfo,
-        modifier = modifier
-    )
+internal fun assetStep(assetCount: Int, index: Int, forward: Boolean): Int? {
+    if (index !in 0 until assetCount) return null
+    val next = if (forward) index + 1 else index - 1
+    return next.takeIf { it in 0 until assetCount }
 }
 
 /**
- * Everything the media surface stopped saying about the item in front of the user.
+ * Everything the media surface stopped saying about the file in front of the user.
  *
  * The queue-side facts are already in memory on the [ReviewItem], so [reviewItemInfo] costs
  * nothing. Type, size and modified time are not stored anywhere and are read once, here, while
  * the sheet is open — never per card and never while swiping.
+ *
+ * **It is about the [asset], not the Task.** The sheet is reached from the file's own control row,
+ * so what it names, describes and offers to save has to be the file on screen. A Task standing for
+ * a folder has several files and no source of its own, which is exactly why reading the item alone
+ * left a folder-as-Task with the two offers this sheet exists to make. The item still supplies what
+ * only it knows — whether it is checked, which actions are on it, which List it belongs to — and is
+ * the fallback for a Task with no Asset at all, where the item *is* the only thing there is.
  *
  * Shared with [ListItemViewerScreen], which shows the same items without being able to change
  * them. Nothing in here writes to the *item*, so a read-only screen can say exactly as much about
@@ -920,14 +814,17 @@ private fun TaskReviewControls(
  * instead of showing a button that could only fail.
  */
 @Composable
-fun ReviewItemInfoSheet(info: ReviewItemInfo, onDismiss: () -> Unit) {
+fun ReviewItemInfoSheet(info: ReviewItemInfo, asset: ReviewAsset?, onDismiss: () -> Unit) {
     val context = LocalContext.current
-    val facts by produceState(MediaFacts(), info.sourceUri) {
-        value = info.sourceUri?.let { readMediaFacts(context, it) } ?: MediaFacts()
+    val sourceUri = asset?.sourceUri?.takeIf { it.isNotEmpty() } ?: info.sourceUri
+    val sourceMissing = asset?.sourceMissing ?: info.sourceMissing
+    val title = asset?.name?.takeIf { it.isNotEmpty() } ?: info.title
+    val facts by produceState(MediaFacts(), sourceUri) {
+        value = sourceUri?.let { readMediaFacts(context, it) } ?: MediaFacts()
     }
 
     ItemInfoSheet(
-        title = info.title,
+        title = title,
         onDismiss = onDismiss,
         rows = buildList {
             info.relativePath?.let { add(InfoField("Path in source folder", it)) }
@@ -935,15 +832,15 @@ fun ReviewItemInfoSheet(info: ReviewItemInfo, onDismiss: () -> Unit) {
             add(InfoField("Status", if (info.isCompleted) "Checked" else "Not checked"))
             add(InfoField("Actions", info.actionLabel ?: "None"))
             when {
-                info.sourceUri == null -> add(InfoField("Source", "Manual item — no file"))
-                info.sourceMissing ->
+                sourceUri == null -> add(InfoField("Source", "Manual item — no file"))
+                sourceMissing ->
                     add(InfoField("Source", "Missing from the source folder"))
             }
-            addAll(mediaFactRows(facts, info.title))
+            addAll(mediaFactRows(facts, title))
         },
-        footer = info.sourceUri
-            ?.takeIf { !info.sourceMissing }
-            ?.let { uri -> { MediaFileActions(sourceUri = uri, name = info.title) } }
+        footer = sourceUri
+            ?.takeIf { !sourceMissing }
+            ?.let { uri -> { MediaFileActions(sourceUri = uri, name = title) } }
     )
 }
 
@@ -1060,8 +957,8 @@ fun assetsOf(item: ReviewItem): List<ReviewAsset> = item.assets
  *
  * A source that has vanished falls through to a placeholder and stays swipeable; anything with a
  * readable source is handed to the same renderer the Folder browser uses. A Task with no Asset at
- * all never reaches here — [AssetNavigator] renders that placeholder itself, because there is no
- * Asset for a viewer to take.
+ * all never reaches here — [AssetRun] renders that placeholder itself, because there is no Asset
+ * for a viewer to take.
  *
  * The placeholder takes the zoom transform as well as the pictures do. It is not media and there is
  * nothing in it worth a closer look, but leaving it out would mean a pinch on one silently changed

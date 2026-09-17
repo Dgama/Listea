@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -31,6 +32,7 @@ import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -60,8 +62,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.listea.data.UpstreamEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.withContext
@@ -69,9 +73,10 @@ import kotlinx.coroutines.withContext
 /**
  * Stable, long-lived configuration, gathered out of the business screens.
  *
- * Composed from two stores on purpose: the browsing root stays in [FolderStore] because it is a
- * SAF grant that already persists correctly, and everything else lives in [SettingsStore]. There
- * is no benefit to moving the root just for architectural tidiness.
+ * This is where the app is told what it may look at, and that now includes the folders themselves:
+ * adding an Upstream is the old "select folder", and it lives here because it is a fact about the
+ * app rather than a place in it. The Upstreams tab lists what has been added and opens it — an
+ * index, not an editor.
  *
  * Switches persist on the spot. Text fields persist when they lose focus or the user presses Done,
  * so a half-typed URL is never written and DataStore is not hit on every keystroke.
@@ -100,99 +105,94 @@ fun SettingsScreen(
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val historyCount by viewModel.webhookRecordCount.collectAsStateWithLifecycle()
     val pendingCount by viewModel.pendingWebhookCount.collectAsStateWithLifecycle()
-    val rootChangePreview by viewModel.rootChangePreview.collectAsStateWithLifecycle()
     val deleteRequest by viewModel.deleteCheckedRequest.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    val store = remember { FolderStore(context) }
+    val upstreams by viewModel.upstreams.collectAsStateWithLifecycle()
 
-    // Re-read after a change so the label follows the newly granted root.
-    var rootGeneration by remember { mutableStateOf(0) }
-    val rootUri = remember(rootGeneration) { store.read() }
-    val rootLabel by produceState("No folder selected", rootUri) {
-        value = rootUri?.let {
-            withContext(Dispatchers.IO) { sourceFolderLabel(context, it, "") }
-        } ?: "No folder selected"
-    }
-
-    // Bumped by anything that changes what a walk of the root would find, so the totals on screen
-    // are not left describing files that are no longer there.
+    // Bumped by anything that changes what a walk of an Upstream would find, so the sizes on
+    // screen are not left describing files that are no longer there.
     var storageGeneration by remember { mutableStateOf(0) }
 
-    // A full walk of the tree, so it is done off the main thread and reported as it goes: the
-    // card says it is measuring rather than showing zeroes it is about to replace.
-    val storage by produceState<StorageInfo>(StorageInfo.Scanning, rootUri, storageGeneration) {
-        value = StorageInfo.Scanning
-        val root = rootUri
-        value = if (root == null) {
-            StorageInfo.NoFolder
-        } else {
-            withContext(Dispatchers.IO) { scanFolderStats(context, root) }
-                ?.let { StorageInfo.Ready(it) }
-                ?: StorageInfo.Unavailable
-        }
-    }
+    // The folders the app still holds a grant for. Keyed on the list of Upstreams as well as on the
+    // context so that adding one re-reads it: the grant is taken in the picker's callback below,
+    // and the row it just made would otherwise sit there saying it had no access.
+    val heldRoots = remember(context, upstreams) { heldRootUris(context) }
+
+    // The root the checked-file tools work on. A List can only have one root and this app can now
+    // have several, so "delete checked files under the root" has to say *which* root or it is
+    // answering a different question than the one the user is asking.
+    var cleanupRoot by rememberSaveable { mutableStateOf<String?>(null) }
+    val rootChoices = upstreams.map { it.rootUri }.distinct()
+    // Falls back to the first when nothing is chosen or the chosen one is gone, so the section is
+    // never stuck pointing at a folder that was removed.
+    val activeRoot = cleanupRoot?.takeIf { it in rootChoices } ?: rootChoices.firstOrNull()
+    val activeLabel = upstreams.firstOrNull { it.rootUri == activeRoot }?.displayName
+        ?: "the selected folder"
 
     // Nothing is checked until a root is chosen, and there is nothing to observe either.
-    val checkedFileCount by remember(rootUri) {
-        rootUri?.let { viewModel.observeCheckedFileCount(it.toString()) } ?: flowOf(0)
+    val checkedFileCount by remember(activeRoot) {
+        activeRoot?.let { viewModel.observeCheckedFileCount(it) } ?: flowOf(0)
     }.collectAsStateWithLifecycle(0)
 
-    // Survives the picker's trip through another activity, so a confirmed change is still
-    // remembered if this screen is recreated while the user is choosing.
-    var discardRootOnPick by rememberSaveable { mutableStateOf<String?>(null) }
+    // Why the messages survive the trip: the picker is another activity, and coming back to be
+    // told nothing about what just happened would be the worst part of either flow.
+    var grantNotice by rememberSaveable { mutableStateOf<String?>(null) }
+    var addNotice by rememberSaveable { mutableStateOf<String?>(null) }
 
-    val pickFolder = rememberLauncherForActivityResult(
+    /**
+     * Adding an Upstream: the folder picker, and what a committed pick means.
+     *
+     * This is the only place an Upstream is ever added. The grant has to be taken in the callback,
+     * because a persisted permission can only be claimed at the moment Android hands it over, and
+     * the row is written in the same breath — one folder, one Upstream.
+     *
+     * Nothing is replaced and nothing is deleted. An Upstream is a folder the user has pointed at,
+     * and pointing at a second one says nothing about the first: the Lists and Todos that came out
+     * of that one are about Tasks that still exist, and the app used to answer this gesture by
+     * asking whether to delete them, which was the old single-root model showing through.
+     */
+    val addUpstream = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
-        val discard = discardRootOnPick
-        discardRootOnPick = null
-        // Backing out of the picker changes nothing at all: no new root, no deletions.
         if (uri == null) return@rememberLauncherForActivityResult
-        // Write is taken alongside read because File management deletes through this same grant,
-        // and a grant can only be persisted at the moment it is handed over. A tree that is only
-        // offered read-only is still a perfectly good browsing root, so it is taken rather than
-        // refused: what becomes unavailable is deleting, and the File management card says so.
+
+        // Write is asked for alongside read because file management deletes through this grant. A
+        // tree offered read-only is still a perfectly good Upstream, so it is taken rather than
+        // refused; what becomes unavailable is deleting, and the File management card says so.
         fun take(flags: Int) = runCatching {
             context.contentResolver.takePersistableUriPermission(uri, flags)
         }.isSuccess
-
         val granted = take(
             Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
         ) || take(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+
         if (granted) {
-            // The confirmed deletion happens here and only here — once a genuinely different
-            // root has actually been granted. Re-picking the same folder deletes nothing.
-            if (discard != null && discard != uri.toString()) {
-                viewModel.discardListsForRoot(discard)
-            }
-            store.save(uri)
-            rootGeneration++
+            addNotice = null
+            viewModel.registerUpstream(uri.toString(), "")
+        } else {
+            addNotice = "Android did not allow access to that folder. Somewhere in internal " +
+                "storage, or a folder you picked yourself, will work."
         }
     }
 
-    // Why the message survives the trip: the picker is another activity, and coming back to be
-    // told nothing about what just happened would be the worst part of this flow.
-    var grantNotice by rememberSaveable { mutableStateOf<String?>(null) }
-
     /**
-     * Asking for permission to change the root, which is its own trip through the picker and so
-     * gets its own launcher.
+     * Asking for permission to change a folder the app can already read, which is its own trip
+     * through the picker and so gets its own launcher.
      *
-     * Deliberately not the one above: that one treats a different folder coming back as a root
-     * change and deletes the Lists linked to the old root. Asking for access to the folder already
-     * in use must never be able to reach that, so a folder that is not the current root is refused
-     * here rather than acted on, and nothing at all is written unless the two match.
+     * Deliberately not the one above: that one registers whatever comes back as a new Upstream.
+     * Here the answer has to be a folder already in use, so anything else is refused rather than
+     * acted on, and nothing at all is written unless the two match.
      */
     val grantWriteAccess = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
-        val root = rootUri
+        val root = activeRoot
         // Backing out is a real answer: the dialog is still there to try again or cancel.
         if (uri == null || root == null) return@rememberLauncherForActivityResult
 
-        if (uri != root) {
+        if (uri.toString() != root) {
             grantNotice = "That is a different folder, so nothing was changed. Choose " +
-                "$rootLabel itself — the folder Listea is already using — to allow deleting " +
+                "$activeLabel itself — the folder Listea is already using — to allow deleting " +
                 "from it."
             return@rememberLauncherForActivityResult
         }
@@ -207,17 +207,11 @@ fun SettingsScreen(
         if (granted) {
             grantNotice = null
             // Straight back to where the user was, rather than making them find the button again.
-            viewModel.requestCheckedFileDeletion(root.toString())
+            viewModel.requestCheckedFileDeletion(root)
         } else {
             grantNotice = "Android did not allow changes to this folder. Somewhere in internal " +
                 "storage, or a folder you picked yourself, will work."
         }
-    }
-
-    /** Choosing a first folder costs nothing; replacing one has to be confirmed. */
-    fun startFolderChange() {
-        val current = rootUri
-        if (current == null) pickFolder.launch(null) else viewModel.previewRootChange(current.toString())
     }
 
     // One scroll surface for the whole page; no subsection scrolls on its own.
@@ -230,61 +224,73 @@ fun SettingsScreen(
     ) {
         Spacer(Modifier.height(ListeaDimens.CompactGap))
 
-        SectionCard(title = "Storage") {
-            InfoActionsRow(
-                info = {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
-                    ) {
-                        Icon(
-                            Icons.Filled.Folder,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(ListeaDimens.IconSize)
-                        )
-                        Text("Root folder", style = MaterialTheme.typography.bodyMedium)
-                    }
-                    Text(
-                        rootLabel,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    // What is actually in there, counted the same way a List's scan counts it, so
-                    // this and a folder-backed List can never disagree about what the root holds.
-                    StatusLine(
-                        storageSummary(storage),
-                        tone = if (storage is StorageInfo.Unavailable) {
-                            StatusTone.Warning
-                        } else {
-                            StatusTone.Neutral
-                        },
-                        maxLines = 2
-                    )
-                },
-                actions = {
-                    Button(onClick = { startFolderChange() }, modifier = Modifier.fillMaxWidth()) {
-                        Text(if (rootUri == null) "Select folder" else "Change folder", maxLines = 1)
-                    }
-                }
+        // The one place a folder is added to Listea, and the list of the ones already added.
+        //
+        // It is here rather than on the Upstreams tab because it configures what the app holds,
+        // not what it is showing: the Upstreams tab is a list you open things from, and a button
+        // that changed that list from inside it made the tab both the index and the editor. The
+        // old Folder tab had no "add folder" for the same reason, and this is what the old
+        // "select folder" was — one folder, granted once, listed here.
+        SectionCard(title = "Upstreams") {
+            if (upstreams.isEmpty()) {
+                Text(
+                    "No Upstreams yet",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+            upstreams.forEach { upstream ->
+                UpstreamRow(
+                    upstream = upstream,
+                    available = upstream.rootUri in heldRoots,
+                    generation = storageGeneration
+                )
+            }
+
+            Spacer(Modifier.height(ListeaDimens.CompactGap))
+
+            Button(onClick = { addUpstream.launch(null) }, modifier = Modifier.fillMaxWidth()) {
+                Icon(
+                    Icons.Filled.Add,
+                    contentDescription = null,
+                    modifier = Modifier.size(ListeaDimens.IconSize)
+                )
+                Spacer(Modifier.width(ListeaDimens.CompactGap))
+                Text("Add Upstream", maxLines = 1)
+            }
+
+            addNotice?.let {
+                HelperText(it, tone = StatusTone.Warning)
+            }
+
+            // Both sentences answer a question the old single-root Settings raised and could not
+            // answer: whether adding a folder costs the one already there. It did, and it no
+            // longer does, and neither fact is visible from a screen that only shows a list.
+            HelperText(
+                "An Upstream is a folder Listea has been given. Adding one only grants access " +
+                    "to it — nothing is read and no Tasks are made until you open it and run " +
+                    "Create Tasks on a folder inside it."
             )
-            // The lists that go are the ones linked to the folder being replaced. Nothing is
-            // rebound to the new root, and manual lists are never touched.
-            HelperText("Changing folder deletes the Lists linked to the current one. Manual Lists are kept.")
+            HelperText(
+                "Adding a second Upstream changes nothing about the first. Its Todos and Lists " +
+                    "are about Tasks that still exist, and they stay exactly as they are."
+            )
         }
 
         SectionCard(title = "Review") {
             SwitchRow(
-                label = "Enable Quick Review in Folder",
+                label = "Enable Quick Review in Todo",
                 icon = Icons.Filled.Visibility,
                 checked = settings.folderQuickReviewEnabled,
                 onCheckedChange = { viewModel.setFolderQuickReviewEnabled(it) }
             )
+            // Said in the two places the switch reaches, because it reaches two: the Todo tab,
+            // where it takes the action away, and the Upstreams browser, where it stops drawing
+            // what has already been decided. The sentence this replaces described a Folder tab
+            // that no longer exists.
             HelperText(
-                "Off turns the Folder tab into a plain browser and gallery. Lists keep their " +
-                    "items, completion and actions."
+                "Off takes Quick Review off the Todo tab, and stops the Upstreams browser " +
+                    "showing which files are already checked. Lists keep their items, " +
+                    "completion and actions."
             )
 
             // Keyed by id so a removal takes its own fields with it: the text state inside
@@ -359,6 +365,42 @@ fun SettingsScreen(
                 "Review and Quick Review queue only the items that were unchecked when you " +
                     "opened them. The queue is fixed for that round, so an item you check stays " +
                     "in front of you until you leave."
+            )
+        }
+
+        // A section of its own rather than two more rows on the card above, because neither of these
+        // is about how a screen behaves: they are what a *new* Todo is created with, and the Todo's
+        // own card is where they are changed once it exists. Grouping them with the review switches
+        // would suggest they act on the review in front of the user, which is exactly what they do
+        // not do.
+        SectionCard(title = "Todos") {
+            Text(
+                "What new Todos start with",
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Spacer(Modifier.height(ListeaDimens.CompactGap))
+            ContentPolicyChoice(
+                selected = settings.defaultContentPolicy,
+                onSelect = { viewModel.setDefaultContentPolicy(it) }
+            )
+            HelperText(
+                "A new Todo is created with this answer, and remembers whatever the Create Tasks " +
+                    "dialog is told instead. It decides what happens to a Task whose files have " +
+                    "changed outside Listea — keeping it flags what has gone, starting it over " +
+                    "clears its ticks, and replacing it takes the Task out of every List holding " +
+                    "it. Only the last of the three removes anything."
+            )
+            SwitchRow(
+                label = "Follow the upstream on new Todos",
+                icon = Icons.Filled.Refresh,
+                checked = settings.followUpstreamNewTodos,
+                onCheckedChange = { viewModel.setFollowUpstreamNewTodos(it) }
+            )
+            HelperText(
+                "On, a Todo is created following its upstream: opening it scans the folder and " +
+                    "brings in material that appeared since, without asking. Off, opening a Todo " +
+                    "never writes — which is what every version before this one did. Either way a " +
+                    "Todo's own card can switch it on or off for that Todo alone."
             )
         }
 
@@ -520,6 +562,26 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(ListeaDimens.RowGap))
 
+            // Which Upstream these two controls are about, and nothing at all while there is only
+            // one: a choice with a single answer is a control that cannot be used, and it would
+            // push the thing it labels off a narrow card to say nothing. With two or more, "the
+            // root" is no longer an answer and the chips are what makes the count below mean
+            // something — a bare "84 checked files" over three folders would be a number with no
+            // subject.
+            if (rootChoices.size > 1) {
+                Text("Upstream", style = MaterialTheme.typography.bodyMedium)
+                ActionGroup {
+                    rootChoices.forEach { root ->
+                        val name = upstreams.firstOrNull { it.rootUri == root }?.displayName ?: root
+                        FilterChip(
+                            selected = root == activeRoot,
+                            onClick = { cleanupRoot = root },
+                            label = { Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                        )
+                    }
+                }
+            }
+
             InfoActionsRow(
                 info = {
                     Row(
@@ -532,7 +594,13 @@ fun SettingsScreen(
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(ListeaDimens.IconSize)
                         )
-                        Text("Checked files", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            // Named when there is more than one, so the count below and the chip
+                            // above are unmistakably about the same folder.
+                            if (rootChoices.size > 1) "Checked files in $activeLabel"
+                            else "Checked files",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
                     }
                     StatusLine(
                         // Says "under this root" because that is genuinely what it counts: every
@@ -552,8 +620,8 @@ fun SettingsScreen(
                 },
                 actions = {
                     Button(
-                        onClick = { viewModel.requestCheckedFileDeletion(rootUri?.toString()) },
-                        enabled = rootUri != null && checkedFileCount > 0,
+                        onClick = { viewModel.requestCheckedFileDeletion(activeRoot) },
+                        enabled = activeRoot != null && checkedFileCount > 0,
                         colors = ButtonDefaults.buttonColors(
                             containerColor = MaterialTheme.colorScheme.error,
                             contentColor = MaterialTheme.colorScheme.onError
@@ -584,15 +652,15 @@ fun SettingsScreen(
         Spacer(Modifier.height(ListeaDimens.SectionGap))
     }
 
-    // The totals in the Storage card describe files that have just stopped existing, so a
-    // finished run sends the walk round again rather than leaving them to go quietly stale.
+    // The sizes in the Upstreams card describe files that have just stopped existing, so a
+    // finished run sends the walks round again rather than leaving them to go quietly stale.
     LaunchedEffect(deleteRequest) {
         if (deleteRequest is DeleteCheckedRequest.Done) storageGeneration++
     }
 
     DeleteCheckedFilesDialog(
         request = deleteRequest,
-        rootLabel = rootLabel,
+        rootLabel = activeLabel,
         grantNotice = grantNotice,
         onDismiss = {
             grantNotice = null
@@ -601,104 +669,115 @@ fun SettingsScreen(
         onGrantAccess = {
             grantNotice = null
             // Opens on the folder already in use, so granting is one tap rather than a hunt.
-            grantWriteAccess.launch(rootUri?.let(::initialPickerUri))
+            grantWriteAccess.launch(activeRoot?.let { initialPickerUri(it.toUri()) })
         },
-        onConfirm = { viewModel.confirmDeleteCheckedFiles(rootUri?.toString()) }
-    )
-
-    RootChangeDialog(
-        preview = rootChangePreview,
-        currentRootLabel = rootLabel,
-        onCancel = { viewModel.dismissRootChangePreview() },
-        onConfirm = { pending ->
-            viewModel.dismissRootChangePreview()
-            discardRootOnPick = pending.rootUri
-            // Starts where the current root is, since a replacement is usually near it. Landing
-            // on it is not choosing it: nothing changes until a folder is confirmed.
-            pickFolder.launch(rootUri?.let(::initialPickerUri))
-        }
+        onConfirm = { viewModel.confirmDeleteCheckedFiles(activeRoot) }
     )
 }
 
 /**
- * Spells out what changing the root costs before the picker ever opens: which lists go, what
- * survives, and that nothing happens until a new folder is actually chosen.
+ * One Upstream in Settings: which folder it is, and what is in it.
+ *
+ * The row says what the Upstream *is* — a name, where it sits, how much material is under it — and
+ * nothing about what has been done with it. A Task count would be the same mistake the Upstreams
+ * tab avoids: this table holds folders, not the Tasks imports later made from them, and a number
+ * here would be a second, quieter claim about a relationship that lives somewhere else.
+ *
+ * The size is a full walk of the tree, so it runs off the main thread and reports itself as
+ * measuring rather than showing zeroes it is about to replace. An unreadable folder is a state of
+ * its own and not an empty one: a grant the user revoked and a folder that is genuinely empty look
+ * identical at a glance and mean opposite things.
  */
 @Composable
-private fun RootChangeDialog(
-    preview: RootChangePreview?,
-    currentRootLabel: String,
-    onCancel: () -> Unit,
-    onConfirm: (RootChangePreview) -> Unit
+private fun UpstreamRow(
+    upstream: UpstreamEntity,
+    available: Boolean,
+    generation: Int
 ) {
-    val pending = preview ?: return
-    val count = pending.titles.size
+    val context = LocalContext.current
+    val storage by produceState<StorageInfo>(
+        StorageInfo.Scanning,
+        upstream.id,
+        upstream.relativePath,
+        available,
+        generation
+    ) {
+        value = StorageInfo.Scanning
+        // Resolved and walked in one go, so a folder that has been deleted since it was added is
+        // reported by the same null the missing grant produces: either way there is nothing here
+        // to count, and counting is all this row does with it.
+        value = withContext(Dispatchers.IO) {
+            resolveLinkedFolder(context, upstream.rootUri.toUri(), upstream.relativePath)
+                ?.let { scanFolderStats(context, it.uri) }
+        }?.let { StorageInfo.Ready(it) } ?: StorageInfo.Unavailable
+    }
 
-    AlertDialog(
-        onDismissRequest = onCancel,
-        title = { Text("Change root folder?") },
-        text = {
-            Column {
-                if (count == 0) {
-                    Text("No lists are linked to $currentRootLabel, so nothing will be deleted.")
-                } else {
-                    Text(
-                        "${countLabel(count, "list")} linked to $currentRootLabel will be deleted, " +
-                            "including any created in its subfolders. Their items, checked " +
-                            "state and actions go with them. This cannot be undone."
-                    )
-                    Spacer(Modifier.height(ListeaDimens.RowGap))
-                    pending.titles.take(PREVIEW_TITLES).forEach { title ->
-                        Text(
-                            "• $title",
-                            style = MaterialTheme.typography.bodySmall,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    if (count > PREVIEW_TITLES) {
-                        Text(
-                            "• and ${count - PREVIEW_TITLES} more",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-                }
-                Spacer(Modifier.height(ListeaDimens.RowGap))
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
+        ) {
+            Icon(
+                Icons.Filled.Folder,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(ListeaDimens.IconSize)
+            )
+            Column(Modifier.weight(1f)) {
                 Text(
-                    "Manual lists, and lists linked to any other folder, are kept. Nothing is " +
-                        "deleted unless you go on to choose a new folder.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    upstream.displayName,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
                 )
+                if (upstream.relativePath.isNotEmpty()) {
+                    Text(
+                        "Inside " + upstream.relativePath,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = { onConfirm(pending) }) { Text("Choose new folder") }
-        },
-        dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } }
-    )
+        }
+        // What is actually in there, counted the same way a List's scan counts it, so this and a
+        // folder-backed List can never disagree about what the folder holds.
+        StatusLine(
+            storageSummary(storage),
+            tone = if (storage is StorageInfo.Unavailable) StatusTone.Warning else StatusTone.Neutral,
+            maxLines = 2
+        )
+        if (!available) {
+            // The row stays. An Upstream whose grant is gone is not deleted material — the Todos
+            // and Lists that came out of it are about Tasks that still exist — so this says what
+            // is wrong with the folder rather than removing the folder from the list.
+            Text(
+                "Listea no longer has access to this folder. Add it again to read it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error
+            )
+        }
+        HorizontalDivider(Modifier.padding(vertical = ListeaDimens.CompactGap))
+    }
 }
 
-private const val PREVIEW_TITLES = 5
-
 /**
- * What the Storage card knows about the selected root while it is finding out.
+ * What an Upstream's row knows about its folder while it is finding out.
  *
  * Measuring a tree means walking all of it, which is not instant on a folder worth measuring, and
- * an unreadable folder is not an empty one. Both are states of their own so the card can say
- * which it is in rather than showing a plausible-looking zero.
+ * an unreadable folder is not an empty one. Both are states of their own so the row can say which
+ * it is in rather than showing a plausible-looking zero.
  */
 private sealed interface StorageInfo {
-    data object NoFolder : StorageInfo
     data object Scanning : StorageInfo
     data object Unavailable : StorageInfo
     data class Ready(val stats: FolderStats) : StorageInfo
 }
 
 private fun storageSummary(info: StorageInfo): String = when (info) {
-    StorageInfo.NoFolder -> "Nothing to measure yet"
     StorageInfo.Scanning -> "Measuring…"
-    StorageInfo.Unavailable -> "This folder could not be read"
+    StorageInfo.Unavailable -> "Could not be read"
     is StorageInfo.Ready -> info.stats.summary
 }
 
@@ -899,11 +978,15 @@ private val CustomActionSideBySideMinWidth = 308.dp
 
 /** The quiet line under a control that explains it, in one place so they all match. */
 @Composable
-private fun HelperText(text: String) {
+private fun HelperText(text: String, tone: StatusTone = StatusTone.Neutral) {
     Text(
         text,
         style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant
+        color = if (tone == StatusTone.Warning) {
+            MaterialTheme.colorScheme.error
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant
+        }
     )
 }
 

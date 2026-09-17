@@ -32,6 +32,11 @@ import com.example.listea.data.ReviewItem
  * is only in what is being paged through: this walks the list's own items in the list's own
  * order, so a swipe reaches the next item on the page rather than the next file in a folder, and
  * an item with no file behind it still gets its place in the sequence rather than being skipped.
+ *
+ * An item standing for several files is one item and several pages, which is the same shape Review
+ * gives it: swiping looks at all of its files before it reaches the next item. Reading a multi-file
+ * Task by its first file and then moving on would make the rest of it unreachable from here, which
+ * is what this screen used to do.
  */
 @Composable
 fun ListItemViewerScreen(
@@ -50,6 +55,10 @@ fun ListItemViewerScreen(
     // Keyed on what was opened, so tapping a different item starts there rather than resuming
     // wherever the last look happened to end.
     var currentItemId by rememberSaveable(initialItemId) { mutableStateOf(initialItemId) }
+    // Which file of the opened item is on screen, keyed on the item so looking at another one
+    // starts at its first file. Held here rather than in [AssetRun] because the navigator states
+    // the item and the file at once, and a selection the bar has to draw cannot live below it.
+    var assetIndex by rememberSaveable(currentItemId) { mutableStateOf(0) }
     // Not saved: rotating should return to the item, not to a sheet about it.
     var infoOpen by remember { mutableStateOf(false) }
     var chromeVisible by rememberSaveable { mutableStateOf(true) }
@@ -67,48 +76,66 @@ fun ListItemViewerScreen(
     MediaSystemBars(chromeVisible)
     BackHandler { onClose() }
 
+    // The file's place inside the item, clamped rather than repaired: a resync can take a file
+    // away under a selection that was already made, and showing what is still there beats writing
+    // state from a composition.
+    val assets = assetsOf(item)
+    val currentAsset = assetIndex.coerceIn(0, maxOf(assets.lastIndex, 0))
+    // A level with nothing to move between is not a level, so a one-file item keeps the bar it has
+    // always had: no file name beside the title, no `(1 / 1)`, no inner pair of arrows.
+    val hasAssetLevel = assets.size > 1
+
     MediaShell(
         modifier = modifier,
-        title = item.title,
-        // Where in the list this is, which is the same number the page it was opened from shows.
-        position = "${index + 1} / ${items.size}",
-        onBack = onClose,
+        navigator = MediaNavigator(
+            title = item.title,
+            onBack = onClose,
+            subtitle = assets.getOrNull(currentAsset)?.name?.takeIf { hasAssetLevel },
+            // Where in the list this is, which is the same number the page it was opened from
+            // shows — and inside it, the item's own file position.
+            counter = if (hasAssetLevel) {
+                "${index + 1}(${currentAsset + 1}/${assets.size})/${items.size}"
+            } else {
+                "${index + 1} / ${items.size}"
+            },
+            onPrevious = if (index > 0) {
+                { currentItemId = items[index - 1].id }
+            } else {
+                null
+            },
+            onNext = if (index < items.lastIndex) {
+                { currentItemId = items[index + 1].id }
+            } else {
+                null
+            },
+            onPreviousAsset = assetStep(assets.size, currentAsset, forward = false)?.let { page ->
+                { assetIndex = page }
+            },
+            onNextAsset = assetStep(assets.size, currentAsset, forward = true)?.let { page ->
+                { assetIndex = page }
+            },
+            hasAssetSteps = hasAssetLevel
+        ),
         chromeVisible = chromeVisible,
         media = {
-            SwipeCard(
-                key = item.id,
+            AssetRun(
+                item = item,
+                selectedIndex = currentAsset,
+                player = player,
+                imageLoader = imageLoader,
+                settings = settings,
                 // Both ends simply stop. There is no queue being worked through and nothing to
                 // complete, so running off the end is not an event — it is just the end.
-                canSwipeForward = index < items.lastIndex,
-                canSwipeBack = index > 0,
-                onSwipeForward = { currentItemId = items[index + 1].id },
-                onSwipeBack = { currentItemId = items[index - 1].id },
-                modifier = Modifier.fillMaxSize(),
-                onTap = { chromeVisible = !chromeVisible }
-            ) { zoom ->
-                val asset = assetsOf(item).firstOrNull()
-                if (asset == null) {
-                    // A manual item has no Asset; it still keeps its place in the sequence, with
-                    // nothing to render behind the shell.
-                    LaunchedEffect(zoom) { zoom.contentAspect = null }
-                    PreviewPlaceholder(
-                        Modifier.fillMaxSize().mediaZoom(zoom),
-                        "Manual item",
-                        item.title
-                    )
-                } else {
-                    ItemPreview(
-                        asset = asset,
-                        player = player,
-                        imageLoader = imageLoader,
-                        settings = settings,
-                        zoom = zoom,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                }
-            }
+                canLeaveForward = index < items.lastIndex,
+                canLeaveBack = index > 0,
+                onLeaveForward = { currentItemId = items[index + 1].id },
+                onLeaveBack = { currentItemId = items[index - 1].id },
+                onSelectAsset = { assetIndex = it },
+                onTap = { chromeVisible = !chromeVisible },
+                modifier = Modifier.fillMaxSize()
+            )
         },
-        controls = { MediaInfoBar("Item info") { infoOpen = true } }
+        taskBar = { MediaInfoBar("Item info") { infoOpen = true } }
     )
 
     if (infoOpen) {
@@ -116,6 +143,7 @@ fun ListItemViewerScreen(
         // them here is not a way to set them: the sheet has never had a control on it.
         ReviewItemInfoSheet(
             info = reviewItemInfo(item, settings, listTitle),
+            asset = assets.getOrNull(currentAsset),
             onDismiss = { infoOpen = false }
         )
     }

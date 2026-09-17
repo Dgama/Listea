@@ -22,8 +22,14 @@ fun isAncestorOrSame(a: String, b: String): Boolean =
     a.isEmpty() || a == b || b.startsWith("$a/")
 
 /**
- * Folder-backed lists may not overlap: one scope must not contain the other. Siblings such as
- * `2026-07-11/bilibili` and `2026-07-11/danbooru` do not overlap and can coexist.
+ * True when one scope contains the other — the test "may these two folder scopes stand together".
+ *
+ * It no longer settles ownership, and it is no longer what makes two imports compatible. Import
+ * roots may nest: a Todo over an Upstream and another over a folder inside it are two intentions,
+ * and the Tasks they produce are separate even where they read the same files, so nothing refuses
+ * a second root over ground a first one covers. The one caller left is the legacy folder-backed
+ * List path, which still reads a nested scope as a List to be replaced rather than one to keep
+ * beside — see `FolderListRequest`.
  */
 fun scopesOverlap(a: String, b: String): Boolean = isAncestorOrSame(a, b) || isAncestorOrSame(b, a)
 

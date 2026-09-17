@@ -64,6 +64,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import com.example.listea.data.DissolutionReason
 import com.example.listea.data.FolderDiff
 import com.example.listea.data.ItemAction
 import com.example.listea.data.ListDetail
@@ -196,6 +197,21 @@ fun ListDetailScreen(
                 vertical = ListeaDimens.RowGap
             )
         ) {
+            // 0. Why this List is shorter than the user remembers, when a Todo it held Tasks from
+            // was deleted. Above the Source card because it explains an absence, and everything
+            // under it explains a presence — a user who opened this page to find out where their
+            // items went should not have to read past the folder first.
+            current.list.lastDissolvedCount?.let { count ->
+                item {
+                    StatusLine(
+                        dissolutionNote(count, current.list.lastDissolvedAt, DissolutionReason.fromKey(current.list.lastDissolvedReason)),
+                        tone = StatusTone.Warning,
+                        maxLines = 2
+                    )
+                    Spacer(Modifier.height(ListeaDimens.RowGap))
+                }
+            }
+
             // 1. Source — only folder-backed lists have one to reconcile against.
             val rootUri = current.list.sourceRootUri
             val relativePath = current.list.sourceRelativePath
@@ -369,6 +385,35 @@ private fun ResyncDialogs(viewModel: ListsViewModel) {
             },
             dismissButton = {
                 TextButton(onClick = { viewModel.dismissResyncRequest() }) { Text("Cancel") }
+            }
+        )
+
+        is ResyncRequest.ImportConsent -> AlertDialog(
+            onDismissRequest = { viewModel.dismissResyncRequest() },
+            title = { Text("Import folder?") },
+            text = {
+                Column {
+                    Text(
+                        "Updating this list means importing a file that is not imported yet. " +
+                            "Listea will register " + current.sourceRoot + " as " +
+                            current.importer + " and create the Task for it."
+                    )
+                    Spacer(Modifier.height(ListeaDimens.RowGap))
+                    Text(countLine(current.diff.addedPaths.size, "new file"))
+                    Text(countLine(current.diff.missingPaths.size, "missing file"))
+                    Spacer(Modifier.height(ListeaDimens.RowGap))
+                    Text(
+                        "Nothing is written until you import.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { viewModel.confirmResyncImport() }) { Text("Import") }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.dismissResyncRequest() }) { Text("Not now") }
             }
         )
 
@@ -668,6 +713,10 @@ private fun WebhookSection(
  *
  * The tags are read-only here — actions are set in Review — and carry whatever names Settings
  * currently gives them, which is why [settings] is passed in rather than the labels.
+ *
+ * This row and the review surface's action chips are two renderings of one answer and read it from
+ * one place: [ItemActionTags] takes the names, the tints and the order from Settings, so a rename
+ * relabels both and a starred item is starred wherever it is looked at.
  */
 @Composable
 private fun ItemRow(
@@ -728,39 +777,3 @@ private fun ItemRow(
     }
 }
 
-/**
- * The item's tags: Favourite, and every configured custom action the item carries, one badge
- * each.
- *
- * One badge per action rather than a single joined string, because these are independent flags
- * and the row is read at a glance — "★  Save" as one line invites reading it as one label.
- * Favourite is tinted, the custom ones are not: the star is the only one whose meaning is fixed,
- * and the rest say whatever Settings has named them.
- *
- * Drawn from the configured actions rather than from the item, so an id left behind by a deleted
- * action stays on the row and off the screen. Emits nothing at all for an item with no actions
- * set, so an untagged list stays quiet.
- */
-@Composable
-private fun ItemActionTags(item: ReviewItem, settings: AppSettings) {
-    val tags = settings.actions.filter { it.isSetOn(item.decisions) }
-    if (tags.isEmpty()) return
-
-    Row(horizontalArrangement = Arrangement.spacedBy(ListeaDimens.CompactGap)) {
-        tags.forEach { action ->
-            ListeaBadge(
-                text = settings.labelOf(action),
-                container = if (action == ItemAction.Favourite) {
-                    MaterialTheme.colorScheme.primaryContainer
-                } else {
-                    MaterialTheme.colorScheme.surfaceVariant
-                },
-                contentColor = if (action == ItemAction.Favourite) {
-                    MaterialTheme.colorScheme.onPrimaryContainer
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                }
-            )
-        }
-    }
-}

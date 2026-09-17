@@ -52,10 +52,17 @@ data class TaskEntity(
  * One piece of content presented for a [TaskEntity].
  *
  * [rootUri] and [relativePath] are the same identity [FileReviewStateEntity] uses — the SAF grant
- * the file sits under, then where it sits beneath that — and they are unique together, so the
- * guarantee that one file has one decision survives the move to Tasks exactly as it was. This is
- * the constraint that makes a second List over the same folder resolve to the *same* Task rather
- * than minting a rival one.
+ * the file sits under, then where it sits beneath that. They are unique *per Task*: one Task holds
+ * at most one Asset per file, which is the invariant worth keeping, because two Assets of one Task
+ * at one path would be two answers to the same question.
+ *
+ * They are deliberately **not** unique across Tasks. A file may be the content of several Tasks —
+ * the same folder imported under two intentions — and that is a fact about the Tasks rather than a
+ * collision in this table. What a second import over the same ground produces is its own Task with
+ * its own Asset rows, so the two decisions about one file stay separate. The Assets are separate
+ * rows rather than one shared row because an Asset is content *presented for* a Task, and the two
+ * presentations are not the same thing; a shared-Asset model would need a join table, and the
+ * architecture leaves that open rather than closed by this table's shape.
  *
  * Both are nullable because a Task need not have file-backed content at all, and the UNIQUE index
  * tolerates that: SQLite treats two NULLs as distinct, so any number of pathless Assets can exist
@@ -87,7 +94,8 @@ data class TaskEntity(
     ],
     indices = [
         Index("taskId"),
-        Index(value = ["rootUri", "relativePath"], unique = true)
+        Index(value = ["taskId", "rootUri", "relativePath"], unique = true),
+        Index(value = ["rootUri", "relativePath"])
     ]
 )
 data class AssetEntity(

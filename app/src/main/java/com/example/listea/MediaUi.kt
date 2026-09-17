@@ -12,7 +12,10 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -34,6 +37,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.KeyboardDoubleArrowLeft
+import androidx.compose.material.icons.filled.KeyboardDoubleArrowRight
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.SaveAlt
@@ -71,6 +76,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -88,29 +94,40 @@ import com.example.listea.data.ReviewItem
 import com.example.listea.ui.theme.ListeaMediaChromeTheme
 
 /**
- * The V4.3 media surface, shared by Full Review, Quick Review and the folder File Viewer.
+ * The media surface, shared by Full Review, Quick Review, the list item viewer and the folder File
+ * Viewer.
  *
- * One presentation for all three, and two layers rather than one column: the media fills the
- * screen, and the bars are drawn *over* it. Nothing about the chrome changes how large the media
- * is, which is the whole point - a 16:9 photograph in landscape used to be squeezed into whatever
- * a fixed top bar and a fixed action row left behind, and came out smaller than the same
- * photograph in portrait.
+ * One presentation for all four, and **two levels rather than one column**: what is outside the
+ * frame belongs to the queue and to the item, and what is inside it belongs to the file. The
+ * navigator and the completion bar are given real room of their own; the file's own controls are
+ * drawn over the media and come and go with a tap. That is the whole vocabulary - a control drawn
+ * over the picture is the file's, and a control given its own space is not - and it is what makes
+ * the two levels readable without a label.
+ *
+ * It also replaces V4.3's "the media fills the screen and everything is drawn over it" whenever
+ * [MediaShell] is called with `framePersists`, which is the review frame. The reason V4.3 gave for
+ * that rule still holds and is still why the frame is built this way: a 16:9 photograph in
+ * landscape must not be squeezed into whatever a fixed top bar and a fixed action row leave
+ * behind. What changed is that a bar drawn *over* the media cannot be told apart from a bar the
+ * media is underneath - the transport and the tag chips landed on the same pixels and taps went to
+ * whichever was drawn last. Real room makes that impossible rather than merely unlikely; the
+ * gallery keeps the V4.3 behaviour through `framePersists = false`.
  *
  * There is no subtitle slot and no hint slot - not "unused by default" but absent. What used to
  * live there is in [ItemInfoSheet], opened on request.
  */
 
 /**
- * How much of the media surface the chrome is covering, published to whatever is inside it.
+ * How much of the media surface the dismissible controls are covering, published to whatever is
+ * drawn inside it.
  *
  * Only the video player reads this. An image does not care that a bar is sitting on top of it -
- * it is letterboxed and centred either way - but a video brings its own controls, and those have
- * to land somewhere the action bar is not. See [LocalMediaChrome].
+ * it is letterboxed and centred either way - but a video brings its own transport, and that has
+ * to land somewhere the action chips are not. See [LocalMediaChrome].
  */
 @Immutable
 data class MediaChromeInsets(
     val visible: Boolean = false,
-    val top: Dp = 0.dp,
     val bottom: Dp = 0.dp
 )
 
@@ -125,108 +142,203 @@ data class MediaChromeInsets(
 val LocalMediaChrome = compositionLocalOf { MediaChromeInsets() }
 
 /**
- * The explicit step controls for a screen that walks a queue.
+ * Everything the navigator bar says and everything its controls do: the outermost strip of a media
+ * screen, the one that belongs to the queue and to the thing being looked at rather than to the
+ * file's own controls.
+ *
+ * Three zones, and the two on the outside are what the bar is really for. The title on the left is
+ * what you are reviewing or viewing; the counter with its arrows on the right is where you are in
+ * it; and the middle names the file on screen, which only exists when there is more than one of
+ * them to be on. **A level that has nothing to move between is not a level**, so a Task with one
+ * Asset gets no `(m / n)` and no inner pair of arrows, and the bar then reads exactly as it did
+ * before there were two levels at all.
+ *
+ * The two arrow pairs are deliberately separate rather than one pair that means "next" and leaves
+ * it to the caller to decide next *what*. The outer pair moves the queue and the inner pair moves
+ * a page, and a control that has to be read to know which of the two it does is the confusion this
+ * whole layout exists to stop.
  *
  * A null callback is a disabled control, not an absent one, so an end of the queue is expressed by
  * having nowhere to go rather than by a second flag saying so - there is one answer to "can I step
- * this way", and it is whether there is a step to take.
- *
- * The caller passes this only when its screen really is a navigator. [MediaShell] draws no step
- * controls without it, so a viewer that is not walking anything is never handed arrows it would
- * have to disable.
+ * this way", and it is whether there is a step to take. [hasAssetSteps] is the one thing a null
+ * cannot say: it is the difference between "this Task has one file" and "you are on the last of
+ * its files", and only the first should make the pair disappear.
  */
 @Immutable
-data class MediaNavigation(
-    val onPrevious: (() -> Unit)?,
-    val onNext: (() -> Unit)?
+data class MediaNavigator(
+    /** The left zone: the Task being reviewed, or the file being viewed. */
+    val title: String,
+    val onBack: () -> Unit,
+    /**
+     * The left zone's second line: what the Task is currently marked with.
+     *
+     * A slot rather than a `List<String>` of labels, because the caller already has the item and
+     * the settings and [ItemActionTags] is the one place that turns them into badges. It sits under
+     * the title and not beside it because the title already competes with the file's name for the
+     * bar, and a third thing in that row would take width from both.
+     *
+     * Null on every screen that shows no decisions — a viewer, a Task preview — which is what makes
+     * this bar still one bar rather than a review chrome in a viewer's clothing.
+     */
+    val tags: (@Composable () -> Unit)? = null,
+    /** The middle zone: the file on screen, where the item has more than one. */
+    val subtitle: String? = null,
+    /** The right zone's label, already written: `3(2/3)/7` for a queue with levels under it, `3 / 7` without. */
+    val counter: String? = null,
+    /** The queue's own step controls. */
+    val onPrevious: (() -> Unit)? = null,
+    val onNext: (() -> Unit)? = null,
+    /** The step controls for the pages inside one item. */
+    val onPreviousAsset: (() -> Unit)? = null,
+    val onNextAsset: (() -> Unit)? = null,
+    /** Whether the item on screen has pages to step through at all. */
+    val hasAssetSteps: Boolean = false
 )
 
 /**
- * The frame every media screen shares: media underneath, chrome on top of it.
+ * The frame every media screen shares, in three bands: the navigator, the media, and the bar
+ * underneath the media that belongs to the item rather than to the file.
  *
- * The media slot is given the whole box in both orientations, always, and is composed exactly
- * once - [chromeVisible] adds and removes the two bars *beside* it in the stack, never around it,
- * so toggling them cannot remeasure the media, restart a decode or interrupt playback.
+ * **The two outer bands are the frame and the middle band is the file.** [navigator] says what is
+ * being looked at and moves the queue; [taskBar] is what can be decided *about* the item; and
+ * [assetControls] is the file's own controls - its tags, its Info, and a video's transport - which
+ * appear over the media on a tap and go away on another.
+ *
+ * The two outer bands take real room in the stack rather than floating over the picture. That is
+ * what makes the arrangement mean something: a control drawn over the media is the file's, and a
+ * control given its own space is not. It is also what makes overlap impossible rather than merely
+ * unlikely. The media is letterboxed between them, so it is slightly smaller than the display,
+ * which is the price - and the reason [framePersists] exists, so a gallery that only ever wanted
+ * the picture can still have the whole screen.
+ *
+ * [assetControls] is drawn over the media and is the only band [chromeVisible] reaches when
+ * [framePersists] is set. Its measured height is published through [LocalMediaChrome], which is
+ * how a video's transport knows to sit above the tag chips rather than under them.
  *
  * The background is black rather than a theme surface: ContentScale.Fit letterboxes almost
  * everything, and a photograph reads better against black in a light theme than a light theme
- * reads against a photograph. The bars are a scrim over that, with their contents forced to the
- * dark scheme by [ListeaMediaChromeTheme] so they stay legible whatever is behind them.
+ * reads against a photograph. The bands are a scrim over that, with their contents forced to the
+ * dark scheme by [ListeaMediaChromeTheme] so they stay legible whatever is behind them - which is
+ * the whole of why an unthemed bar is a bug rather than a style.
  *
  * Toggling [chromeVisible] is not this composable's business. The gesture that does it belongs to
- * the media - a tap has to miss the bars to count - so the state is hoisted to the screen and
+ * the media - a tap has to miss the bands to count - so the state is hoisted to the screen and
  * driven from the swipe card, which is also what keeps it independent of which item is showing.
- *
- * Each bar carries its own system-bar inset. The media deliberately carries none: it runs edge to
- * edge, under the status and navigation bars, exactly as a gallery does.
  */
 @Composable
 fun MediaShell(
-    title: String,
-    onBack: () -> Unit,
+    navigator: MediaNavigator,
+    taskBar: @Composable () -> Unit,
     modifier: Modifier = Modifier,
-    position: String? = null,
     chromeVisible: Boolean = true,
-    navigation: MediaNavigation? = null,
-    controls: @Composable (() -> Unit)? = null,
+    framePersists: Boolean = false,
+    assetControls: (@Composable () -> Unit)? = null,
     media: @Composable () -> Unit
 ) {
-    // What the bars actually measured, so a video's own controls can sit between them rather than
-    // under them. Reported as zero while the chrome is down, which is when the bar that measured
-    // the height is not on screen to be avoided.
-    var topBarHeight by remember { mutableStateOf(0.dp) }
-    var bottomBarHeight by remember { mutableStateOf(0.dp) }
+    // What the dismissible band actually measured, so a video's own transport can sit above it
+    // rather than under it. Reported as zero while it is down, which is when the band that
+    // measured the height is not on screen to be avoided.
+    var assetBarHeight by remember { mutableStateOf(0.dp) }
 
-    Box(
+    Column(
         modifier = modifier
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        CompositionLocalProvider(
-            LocalMediaChrome provides MediaChromeInsets(
-                visible = chromeVisible,
-                top = if (chromeVisible) topBarHeight else 0.dp,
-                bottom = if (chromeVisible) bottomBarHeight else 0.dp
-            )
+        MediaChromeSlot(
+            insets = WindowInsets.safeDrawing
+                .only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
+            visible = chromeVisible,
+            persists = framePersists
         ) {
-            media()
+            MediaTopBar(navigator)
         }
 
-        AnimatedVisibility(
-            visible = chromeVisible,
-            modifier = Modifier.align(Alignment.TopCenter),
-            enter = fadeIn(),
-            exit = fadeOut()
-        ) {
-            MediaChromeBar(
-                insets = WindowInsets.safeDrawing
-                    .only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
-                onHeightChange = { topBarHeight = it }
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            CompositionLocalProvider(
+                LocalMediaChrome provides MediaChromeInsets(
+                    visible = chromeVisible,
+                    bottom = if (chromeVisible) assetBarHeight else 0.dp
+                )
             ) {
-                MediaTopBar(
-                    title = title,
-                    position = position,
-                    onBack = onBack,
-                    navigation = navigation
+                media()
+            }
+
+            assetControls?.let { controls ->
+                MediaAssetControls(
+                    visible = chromeVisible,
+                    onHeightChange = { assetBarHeight = it },
+                    controls = controls
                 )
             }
         }
 
-        controls?.let { bar ->
-            AnimatedVisibility(
-                visible = chromeVisible,
-                modifier = Modifier.align(Alignment.BottomCenter),
-                enter = fadeIn(),
-                exit = fadeOut()
-            ) {
-                MediaChromeBar(
-                    insets = WindowInsets.safeDrawing
-                        .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal),
-                    onHeightChange = { bottomBarHeight = it }
-                ) {
-                    bar()
-                }
-            }
+        MediaChromeSlot(
+            insets = WindowInsets.safeDrawing
+                .only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal),
+            visible = chromeVisible,
+            persists = framePersists
+        ) {
+            taskBar()
+        }
+    }
+}
+
+/**
+ * One of the frame's two outer bands.
+ *
+ * [persists] is the difference between a band that is the queue's and a band that is the chrome's.
+ * A review's navigator and completion bar are the first: a tap is meant to clear the *file's*
+ * controls, and taking the position or the checkbox away with them would be answering a question
+ * nobody asked. A gallery's bars are the second, and there the whole point of the tap is that the
+ * picture gets the screen to itself - so they collapse, and the media grows into the room.
+ */
+@Composable
+private fun ColumnScope.MediaChromeSlot(
+    insets: WindowInsets,
+    visible: Boolean,
+    persists: Boolean,
+    content: @Composable () -> Unit
+) {
+    if (persists) {
+        MediaChromeBar(insets = insets) { content() }
+    } else {
+        AnimatedVisibility(visible, enter = fadeIn(), exit = fadeOut()) {
+            MediaChromeBar(insets = insets) { content() }
+        }
+    }
+}
+
+/**
+ * The file's own controls, laid over the media at the bottom of the middle band.
+ *
+ * Laid over rather than given a band of its own, which is the opposite of what the two outer bands
+ * do and the whole reason the two levels stay legible: the navigator and the checkbox are the same
+ * whatever is on screen and are always there, while what can be *done to the file* depends on what
+ * it is — a video's transport, a PDF's markup, an image's nothing — and comes and goes with a tap.
+ * Taking real room for a band that disappears would move the media every time it was summoned.
+ *
+ * It still reports its height, because a bar laid over the media is a bar the media cannot use:
+ * [MediaChromeInsets.bottom] is what lets a video lift its transport clear of it, so the two are
+ * stacked rather than drawn on top of each other.
+ */
+@Composable
+private fun BoxScope.MediaAssetControls(
+    visible: Boolean,
+    onHeightChange: (Dp) -> Unit,
+    controls: @Composable () -> Unit
+) {
+    AnimatedVisibility(
+        visible = visible,
+        modifier = Modifier.align(Alignment.BottomCenter),
+        enter = fadeIn(),
+        exit = fadeOut()
+    ) {
+        // No system-bar inset: this band sits above the frame's own bottom bar, so the navigation
+        // bar is already accounted for by the time it is drawn. Its scrim reaches the media's
+        // edges, which is where the media stops.
+        MediaChromeBar(insets = WindowInsets(0, 0, 0, 0), onHeightChange = onHeightChange) {
+            controls()
         }
     }
 }
@@ -245,7 +357,7 @@ fun MediaShell(
 @Composable
 private fun MediaChromeBar(
     insets: WindowInsets,
-    onHeightChange: (Dp) -> Unit,
+    onHeightChange: (Dp) -> Unit = {},
     content: @Composable () -> Unit
 ) {
     val density = LocalDensity.current
@@ -322,68 +434,147 @@ internal tailrec fun Context.findActivity(): Activity? = when (this) {
 }
 
 /**
- * Back, what you are looking at, where you are in the queue, and how to step.
+ * Back, what you are looking at, the file inside it, where you are in the queue, and how to step.
  *
- * The title carries the weight, so a long name ellipsizes into the space left over instead of
- * pushing the rest off the right edge, and the bar is one line tall whatever it is given.
+ * Three zones left to right, and they are laid out by what can afford to give way. The two outer
+ * zones measure at their natural size first - the back affordance and the counter's arrows are
+ * both fixed-width controls - and the names share what is left. The title asks for what it needs
+ * and no more, so a short one leaves the room to the file's name beside it rather than holding a
+ * share it has no use for.
+ *
+ * There is a floor under that, because the two rules above cannot both hold on every screen. Arrows
+ * at Material's 48dp, an ordinary counter and an item's name worth reading need more width than a
+ * narrow phone at a large font scale has, and the name is what loses. When the bar is narrower than
+ * [NavigatorStepCompactBelow] every control in it comes down to [NavigatorStepCompactSize] at once,
+ * and the name is measured against that instead. 40dp is under the 48dp touch guideline and is a
+ * deliberate trade rather than an oversight: a control that shrinks is a control that stops being
+ * as easy to hit, but the name is what tells the user which item they are on, and 40dp is still a
+ * target a thumb finds.
+ *
+ * The counter is bracketed by its own arrows - "‹ 3 / 12 ›" - rather than sitting apart from them,
+ * because that is what they move: they are the position's own control, and reading them as a group
+ * is what stops them being mistaken for anything that acts on the item. When the item has pages
+ * under it there is a second, outer pair, so the label reads "3(2/3)/7" between four arrows: the
+ * outer two move the queue and the inner two move the file. Grouped, they also take width from the
+ * names in one place instead of two, and the names are the part that can afford to lose it.
+ *
+ * A control at an end is shown disabled rather than removed. Removing it would re-measure the bar
+ * as the user reaches the end of a queue, sliding the counter and the remaining arrow sideways
+ * under a finger that is still on the screen; and an arrow that is present and greyed says "this
+ * is the end", which an absent one does not.
+ *
  * The back affordance is the icon alone: where it goes is obvious from how you got here, and
  * "Back to List" cost a third of the bar to say so.
- *
- * The step controls bracket the counter - "‹ 3 / 12 ›" - rather than sitting apart from it,
- * because that is what they move: they are the position's own control, and reading them as a
- * group is what stops them being mistaken for anything that acts on the item. Grouped, they also
- * take width from the title in one place instead of two, and the title is the part that can
- * afford to lose it.
- *
- * A control at an end is shown disabled rather than removed. Removing it would re-measure the
- * bar as the user reaches the end of a queue, sliding the counter and the remaining arrow
- * sideways under a finger that is still on the screen; and an arrow that is present and greyed
- * says "this is the end", which an absent one does not.
  */
 @Composable
-private fun MediaTopBar(
-    title: String,
-    position: String?,
-    onBack: () -> Unit,
-    navigation: MediaNavigation?
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(end = ListeaDimens.PagePadding),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        IconButton(onClick = onBack) {
-            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-        }
-        Text(
-            title,
-            style = MaterialTheme.typography.titleSmall,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f)
-        )
-        position?.let {
-            Spacer(Modifier.width(ListeaDimens.RowGap))
-            navigation?.let { nav ->
-                MediaStepButton(
-                    icon = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
-                    label = "Previous",
-                    onClick = nav.onPrevious
+private fun MediaTopBar(navigator: MediaNavigator) {
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val stepSize =
+            if (maxWidth < NavigatorStepCompactBelow) NavigatorStepCompactSize else 48.dp
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = navigator.onBack, modifier = Modifier.size(stepSize)) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+            }
+
+            val subtitle = navigator.subtitle
+            val tags = navigator.tags
+            Column(
+                // Measured at its natural width and capped, never weighted. A weighted child is
+                // held to its *share* of the leftover rather than to what it needs, and on a bar
+                // this narrow the share is not enough for either name: split evenly, the item's
+                // name came out as "Wha..." and the file's as "I...". Measured first, the item's
+                // name reads properly and the file's name - the zone the spec sacrifices - takes
+                // what the bar has left, which on the narrowest screens is nothing at all.
+                modifier = if (subtitle == null) {
+                    Modifier.weight(1f)
+                } else {
+                    Modifier.widthIn(max = NavigatorTitleMaxWidth)
+                }
+            ) {
+                Text(
+                    navigator.title,
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                // The Task's tags, under its name and inside the same capped column, so a marked
+                // Task reads as one block rather than as a line and a stray row of chips. The
+                // component emits nothing for an unmarked Task, so the bar keeps its height.
+                if (tags != null) {
+                    Box(Modifier.padding(top = ListeaDimens.CompactGap)) { tags() }
+                }
+            }
+
+            subtitle?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center,
+                    // The only weighted child in the row, so it takes all of what the fixed zones
+                    // leave. Where that is too little to show anything it ellipsizes to a stub
+                    // rather than pushing the controls off the bar, and the Info sheet still names
+                    // the file.
+                    modifier = Modifier.weight(1f)
                 )
             }
-            Text(
-                it,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1
-            )
-            navigation?.let { nav ->
-                MediaStepButton(
-                    icon = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                    label = "Next",
-                    onClick = nav.onNext
+
+            navigator.counter?.let { counter ->
+                Spacer(Modifier.width(ListeaDimens.RowGap))
+                if (navigator.hasAssetSteps) {
+                    MediaStepButton(
+                        icon = Icons.Filled.KeyboardDoubleArrowLeft,
+                        label = "Previous task",
+                        size = stepSize,
+                        onClick = navigator.onPrevious
+                    )
+                    MediaStepButton(
+                        icon = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                        label = "Previous file",
+                        size = stepSize,
+                        onClick = navigator.onPreviousAsset
+                    )
+                } else {
+                    MediaStepButton(
+                        icon = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                        label = "Previous",
+                        size = stepSize,
+                        onClick = navigator.onPrevious
+                    )
+                }
+                Text(
+                    counter,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    modifier = Modifier.padding(horizontal = 2.dp)
                 )
+                if (navigator.hasAssetSteps) {
+                    MediaStepButton(
+                        icon = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        label = "Next file",
+                        size = stepSize,
+                        onClick = navigator.onNextAsset
+                    )
+                    MediaStepButton(
+                        icon = Icons.Filled.KeyboardDoubleArrowRight,
+                        label = "Next task",
+                        size = stepSize,
+                        onClick = navigator.onNext
+                    )
+                } else {
+                    MediaStepButton(
+                        icon = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        label = "Next",
+                        size = stepSize,
+                        onClick = navigator.onNext
+                    )
+                }
             }
         }
     }
@@ -397,48 +588,46 @@ private fun MediaTopBar(
  * control stays on screen at the ends of a queue.
  */
 @Composable
-private fun MediaStepButton(icon: ImageVector, label: String, onClick: (() -> Unit)?) {
-    IconButton(onClick = onClick ?: { }, enabled = onClick != null) {
+private fun MediaStepButton(
+    icon: ImageVector,
+    label: String,
+    size: Dp,
+    onClick: (() -> Unit)?
+) {
+    IconButton(
+        onClick = onClick ?: { },
+        enabled = onClick != null,
+        modifier = Modifier.size(size)
+    ) {
         Icon(icon, contentDescription = label)
     }
 }
 
 /**
- * The one review action row, used by Full Review and Quick Review alike.
+ * The band under the media: whether the item is done, and nothing else on it.
  *
- * Every control edits the decisions the [ReviewItem] carries, through the caller's ViewModel
- * calls, which is what keeps a decision reached in Quick Review indistinguishable from one
- * reached in Review — including the webhook it may fire. Nothing here navigates.
+ * It is the item's control and not the file's, which is why it is on the frame rather than over
+ * the media. Checking something off is a judgment about the Task — one item with several files is
+ * checked once, not once per file — and a judgment that a tap could make disappear is a judgment
+ * the user has to hunt for.
  *
- * It sits outside the swipe detector, as a sibling of the media rather than a child of it, so a
- * tap or a drag that starts on a chip can never be read as a swipe.
- *
- * Completion anchors the leading edge and Info the trailing one; the three tagging controls sit
- * centred between them. Info is apart because it opens a panel rather than toggling anything and
- * should not be mistaken for a fourth thing that can be switched on; completion is apart because
- * it is the one control the swipe gesture also performs, and because a checkbox is a different
- * kind of thing from a chip.
- *
- * Three zones, and the two outer ones are both a 48dp touch target, so the middle is centred on
- * the bar without needing a spacer to balance it. Anchoring completion is what buys the middle
- * zone the width to stay on one line: it was previously in the group, and a checkbox plus its gap
- * was the ~56dp that pushed ordinary labels onto a second row while an empty mirror spacer sat
- * doing nothing on the left.
- *
- * Both outer controls are unweighted, so they measure at full size before the middle is given
- * what is left — neither can be squeezed out however long a custom label is.
+ * Centred and alone, now that the tags have moved off it. The row it used to share with them had
+ * completion at one end and Info at the other, and the checkbox was the thing that made the middle
+ * zone too narrow to hold an ordinary label on one line. Apart from them it also stops being
+ * readable as a fourth chip: a checkbox is a different kind of thing from a tag, and the swipe
+ * gesture performs this one and nothing else.
  */
 @Composable
-fun ReviewActionBar(
+fun TaskCompletionBar(
     item: ReviewItem,
-    settings: AppSettings,
     onToggleCompleted: (Boolean) -> Unit,
-    onToggleAction: (ItemAction, Boolean) -> Unit,
-    onInfo: () -> Unit,
     modifier: Modifier = Modifier,
     reviewBlocked: ReviewBlock? = null
 ) {
-    Column(modifier = modifier.fillMaxWidth()) {
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
         // A blocked Task is shown and navigable but not submittable; the reason is said rather than
         // left for the refusal to explain. Completion by other means is untouched, so the checkbox
         // is disabled here but works from the List's own page.
@@ -446,28 +635,55 @@ fun ReviewActionBar(
             Text(
                 reviewBlocked.label,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = ListeaDimens.RowGap)
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = ListeaDimens.RowGap, vertical = ListeaDimens.CompactGap),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Checkbox(
-                checked = item.decisions.isCompleted,
-                onCheckedChange = onToggleCompleted,
-                enabled = reviewBlocked == null,
-                modifier = Modifier.semantics {
-                    contentDescription =
-                        if (item.decisions.isCompleted) "Checked" else "Not checked"
-                }
-            )
+        Checkbox(
+            checked = item.decisions.isCompleted,
+            onCheckedChange = onToggleCompleted,
+            enabled = reviewBlocked == null,
+            modifier = Modifier.semantics {
+                contentDescription =
+                    if (item.decisions.isCompleted) "Checked" else "Not checked"
+            }
+        )
+    }
+}
 
-        // Wraps rather than clipping: ordinary labels are one centred line, and a pair of
-        // unusually long custom names costs a second line instead of an unreachable control.
+/**
+ * What can be done about the *file* on screen: tag it, or ask what it is.
+ *
+ * The file's band and not the frame's, so a tap that clears the picture takes this with it and
+ * the media gets the screen to itself. It is a scrimmed, darkened strip rather than bare controls
+ * laid on the picture, which is what keeps a white chip legible over a white photograph — and
+ * what keeps an unthemed icon from being drawn black on black, which is what the icons here did
+ * while they shared a row with the frame's own bars instead of being in one.
+ *
+ * Every control edits the decisions the [ReviewItem] carries, through the caller's ViewModel
+ * calls, which is what keeps a decision reached in Quick Review indistinguishable from one
+ * reached in Review — including the webhook it may fire. Nothing here navigates, and nothing here
+ * completes: the checkbox that does is on the frame, a band below.
+ *
+ * The tags are centred in what the Info button leaves and Info keeps the trailing edge. Info is
+ * apart because it opens a panel rather than toggling anything, and should not be mistaken for
+ * another chip that can be switched on. Both outer edges are a 48dp touch target, and the FlowRow
+ * wraps rather than clipping: a pair of unusually long custom names costs a second line instead of
+ * an unreachable control.
+ */
+@Composable
+fun ReviewAssetControls(
+    item: ReviewItem,
+    settings: AppSettings,
+    onToggleAction: (ItemAction, Boolean) -> Unit,
+    onInfo: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = ListeaDimens.RowGap, vertical = ListeaDimens.CompactGap),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
         FlowRow(
             modifier = Modifier.weight(1f),
             horizontalArrangement = Arrangement.spacedBy(
@@ -513,14 +729,98 @@ fun ReviewActionBar(
             }
         }
 
-            IconButton(onClick = onInfo) {
-                Icon(Icons.Outlined.Info, contentDescription = "Item info")
-            }
+        IconButton(onClick = onInfo) {
+            Icon(Icons.Outlined.Info, contentDescription = "Item info")
         }
     }
 }
 
 private val CustomActionLabelMaxWidth = 88.dp
+
+/**
+ * What a Task is currently marked with: Favourite, and every configured custom action it carries,
+ * one badge each.
+ *
+ * Lives here rather than in one of its two callers because there are now two, and they are two
+ * halves of the same answer: a List's row shows the tags *before* a review, and a review surface
+ * shows them *while* one is happening — and a tag set in either has to appear in the other the
+ * moment it is set. One function reading one [AppSettings.actions] is what makes that true rather
+ * than two renderings that agree until one of them is changed.
+ *
+ * One badge per action rather than a single joined string, because these are independent flags and
+ * the row is read at a glance — "★  Save" as one line invites reading it as one label. Favourite is
+ * tinted, the custom ones are not: the star is the only one whose meaning is fixed, and the rest
+ * say whatever Settings has named them.
+ *
+ * Drawn from the configured actions rather than from the item, so an id left behind by a deleted
+ * action stays on the row and off the screen. Emits nothing at all for an item with no actions set,
+ * so an untagged row stays quiet — which is what lets the review surface call it unconditionally.
+ */
+@Composable
+fun ItemActionTags(
+    item: ReviewItem,
+    settings: AppSettings,
+    modifier: Modifier = Modifier
+) {
+    val tags = settings.actions.filter { it.isSetOn(item.decisions) }
+    if (tags.isEmpty()) return
+
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(ListeaDimens.CompactGap)
+    ) {
+        tags.forEach { action ->
+            ListeaBadge(
+                text = settings.labelOf(action),
+                container = if (action == ItemAction.Favourite) {
+                    MaterialTheme.colorScheme.primaryContainer
+                } else {
+                    MaterialTheme.colorScheme.surfaceVariant
+                },
+                contentColor = if (action == ItemAction.Favourite) {
+                    MaterialTheme.colorScheme.onPrimaryContainer
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                }
+            )
+        }
+    }
+}
+
+/**
+ * How much of the navigator bar the item's name may take before it ellipsizes.
+ *
+ * A ceiling and not a share: the name is measured at the size it needs up to here, and the file's
+ * name beside it takes what the bar has left. It exists so that a long Task name cannot take the
+ * whole bar and leave the counter and the controls crowded against the edge. On a bar too narrow to
+ * give the file's name a readable share even so, the item's name wins and the file's name goes to a
+ * stub - the file is named in the Info sheet, and the item's name is what tells you where you are.
+ */
+private val NavigatorTitleMaxWidth = 120.dp
+
+/**
+ * The width below which the navigator's controls come down from Material's 48dp to
+ * [NavigatorStepCompactSize].
+ *
+ * The arithmetic behind the number, so that a later change to the bar has something to check
+ * against. On a bar wide enough to have both names, the fixed zones are five controls at 48dp
+ * (240dp) and a counter of up to six glyphs (about 55dp); the item's name and the file's name
+ * share what is left, and the item's name alone needs about 70dp to say "Whatsapp". Add a margin
+ * for the horizontal inset the bar does not own and the total is around 365dp. Read it as "the
+ * controls give way first, and only once the name has already been reduced to nothing would
+ * shrinking them further buy anything".
+ */
+private val NavigatorStepCompactBelow = 365.dp
+
+/**
+ * What a navigator control measures on a bar too narrow to give it 48dp.
+ *
+ * Under the guideline on purpose — see [MediaTopBar] for the trade it makes — and not much under it.
+ * It is a chosen compromise, not a measured minimum: it is only ever used when the alternative is
+ * an item's name too short to identify the item, and it is bound to be revisited if it turns out to
+ * be hard to hit in practice.
+ */
+private val NavigatorStepCompactSize = 40.dp
 
 /**
  * The bottom bar of a viewer that has no actions: one control, and all it does is open a panel.

@@ -5,22 +5,65 @@ import com.example.listea.data.DecisionTarget
 import com.example.listea.data.FileReviewStateEntity
 import com.example.listea.data.ReviewDecisions
 import com.example.listea.data.ReviewItem
+import com.example.listea.data.TaskStateEntity
 import com.example.listea.data.decodeActionIds
+import com.example.listea.data.decisions
 import com.example.listea.data.rootRelativePathOf
 
 /**
- * Quick Review is offered on any folder the user can browse, whenever they have left it switched
- * on. Switched off means the Folder tab is a plain browser and gallery.
+ * Why a scope has no Task to start a round on, in the words §7 asks for.
  *
- * It used to require a list covering the folder, because it reviewed that list's rows and had
- * nowhere else to put a decision. A decision now belongs to the file, so a folder needs nothing
- * but its own files to be reviewable, and no list is created, consulted or replaced by reviewing
- * one.
- *
- * Switching it off is presentation only. Lists keep their items, completion and actions, and the
- * Folder screen keeps showing which list owns what.
+ * Built for a scope whose queue came back empty and for no other: when there is something to
+ * review the screen has nothing to explain, and a notice would be a second answer to a question
+ * the queue already answered. The third case §7 names — *nothing imported here* — is not a notice
+ * at all; it is [FolderReview.NotImported], because the answer there is a dialog and not a
+ * sentence.
  */
-fun quickReviewAvailable(enabled: Boolean): Boolean = enabled
+sealed interface ScopeNotice {
+    /**
+     * Every Task touching this scope straddles its boundary: the whole of each lies above it, so
+     * queueing one here would be queueing half a Task. Deliberately about *this* scope — the Task
+     * is neither broken nor ineligible, it is simply not here.
+     */
+    data class OnlyPartial(val taskName: String, val parentScope: String) : ScopeNotice
+
+    /**
+     * Tasks sit exactly in this scope and none of them can be judged: some of their content is
+     * missing from the source, some of it has no viewer in this build, or both at once.
+     */
+    data class NothingEligible(val missingContent: Boolean, val noViewer: Boolean) : ScopeNotice
+}
+
+/**
+ * Why [scope] has nothing to queue, or null when it does.
+ *
+ * A pure read of the same catalog rows [folderReviewQueue] queues from, so a scope cannot be told
+ * it is empty by one function and non-empty by the other. Order matters here and is the plan's:
+ * a Task that fits the scope but cannot be judged is the more specific answer than one that does
+ * not fit at all is, and neither is worth saying when there is something to review.
+ *
+ * The level is [catalogLevel] and not [directChildOf], for the reason it is there: a flat Todo
+ * shows every Task it holds at one level, so that level — not the empty prefix of the files' paths
+ * — is what an empty round has to have an answer about.
+ */
+fun scopeNoticeOf(rows: List<CatalogRow>, scope: String, flat: Boolean = false): ScopeNotice? {
+    val direct = catalogLevel(rows, scope, flat)
+    if (direct.any { it.missingAssets == 0 && !it.hasUnviewableAsset }) return null
+
+    if (direct.isNotEmpty()) {
+        return ScopeNotice.NothingEligible(
+            missingContent = direct.any { it.missingAssets > 0 },
+            noViewer = direct.any { it.hasUnviewableAsset }
+        )
+    }
+
+    // Nothing of the scope's own. The only thing left to explain is a Task whose whole lies above
+    // it, which is what browsing into the middle of one looks like. Sorted the way the queue
+    // sorts, so the Task named is the first one a person would meet going back up.
+    return rows.filter { partial(it.groupPath, scope) }
+        .minWithOrNull(catalogOrder)
+        ?.let { ScopeNotice.OnlyPartial(it.displayName, it.groupPath.substringBeforeLast('/', "")) }
+}
 
 /**
  * An item path, which is stored relative to its list's linked folder, rebased onto the SAF root
@@ -59,6 +102,55 @@ fun folderFilesOf(folderPath: String, contents: FolderContents): List<FolderFile
             )
         }
 
+/** The two lines an empty round shows: what it is, and the one thing to do about it. */
+data class EmptyRoundCopy(val headline: String, val detail: String)
+
+/**
+ * What an empty round says, given everything that could have emptied it.
+ *
+ * Pure, and the only place these sentences exist, because an empty round is the one screen a user
+ * has no way to interrogate: there is nothing on it to tap, so the words are the whole of the
+ * answer. [scopeNotice] comes first because it is a fact about the material that no filter, sort or
+ * checked state can change; the rest are about the view the user is holding over material that does
+ * have something in it.
+ *
+ * The last four say "here" and let [name] say where, because a round can be over a folder or over a
+ * whole Todo, and the reasons it can come back empty are the same ones either way. Only
+ * [ScopeNotice]'s own two sentences name a folder, and only a folder round can produce them.
+ */
+fun emptyRoundCopy(
+    scopeNotice: ScopeNotice?,
+    name: String,
+    fileCount: Int,
+    matched: Int,
+    filterIsDefault: Boolean
+): EmptyRoundCopy = when {
+    scopeNotice is ScopeNotice.OnlyPartial -> EmptyRoundCopy(
+        headline = "This folder contains only part of \"" + scopeNotice.taskName + "\"",
+        detail = "Open " + scopeNameOf(scopeNotice.parentScope) + " to review the complete Task."
+    )
+
+    scopeNotice is ScopeNotice.NothingEligible -> EmptyRoundCopy(
+        headline = "Nothing here can be reviewed",
+        detail = when {
+            scopeNotice.missingContent && scopeNotice.noViewer ->
+                "Some of its content is missing from the source folder, and some of it has no " +
+                    "viewer in this build."
+            scopeNotice.missingContent -> "Its content is missing from the source folder."
+            else -> "PDF - viewer available in v0.3."
+        }
+    )
+
+    fileCount == 0 -> EmptyRoundCopy("Nothing to review here yet", name)
+    matched == 0 -> EmptyRoundCopy("Nothing here matches the filter", name)
+    filterIsDefault -> EmptyRoundCopy("Everything here is already checked", name)
+    else -> EmptyRoundCopy("Everything the filter keeps here is already checked", name)
+}
+
+/** How a scope path is named in a sentence. `''` is the root the user picked, which has no name. */
+private fun scopeNameOf(path: String): String =
+    if (path.isEmpty()) "the selected folder" else "\"" + path + "\""
+
 /**
  * A browsed scope's catalog Tasks turned into a review queue.
  *
@@ -86,42 +178,102 @@ fun folderReviewQueue(
 ): List<ReviewItem> {
     val eligible = rows
         .filter { row ->
-            directChildOf(row.groupPath, scope) && row.missingAssets == 0 && !row.hasUnviewableAsset
+            directChildOf(row.groupPath, scope) && reviewable(row)
         }
         .associateBy { it.groupPath }
     val byPath = states.associateBy { it.relativePath }
 
-    fun itemFor(row: CatalogRow, file: FolderFile?): ReviewItem {
-        val state = file?.let { byPath[it.rootRelativePath] }
-        return ReviewItem(
-            id = state?.id ?: 0L,
-            taskId = row.taskId,
-            // Off the registration row, not made here: a folder round's payload has to name a
-            // file-backed Task the same way every time it reports on it.
-            publicId = state?.publicId.orEmpty(),
-            title = row.displayName,
-            sourceUri = file?.uri,
-            // Relative to the scope being reviewed: a direct file's own name, a folder Task's name.
-            relativePath = file?.name ?: row.displayName,
-            sourceMissing = false,
-            target = DecisionTarget.File(rootUri, file?.rootRelativePath ?: row.groupPath),
-            decisions = ReviewDecisions(row.isCompleted, row.isFavorite, decodeActionIds(row.customActions)),
-            sizeBytes = file?.sizeBytes ?: row.sizeBytes,
-            lastModified = file?.lastModified ?: row.lastModified,
-            assets = row.assets,
-            rootRelativePath = row.groupPath
-        )
-    }
+    fun itemFor(row: CatalogRow, file: FolderFile?): ReviewItem =
+        reviewItemFor(rootUri, row, file, file?.let { byPath[it.rootRelativePath] })
 
     return if (files.isNotEmpty()) {
         // The listing is the source of order, exactly as v0.1: walk it, drop files with no Task.
         files.mapNotNull { file -> eligible[file.rootRelativePath]?.let { itemFor(it, file) } }
     } else {
-        eligible.values
-            .sortedWith(
-                compareBy(String.CASE_INSENSITIVE_ORDER, CatalogRow::groupPath)
-                    .thenBy(CatalogRow::groupPath)
-            )
-            .map { itemFor(it, null) }
+        eligible.values.sortedWith(catalogOrder).map { itemFor(it, null) }
     }
 }
+
+/**
+ * A Todo's whole catalog as a review queue: every Task it holds that can be judged, in catalog order.
+ *
+ * This is the round a Todo starts from, and it is the same [ReviewItem] a folder round makes — same
+ * eligibility, same decisions, same write path — over a different set of rows. What it drops is the
+ * *scope*: a Todo is not a folder, and asking whether each Task is a direct child of anything would
+ * be asking a question with no answer for a flat one, where every Task's `groupPath` names a file
+ * that no folder row sits above.
+ *
+ * Nothing is registered and nothing is read off disk: every Task here came from an import run that
+ * already happened, which is the whole difference §7 describes between reviewing a folder and
+ * reviewing a Todo.
+ */
+fun taskReviewQueue(rootUri: String, rows: List<CatalogRow>): List<ReviewItem> =
+    rows.filter(::reviewable)
+        .sortedWith(catalogOrder)
+        .map { reviewItemFor(rootUri, it, null, null) }
+
+/** Whether a catalog Task may be put in a queue at all: §6.4, the content-presentation half. */
+private fun reviewable(row: CatalogRow): Boolean =
+    row.missingAssets == 0 && !row.hasUnviewableAsset
+
+/**
+ * A queue with each item's decisions taken from the state as it stands now, rather than from
+ * whatever the queue was resolved with.
+ *
+ * A round freezes *which* Tasks it walks and must not freeze what has been decided about them.
+ * Checking a Task or tagging it is the normal way through a round, and a surface drawing its
+ * controls from the queue it built on entry would write every tap to the database and show nothing:
+ * it emitted once, and every later write landed behind a value nobody re-read. So the membership
+ * and the order come from the freeze, and the decisions come from here.
+ *
+ * Only the decisions, and that is the whole of the rule. A Task's name, its measurements and why it
+ * is blocked are answers about the *material*, which is what an import wrote and what a catalog row
+ * read; re-resolving them per emission would let a row change shape under a round that had already
+ * fixed its membership. A Task the read does not name keeps what the queue gave it, which is what a
+ * Task that has gone looks like from the review that is still holding it.
+ *
+ * The [ReviewItem.decisions] a queue carries are only meaningful where a query joined `task_state`
+ * in, so this is the same value re-read and never a second opinion about it — the same re-read
+ * [ListsViewModel.deliverFolderReview] already does before building a payload.
+ */
+fun withLiveDecisions(
+    queue: List<ReviewItem>,
+    states: List<TaskStateEntity>
+): List<ReviewItem> {
+    if (queue.isEmpty()) return queue
+    val byTask = states.associateBy { it.taskId }
+    return queue.map { item ->
+        byTask[item.taskId]?.let { item.copy(decisions = it.decisions) } ?: item
+    }
+}
+
+/**
+ * One catalog row as a queue item.
+ *
+ * [file] is the browsed file the row was matched to, when a folder round had a listing to match it
+ * against, and [state] is that file's registration. A Todo round has neither, and the row alone
+ * answers everything the item needs — which is why the two queues can share this.
+ */
+private fun reviewItemFor(
+    rootUri: String,
+    row: CatalogRow,
+    file: FolderFile?,
+    state: FileReviewStateEntity?
+): ReviewItem = ReviewItem(
+    id = state?.id ?: 0L,
+    taskId = row.taskId,
+    // Off the registration row, not made here: a folder round's payload has to name a file-backed
+    // Task the same way every time it reports on it.
+    publicId = state?.publicId.orEmpty(),
+    title = row.displayName,
+    sourceUri = file?.uri,
+    // Relative to the scope being reviewed: a direct file's own name, a folder Task's name.
+    relativePath = file?.name ?: row.displayName,
+    sourceMissing = false,
+    target = DecisionTarget.File(rootUri, file?.rootRelativePath ?: row.groupPath),
+    decisions = ReviewDecisions(row.isCompleted, row.isFavorite, decodeActionIds(row.customActions)),
+    sizeBytes = file?.sizeBytes ?: row.sizeBytes,
+    lastModified = file?.lastModified ?: row.lastModified,
+    assets = row.assets,
+    rootRelativePath = row.groupPath
+)
