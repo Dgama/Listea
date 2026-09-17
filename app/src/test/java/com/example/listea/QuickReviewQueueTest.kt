@@ -5,6 +5,8 @@ import com.example.listea.data.DecisionTarget
 import com.example.listea.data.FileReviewStateEntity
 import com.example.listea.data.ReviewDecisions
 import com.example.listea.data.ReviewItem
+import com.example.listea.data.TaskStateEntity
+import com.example.listea.data.encodeActionIds
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -69,6 +71,19 @@ class QuickReviewQueueTest {
     )
 
     private fun pathOf(item: ReviewItem) = (item.target as DecisionTarget.File).relativePath
+
+    private fun taskState(
+        taskId: String,
+        completed: Boolean = false,
+        favorite: Boolean = false,
+        actions: Set<String> = emptySet()
+    ) = TaskStateEntity(
+        taskId = taskId,
+        isCompleted = completed,
+        isFavorite = favorite,
+        customActions = encodeActionIds(actions),
+        updatedAt = 0
+    )
 
     @Test
     fun `a queued file is addressed by its path under the root`() {
@@ -186,10 +201,237 @@ class QuickReviewQueueTest {
         assertEquals(listOf("c.jpg", "a.jpg", "b.jpg"), queue.map { it.rootRelativePath })
     }
 
+    // §7 — the round a Todo starts, where there is no scope to be a child of.
     @Test
-    fun `quick review is offered on any folder once the setting is on`() {
-        assertTrue(quickReviewAvailable(enabled = true))
-        assertEquals(false, quickReviewAvailable(enabled = false))
+    fun `a Todo queues every Task it holds, folders or not`() {
+        // Three shapes in one catalog: a file at the Upstream's root, a file in a folder, and a
+        // folder-as-Task Task whose groupPath names the folder itself. A folder round would queue
+        // at most one of them from any single scope; a Todo round queues all three, because the
+        // Todo is the scope.
+        val rows = listOf(
+            catalogRow("task-root", "a.jpg", "a.jpg"),
+            catalogRow("task-nested", "2026-07-11/b.jpg", "b.jpg"),
+            catalogRow("task-folder", "2026-07-11/c", "c")
+        )
+        val queue = taskReviewQueue(root, rows)
+
+        assertEquals(listOf("2026-07-11/b.jpg", "2026-07-11/c", "a.jpg"), queue.map { it.rootRelativePath })
+    }
+
+    @Test
+    fun `a Todo addresses each Task by its own path under the root`() {
+        val queue = taskReviewQueue(
+            root,
+            listOf(catalogRow("task-a", "2026-07-11/bilibili/a.jpg", "a.jpg"))
+        )
+
+        assertEquals("2026-07-11/bilibili/a.jpg", pathOf(queue.single()))
+        assertEquals(root, (queue.single().target as DecisionTarget.File).rootUri)
+        assertEquals("task-a", queue.single().taskId)
+    }
+
+    @Test
+    fun `a Todo leaves out what cannot be presented rather than showing part of it`() {
+        val rows = listOf(
+            catalogRow("task-missing", "missing.jpg", "missing.jpg", missingAssets = 1),
+            catalogRow("task-pdf", "paper.pdf", "paper.pdf", unviewable = true),
+            catalogRow("task-ok", "ok.jpg", "ok.jpg")
+        )
+
+        assertEquals(listOf("ok.jpg"), taskReviewQueue(root, rows).map { it.title })
+    }
+
+    // What a round holds live once it is open: the decisions, and nothing else.
+    @Test
+    fun `a round keeps its membership but takes its decisions from the state as it stands`() {
+        // The freeze is on *which* Tasks a round walks, and it has to stay: a live filter would
+        // take the current card out from under the thumb that checked it. What must not be frozen
+        // is the decision, or a checkbox tapped on a review surface writes to the database and
+        // draws nothing — which is exactly what a round that emitted once used to do.
+        val queue = taskReviewQueue(root, listOf(catalogRow("task-a", "a.jpg", "a.jpg")))
+        assertTrue(queue.single().decisions.isCompleted.not())
+
+        val live = withLiveDecisions(
+            queue,
+            listOf(taskState("task-a", completed = true, favorite = true, actions = setOf("a1")))
+        )
+
+        assertTrue(live.single().decisions.isCompleted)
+        assertTrue(live.single().decisions.isFavorite)
+        assertEquals(setOf("a1"), live.single().decisions.customActions)
+        // Unchecking is the same write seen from the other side, so the merge has to carry it back
+        // down as readily as it carried it up.
+        assertEquals(
+            false,
+            withLiveDecisions(live, listOf(taskState("task-a", completed = false))).single()
+                .decisions.isCompleted
+        )
+    }
+
+    @Test
+    fun `a live read says nothing about what a Task is, only what was decided about it`() {
+        // Everything that describes the material — the name, the path, what it measures, whether
+        // its viewer exists — is the import's answer and the queue's to hold. A re-read that moved
+        // any of it would let a row change shape under a round that had already fixed what it
+        // walks, and would make the queue's own order meaningless.
+        val queue = taskReviewQueue(
+            root,
+            listOf(catalogRow("task-a", "2026-07-11/a.jpg", "a.jpg", sizeBytes = 10L))
+        )
+
+        val live = withLiveDecisions(queue, listOf(taskState("task-a", completed = true))).single()
+
+        assertEquals(queue.single().title, live.title)
+        assertEquals(queue.single().relativePath, live.relativePath)
+        assertEquals(queue.single().rootRelativePath, live.rootRelativePath)
+        assertEquals(queue.single().target, live.target)
+        assertEquals(10L, live.sizeBytes)
+    }
+
+    @Test
+    fun `a Task the read no longer names keeps what the queue gave it`() {
+        // A Task deleted while a round holds it — a Todo dissolved behind an open review. The round
+        // is already over material that has gone, and the honest answer is the card it was drawn
+        // from rather than a blank or a dropped row: dropping it would renumber the queue under the
+        // user, which is the one thing the freeze exists to prevent.
+        val rows = listOf(
+            catalogRow("task-a", "a.jpg", "a.jpg", completed = true),
+            catalogRow("task-b", "b.jpg", "b.jpg")
+        )
+        val queue = taskReviewQueue(root, rows)
+
+        val live = withLiveDecisions(queue, listOf(taskState("task-b", completed = true)))
+
+        assertEquals(listOf("a.jpg", "b.jpg"), live.map { it.title })
+        assertTrue(live[0].decisions.isCompleted)
+        assertTrue(live[1].decisions.isCompleted)
+    }
+
+    @Test
+    fun `an empty round has nothing to re-read`() {
+        assertTrue(withLiveDecisions(emptyList(), listOf(taskState("task-a"))).isEmpty())
+    }
+
+    @Test
+    fun `an empty Todo round says why, and a Todo with nothing in it says nothing`() {
+        // Asked at the Todo's root, which is the scope a round opened from the outer screen would
+        // have used. The scope is now an argument rather than implied, because a round can be
+        // started at any level of a Todo and the answer is different at each: what is "empty" at
+        // the root may be a folder's worth of Tasks one level down.
+        val rootScope = ""
+        val nothingEligible = listOf(
+            catalogRow("task-missing", "missing.jpg", "missing.jpg", missingAssets = 1)
+        )
+        assertEquals(
+            ScopeNotice.NothingEligible(missingContent = true, noViewer = false),
+            scopeNoticeOf(nothingEligible, rootScope)
+        )
+        assertEquals(
+            ScopeNotice.NothingEligible(missingContent = false, noViewer = true),
+            scopeNoticeOf(
+                listOf(catalogRow("task-pdf", "paper.pdf", "paper.pdf", unviewable = true)),
+                rootScope
+            )
+        )
+        // A Todo holding nothing at all has no reason to give: it is empty rather than blocked, and
+        // the empty round's own sentence is the honest one.
+        assertEquals(null, scopeNoticeOf(emptyList(), rootScope))
+        // And nothing is said when there is something to review.
+        assertEquals(
+            null,
+            scopeNoticeOf(listOf(catalogRow("task-ok", "ok.jpg", "ok.jpg")), rootScope)
+        )
+    }
+
+    // --- Where a Todo's own root is, and why a flat one has a level at all. -------------------
+
+    /**
+     * A Todo made by a run started inside a subfolder.
+     *
+     * Every `groupPath` such a run writes is prefixed with that subfolder — `childRelativePath(
+     * source.relativePath, …)` — so the Todo's material begins at `xvideo-jp/` and the grant's root
+     * is a level above the Todo rather than the Todo itself. Opening one at `""` found nothing,
+     * which is the defect these pin.
+     */
+    private val nested = listOf(
+        catalogRow("t1", "xvideo-jp/a.mp4", "a.mp4"),
+        catalogRow("t2", "xvideo-jp/b.mp4", "b.mp4")
+    )
+
+    @Test
+    fun `a level is read from the Todo's own root and not from the grant's`() {
+        assertEquals(emptyList<CatalogRow>(), catalogLevel(nested, ""))
+        assertEquals(listOf("t1", "t2"), catalogLevel(nested, "xvideo-jp").map { it.taskId })
+    }
+
+    @Test
+    fun `a flat Todo has one level, whatever depth its Tasks sit at`() {
+        // Flat says the folders were not made into places, so the level is every Task the Todo
+        // holds — including one two segments down, which a path-prefix reading would miss.
+        val rows = nested + catalogRow("t3", "xvideo-jp/sub/c.mp4", "c.mp4")
+
+        assertEquals(
+            listOf("t1", "t2", "t3"),
+            catalogLevel(rows, "xvideo-jp", flat = true).map { it.taskId }
+        )
+        // Not flat, the same catalog is a tree: `sub` is a folder to open and c.mp4 is not here.
+        assertEquals(listOf("t1", "t2"), catalogLevel(rows, "xvideo-jp").map { it.taskId })
+    }
+
+    @Test
+    fun `a flat Todo full of reviewable Tasks reports no reason to be empty`() {
+        // The reported symptom, at the layer it comes from: the level is not empty, so an empty
+        // round over it has no notice to give — the round that came back empty was reading a
+        // different set of rows from the one the catalog was drawing.
+        assertEquals(
+            listOf("t1", "t2"),
+            catalogLevel(nested, "xvideo-jp", flat = true).map { it.taskId }
+        )
+        assertEquals(null, scopeNoticeOf(nested, "xvideo-jp", flat = true))
+        assertEquals(null, scopeNoticeOf(nested, "xvideo-jp"))
+    }
+
+    @Test
+    fun `a flat Todo whose Tasks are all blocked still says which way`() {
+        val blocked = listOf(
+            catalogRow("t1", "xvideo-jp/a.pdf", "a.pdf", unviewable = true),
+            catalogRow("t2", "xvideo-jp/b.mp4", "b.mp4", missingAssets = 1)
+        )
+
+        assertEquals(
+            ScopeNotice.NothingEligible(missingContent = true, noViewer = true),
+            scopeNoticeOf(blocked, "xvideo-jp", flat = true)
+        )
+    }
+
+    @Test
+    fun `a Todo whose run started at the Upstream itself is unchanged by any of this`() {
+        // The origin is the empty path for a run started on the whole Upstream, which is what every
+        // Todo made before this existed looks like, and what it did keeps working. One Task per
+        // child folder, so each groupPath is a single segment and each is a child of the root.
+        val own = listOf(
+            catalogRow("t1", "Camera", "Camera"),
+            catalogRow("t2", "Wechat", "Wechat")
+        )
+
+        assertEquals(listOf("t1", "t2"), catalogLevel(own, "").map { it.taskId })
+        assertEquals(listOf("t1", "t2"), catalogLevel(own, "", flat = true).map { it.taskId })
+        assertEquals(null, scopeNoticeOf(own, ""))
+    }
+
+    @Test
+    fun `a tree Todo's root holds folders and no Tasks, and says so by holding none`() {
+        // The other half of the same rule, and the reason a level is not a subtree: with the tree
+        // kept, one Task per file under a folder leaves the root itself empty of Tasks. Quick
+        // Review is not offered there — the catalog hides the button on an empty level — and the
+        // level one down is where the round starts.
+        val tree = listOf(
+            catalogRow("t1", "Camera/a.jpg", "a.jpg"),
+            catalogRow("t2", "Camera/b.jpg", "b.jpg")
+        )
+
+        assertEquals(emptyList<CatalogRow>(), catalogLevel(tree, ""))
+        assertEquals(listOf("t1", "t2"), catalogLevel(tree, "Camera").map { it.taskId })
     }
 
     // --- The round: which of the folder's files one Quick Review actually walks. -------------

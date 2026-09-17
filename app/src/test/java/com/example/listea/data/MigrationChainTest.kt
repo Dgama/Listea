@@ -428,7 +428,12 @@ class MigrationChainTest {
             ListeaDatabase.MIGRATION_10_11,
             ListeaDatabase.MIGRATION_11_12,
             ListeaDatabase.MIGRATION_12_13,
-            ListeaDatabase.MIGRATION_13_14
+            ListeaDatabase.MIGRATION_13_14,
+            ListeaDatabase.MIGRATION_14_15,
+            ListeaDatabase.MIGRATION_15_16,
+            ListeaDatabase.MIGRATION_16_17,
+            ListeaDatabase.MIGRATION_17_18,
+                ListeaDatabase.MIGRATION_18_19
         )
 
         val CHAIN_FROM_9 = arrayOf(
@@ -436,7 +441,12 @@ class MigrationChainTest {
             ListeaDatabase.MIGRATION_10_11,
             ListeaDatabase.MIGRATION_11_12,
             ListeaDatabase.MIGRATION_12_13,
-            ListeaDatabase.MIGRATION_13_14
+            ListeaDatabase.MIGRATION_13_14,
+            ListeaDatabase.MIGRATION_14_15,
+            ListeaDatabase.MIGRATION_15_16,
+            ListeaDatabase.MIGRATION_16_17,
+            ListeaDatabase.MIGRATION_17_18,
+                ListeaDatabase.MIGRATION_18_19
         )
     }
 }

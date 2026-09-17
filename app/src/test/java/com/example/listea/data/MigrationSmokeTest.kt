@@ -40,8 +40,9 @@ class MigrationSmokeTest {
     fun `the current schema declares the template a List is judged under`() {
         val database = Room.databaseBuilder(context, ListeaDatabase::class.java, SCHEMA_DB).build()
         database.openHelper.writableDatabase.execSQL(
-            "INSERT INTO lists (id, title, createdAt, webhookEnabled, webhookUrl) " +
-                "VALUES (1, 'Trip', 1000, 0, '')"
+            "INSERT INTO lists (id, title, createdAt, webhookEnabled, webhookUrl, " +
+            "lastDissolvedReason) " +
+                "VALUES (1, 'Trip', 1000, 0, '', 'dissolved')"
         )
         database.openHelper.writableDatabase
             .query(
@@ -58,8 +59,9 @@ class MigrationSmokeTest {
     fun `a database created from the entities round-trips`() {
         val database = Room.databaseBuilder(context, ListeaDatabase::class.java, FRESH_DB).build()
         database.openHelper.writableDatabase.execSQL(
-            "INSERT INTO lists (id, title, createdAt, webhookEnabled, webhookUrl) " +
-                "VALUES (1, 'Trip', 1000, 0, '')"
+            "INSERT INTO lists (id, title, createdAt, webhookEnabled, webhookUrl, " +
+            "lastDissolvedReason) " +
+                "VALUES (1, 'Trip', 1000, 0, '', 'dissolved')"
         )
         database.openHelper.writableDatabase
             .query("SELECT title FROM lists WHERE id = 1").use { row ->
@@ -81,7 +83,12 @@ class MigrationSmokeTest {
             .addMigrations(
                 ListeaDatabase.MIGRATION_11_12,
                 ListeaDatabase.MIGRATION_12_13,
-                ListeaDatabase.MIGRATION_13_14
+                ListeaDatabase.MIGRATION_13_14,
+                ListeaDatabase.MIGRATION_14_15,
+                ListeaDatabase.MIGRATION_15_16,
+                ListeaDatabase.MIGRATION_16_17,
+                ListeaDatabase.MIGRATION_17_18,
+                ListeaDatabase.MIGRATION_18_19
             )
             .build()
 

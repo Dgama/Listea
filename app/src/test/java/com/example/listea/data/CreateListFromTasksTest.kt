@@ -167,10 +167,7 @@ class CreateListFromTasksTest {
     }
 
     private suspend fun registerSource(rootUri: String, relativePath: String, kind: ImporterKind): SourceEntity =
-        when (val result = dao.registerSource(rootUri, relativePath, relativePath.ifEmpty { "Root" }, kind, 1000)) {
-            is RegisterSourceResult.Registered -> result.source
-            is RegisterSourceResult.Overlaps -> throw AssertionError("unexpected overlap")
-        }
+        dao.registerSource(rootUri, relativePath, relativePath.ifEmpty { "Root" }, kind, keepTree = true, now = 1000)
 
     private fun filePlan(importRoot: String, files: List<String>) =
         plan(

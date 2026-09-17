@@ -44,6 +44,17 @@ class SettingsTest {
     }
 
     @Test
+    fun `a Todo's two standings start where an untouched install already was`() {
+        // `docs/settings.md`'s rule, asserted rather than assumed: both of these describe behaviour
+        // that already existed (a re-import changed no state, and no run ever started on its own),
+        // so a factory settings object has to say `keep` and off. A default of `reset` here would
+        // silently clear the judgments of every Task in every Todo on the next refresh.
+        val settings = AppSettings()
+        assertEquals(ContentPolicy.KEEP, settings.defaultContentPolicy)
+        assertEquals(false, settings.followUpstreamNewTodos)
+    }
+
+    @Test
     fun `configured display names are what the review chips show`() {
         val settings = settings(c1Name = "Save", c2Name = "Later")
         assertEquals("Save", settings.labelOf(custom1))

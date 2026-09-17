@@ -10,6 +10,7 @@ import com.example.listea.plan
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -114,30 +115,46 @@ class ImportRunTest {
             assertEquals(0, rawInt("SELECT COUNT(*) FROM task_imports WHERE taskId = '$legacy'"))
         }
 
-    // §5.6, AR-2
+    // §5.6, AR-2 — the rule this release deletes
     @Test
-    fun `registering a Source that overlaps an existing one is rejected, parent and child either way`() =
+    fun `registering a Source over ground an existing one covers is allowed, parent and child either way`() =
         runTest {
             val parent = registerSource(ROOT, "a", ImporterKind.FILE_AS_TASK)
-            val parentThenChild =
-                dao.registerSource(ROOT, "a/b", "x", ImporterKind.FILE_AS_TASK, 1000)
-            assertEquals(parent, (parentThenChild as RegisterSourceResult.Overlaps).covering)
+            val child = dao.registerSource(ROOT, "a/b", "x", ImporterKind.FILE_AS_TASK, keepTree = true, now = 1000)
 
-            val child = registerSource(ROOT, "x/y", ImporterKind.FILE_AS_TASK)
-            val childThenParent = dao.registerSource(ROOT, "x", "x", ImporterKind.FILE_AS_TASK, 1000)
-            assertEquals(child, (childThenParent as RegisterSourceResult.Overlaps).covering)
+            // Two rows, not one and not an error. Import roots may nest now, because they stopped
+            // selling ownership of anything: what a Task belongs to is its `task_imports` row, and
+            // the folder a run was started on no longer has to be a folder nothing else covers.
+            assertNotEquals(parent.id, child.id)
+            assertEquals(2, rawInt("SELECT COUNT(*) FROM sources"))
+
+            val outer = registerSource(ROOT, "x", ImporterKind.FILE_AS_TASK)
+            val inner = dao.registerSource(ROOT, "x/y", "y", ImporterKind.FILE_AS_TASK, keepTree = true, now = 1000)
+            assertNotEquals(outer.id, inner.id)
+            assertEquals(4, rawInt("SELECT COUNT(*) FROM sources"))
         }
 
     // §5.6
     @Test
-    fun `a folder inside a covering Source reuses it and registers no second one`() = runTest {
-        val source = registerSource(ROOT, "", ImporterKind.FILE_AS_TASK)
+    fun `a folder inside a covering Source still gets its own Source when one is registered`() =
+        runTest {
+            val source = registerSource(ROOT, "", ImporterKind.FILE_AS_TASK)
 
-        assertEquals(source, dao.findCoveringSource(ROOT, "holiday"))
-        assertEquals(source, dao.findCoveringSource(ROOT, "holiday/sub"))
-        // Reuse is not registration: exactly one Source exists whatever folder is opened inside it.
-        assertEquals(1, rawInt("SELECT COUNT(*) FROM sources"))
-    }
+            // Covering is a question about a path, and it is still answered the same way — the
+            // Source at the grant root covers everything under it. What has gone is the *inference*
+            // from that answer to "so this folder already has an owner": registration no longer
+            // consults it, and a run started lower down is a second intent rather than a reuse.
+            assertEquals(listOf(source.id), dao.sourcesCovering(ROOT, "holiday").map { it.id })
+            assertEquals(listOf(source.id), dao.sourcesCovering(ROOT, "holiday/sub").map { it.id })
+            assertTrue(dao.sourcesAt(ROOT, "holiday").isEmpty())
+
+            val nested = dao.registerSource(ROOT, "holiday", "Holiday", ImporterKind.FILE_AS_TASK, keepTree = true, now = 2000)
+            assertEquals(
+                listOf(nested.id, source.id),
+                dao.sourcesCovering(ROOT, "holiday/sub").map { it.id }
+            )
+            assertEquals(2, rawInt("SELECT COUNT(*) FROM sources"))
+        }
 
     // §5.6, AR-2
     @Test
@@ -254,12 +271,8 @@ class ImportRunTest {
         rootUri: String,
         relativePath: String,
         kind: ImporterKind
-    ): SourceEntity = when (
-        val result = dao.registerSource(rootUri, relativePath, relativePath.ifEmpty { "Root" }, kind, 1000)
-    ) {
-        is RegisterSourceResult.Registered -> result.source
-        is RegisterSourceResult.Overlaps -> throw AssertionError("unexpected overlap with ${result.covering.id}")
-    }
+    ): SourceEntity =
+        dao.registerSource(rootUri, relativePath, relativePath.ifEmpty { "Root" }, kind, keepTree = true, now = 1000)
 
     /** A file-as-Task plan over [files], which are relative to the scan root at [importRoot]. */
     private fun filePlan(importRoot: String, files: List<String>): com.example.listea.ImportPlan =

@@ -540,7 +540,15 @@ class MigrationV12ToV13Test {
     /** Opens the fixture, which is what runs the migration and validates the result. */
     private fun migrate(): ListeaDatabase =
         Room.databaseBuilder(context, ListeaDatabase::class.java, V12_DB)
-            .addMigrations(ListeaDatabase.MIGRATION_12_13, ListeaDatabase.MIGRATION_13_14)
+            .addMigrations(
+                ListeaDatabase.MIGRATION_12_13,
+                ListeaDatabase.MIGRATION_13_14,
+                ListeaDatabase.MIGRATION_14_15,
+                ListeaDatabase.MIGRATION_15_16,
+                ListeaDatabase.MIGRATION_16_17,
+                ListeaDatabase.MIGRATION_17_18,
+                ListeaDatabase.MIGRATION_18_19
+            )
             .build()
 
     /**

@@ -17,10 +17,12 @@ internal suspend fun ListsDao.taskIdOf(
     relativePath: String,
     now: Long = 1000
 ): String {
-    val source = when (val result = registerSource(rootUri, "", "", ImporterKind.FILE_AS_TASK, now)) {
-        is RegisterSourceResult.Registered -> result.source
-        is RegisterSourceResult.Overlaps -> result.covering
-    }
+    // Reuse is asked for here rather than assumed from registration, because registration stopped
+    // reusing anything: it mints a Source per call, on purpose, since a second import over a folder
+    // is a second intention. A fixture that minted one per file would put each file in a Todo of
+    // its own, which is a shape no caller of this helper is trying to set up.
+    val source = sourcesAt(rootUri, "").firstOrNull()
+        ?: registerSource(rootUri, "", "", ImporterKind.FILE_AS_TASK, keepTree = true, now = now)
     runImport(
         source.id,
         // The file's own path is the scanned coverage, so importing one file never flags a sibling

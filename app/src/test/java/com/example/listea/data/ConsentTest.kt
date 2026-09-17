@@ -48,7 +48,7 @@ class ConsentTest {
     fun `the reads that precede consent write nothing, and declining leaves the database unchanged`() =
         runTest {
             // Un-imported material: no Source covers the folder, and the catalog is empty.
-            assertEquals(null, dao.findCoveringSource(ROOT, "holiday"))
+            assertEquals(emptyList<SourceEntity>(), dao.sourcesCovering(ROOT, "holiday"))
             assertEquals(emptyList<CatalogRow>(), dao.getCatalogTasks("no-such-source"))
 
             // Merely looking registered nothing, imported nothing and created nothing. The only

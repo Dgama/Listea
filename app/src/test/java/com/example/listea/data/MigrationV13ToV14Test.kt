@@ -81,6 +81,22 @@ class MigrationV13ToV14Test {
         database.close()
     }
 
+    // --- the V15 step, on the installs it can actually meet ---------------------------------------
+
+    @Test
+    fun `a Source keeps its tree, except a folder-as-Task one`() {
+        writeFixture(withSources = true)
+        val database = migrate()
+
+        // File-as-Task Sources were already read as trees — the catalog descends their groupPath
+        // strings — so the column default is the shape they were in, and nothing about them moves.
+        assertEquals(1, database.count("SELECT keepTree FROM sources WHERE id = 'file-source'"))
+        // Folder-as-Task Sources are one Task per child folder, which has no parents to descend, so
+        // they are stored the way a fresh import of the same thing would store them.
+        assertEquals(0, database.count("SELECT keepTree FROM sources WHERE id = 'folder-source'"))
+        database.close()
+    }
+
     // --- the Asset backfill ---------------------------------------------------------------------
 
     @Test
@@ -228,8 +244,22 @@ class MigrationV13ToV14Test {
      * List 1 is folder-backed at `content://root` over `2026-07-11`; list 2 is manual. Task A's
      * file has a full `list_items` row; Task B's has one with no measurements; Task C exists only
      * through a `file_review_state` row; Task D is a manual item.
+     *
+     * `withSources` writes out the `sources` rows as well, so the chain runs on into V15. It is off
+     * by default because a genuine v13 database has no `sources` table — V14 is what creates it —
+     * and the tests about the V14 step are about what that step does to an install that had none.
+     * Turning it on stands in for a *v14* install that has since run two imports, which is the only
+     * state V15 can be handed: the step it adds reads `sources` and nothing else, so the rest of the
+     * database is irrelevant to what it does. The `CREATE` repeats what `createImportTables` writes,
+     * column for column, and V14 leaves it alone — it is guarded by `IF NOT EXISTS` there for
+     * exactly this reason.
+     *
+     * Both rows carry a `lastImportAt`, because the chain does not stop at V15 any more. V16 keeps
+     * the Sources some run wrote and turns the ones nothing ever read into Upstreams, so a fixture
+     * with `NULL` there would arrive at this test with no `sources` rows at all. What V16 does to
+     * that other kind of row is [MigrationV15ToV16Test]'s subject.
      */
-    private fun writeFixture(): Before {
+    private fun writeFixture(withSources: Boolean = false): Before {
         context.deleteDatabase(V13_DB)
         val file = context.getDatabasePath(V13_DB)
         file.parentFile?.mkdirs()
@@ -376,6 +406,31 @@ class MigrationV13ToV14Test {
                 "VALUES (100, 'FILE-SOLO', 'content://root', '2026-07-11/solo.jpg', 0, 0, '', 0, 1000)"
         )
 
+        if (withSources) {
+            database.execSQL(
+                "CREATE TABLE IF NOT EXISTS sources (" +
+                    "id TEXT NOT NULL, rootUri TEXT NOT NULL, relativePath TEXT NOT NULL, " +
+                    "displayName TEXT NOT NULL, importerKind TEXT NOT NULL, " +
+                    "importerVersion INTEGER NOT NULL, createdAt INTEGER NOT NULL, " +
+                    "lastImportAt INTEGER, lastImportStatus TEXT, PRIMARY KEY(id))"
+            )
+            database.execSQL(
+                "CREATE UNIQUE INDEX IF NOT EXISTS index_sources_rootUri_relativePath " +
+                    "ON sources (rootUri, relativePath)"
+            )
+            // Both have run. A Source that never has is not one any more once V16 is on the chain
+            // — that step keeps the rows an import wrote and turns the rest into Upstreams — and a
+            // fixture meant to stand in for two Todos has to be two Todos.
+            database.execSQL(
+                "INSERT INTO sources (id, rootUri, relativePath, displayName, importerKind, " +
+                    "importerVersion, createdAt, lastImportAt, lastImportStatus) VALUES " +
+                    "('file-source', 'content://root', '', 'Photos', 'file-as-task', 1, 1000, " +
+                    "2000, 'ok'), " +
+                    "('folder-source', 'content://other', '', 'Albums', 'folder-as-task', 1, 1000, " +
+                    "2000, 'ok')"
+            )
+        }
+
         val before = Before(
             itemCount = database.rawInt("SELECT COUNT(*) FROM list_items"),
             completed = database.rawInt(
@@ -390,7 +445,14 @@ class MigrationV13ToV14Test {
 
     private fun migrate(): ListeaDatabase =
         Room.databaseBuilder(context, ListeaDatabase::class.java, V13_DB)
-            .addMigrations(ListeaDatabase.MIGRATION_13_14)
+            .addMigrations(
+                ListeaDatabase.MIGRATION_13_14,
+                ListeaDatabase.MIGRATION_14_15,
+                ListeaDatabase.MIGRATION_15_16,
+                ListeaDatabase.MIGRATION_16_17,
+                ListeaDatabase.MIGRATION_17_18,
+                ListeaDatabase.MIGRATION_18_19
+            )
             .build()
 
     private fun ListeaDatabase.count(sql: String): Int =
