@@ -54,9 +54,11 @@ import com.example.listea.data.decisions
 import com.example.listea.data.encodeActionIds
 import com.example.listea.data.rootRelativePathOf
 import com.example.listea.data.toReviewAsset
+import com.example.listea.data.TaskAssetControls
 import com.example.listea.data.toReviewItem
 import com.example.listea.data.WebhookRecordEntity
 import com.example.listea.data.WebhookRecordSummary
+import com.example.listea.domain.AssetKind
 import com.example.listea.domain.ReviewContext
 import com.example.listea.domain.ReviewResponse
 
@@ -167,7 +169,18 @@ sealed interface ImportFolderRequest {
         val refresh: Boolean,
         val options: ImportOptions,
         val existingTodos: List<String> = emptyList(),
-        val histories: List<DissolvedHistory> = emptyList()
+        val histories: List<DissolvedHistory> = emptyList(),
+
+        /**
+         * The configurable file kinds the scan found, in declaration order, so the dialog asks its
+         * asset-control question once per kind the folder actually holds.
+         *
+         * Computed from the tree the walk already produced rather than by a second walk, and carried
+         * on the request rather than looked up by the dialog because the dialog has no tree: the
+         * walk's result lives in [PendingImport], which the screen cannot see. Empty is a folder of
+         * nothing configurable — PDFs, text — and draws no section at all.
+         */
+        val assetKinds: List<AssetKind> = emptyList()
     ) : ImportFolderRequest
 
     /** The run is writing. */
@@ -759,14 +772,25 @@ class ListsViewModel @JvmOverloads constructor(
      * state, which is still theirs.
      */
     fun observeDetail(listId: Long): Flow<ListDetail?> =
-        combine(dao.observeList(listId), dao.observeItems(listId), dao.observeAssetsForList(listId)) { list, items, assets ->
+        combine(
+            dao.observeList(listId),
+            dao.observeItems(listId),
+            dao.observeAssetsForList(listId),
+            dao.observeAssetControlsForList(listId)
+        ) { list, items, assets, controls ->
             list?.let { owner ->
                 val byTask = assets.groupBy { it.taskId }
+                // A Task with no import row is absent, and the item's default `""` is the right
+                // answer for it: a manual entry has no run behind it to have been configured by.
+                val controlByTask = controls.associate { it.taskId to it.assetControls }
                 ListDetail(
                     owner,
                     items.map { item ->
                         val resolved = byTask[item.taskId].orEmpty().map { it.toReviewAsset() }
-                        item.toReviewItem(owner.sourceRootUri).copy(
+                        item.toReviewItem(
+                            rootUri = owner.sourceRootUri,
+                            assetControls = controlByTask[item.taskId].orEmpty()
+                        ).copy(
                             assets = resolved,
                             reviewBlocked = reviewBlockFor(resolved)
                         )
@@ -1403,7 +1427,8 @@ class ListsViewModel @JvmOverloads constructor(
             displayName = label,
             // Seeded from Settings rather than from any Todo, because there is no Todo yet: this is
             // the answer the user usually gives, offered here so they do not have to give it again.
-            contentPolicy = settings.value.defaultContentPolicy
+            contentPolicy = settings.value.defaultContentPolicy,
+            assetControls = settings.value.defaultControlConfigs()
         )
         pendingImport = PendingImport(rootUri, folderPath, tree, options)
         _importFolderRequest.value = ImportFolderRequest.Confirm(
@@ -1415,7 +1440,8 @@ class ListsViewModel @JvmOverloads constructor(
             // Named after the label is decided, so a folder and the Todo over it read as the same
             // words in the same dialog rather than as a path and a name.
             existingTodos = dao.sourcesAt(rootUri, folderPath).map { it.displayName },
-            histories = dao.dissolvedHistoriesAt(rootUri, folderPath)
+            histories = dao.dissolvedHistoriesAt(rootUri, folderPath),
+            assetKinds = assetKindsPresent(tree.files.map { it.name })
         )
     }
 
@@ -1451,7 +1477,8 @@ class ListsViewModel @JvmOverloads constructor(
             keepTree = source.keepTree,
             // This Todo's own answer, not Settings': a refresh is about a Todo that exists and has
             // already said what a change to its material means.
-            contentPolicy = ContentPolicy.fromKey(source.contentPolicy)
+            contentPolicy = ContentPolicy.fromKey(source.contentPolicy),
+            assetControls = settings.value.controlConfigsFor(source.assetControls)
         )
         pendingImport = PendingImport(source.rootUri, source.relativePath, tree, options, source.id)
         _importFolderRequest.value = ImportFolderRequest.Confirm(
@@ -1459,7 +1486,8 @@ class ListsViewModel @JvmOverloads constructor(
             fileCount = tree.files.size,
             folderCount = tree.directories.size,
             refresh = true,
-            options = options
+            options = options,
+            assetKinds = assetKindsPresent(tree.files.map { it.name })
             // Deliberately no histories: a refresh runs over a Todo that is still here, and a
             // recovery overwrites a Task's judgment. Loading a history into a live Todo would take
             // the decisions made since and quietly replace them with older ones. Recovery is for a
@@ -1553,12 +1581,17 @@ class ListsViewModel @JvmOverloads constructor(
      * The configuration is recorded after the run, and only once the run has happened: a run that
      * failed changed nothing, and a name saying otherwise would be the one thing it did.
      *
-     * One of those four values is not only a record, and it is passed into the run rather than left
-     * to the write below: `contentPolicy` is an instruction *for this run*. The name and the
-     * grouping describe what the Todo is, so a failed run must not leave them changed; the policy
-     * describes what this run should do, so reading it back from a row the write has not reached
-     * yet would make the dialog's answer apply one run late — the user picks *Replace the Task*,
-     * presses Refresh, and watches a `keep` run report nothing replaced.
+     * Two of those values are not only records, and both are passed into the run rather than left to
+     * the write below: `contentPolicy` and `assetControls` are instructions *for this run*. The name
+     * and the grouping describe what the Todo is, so a failed run must not leave them changed; the
+     * policy describes what this run should do, and the control describes what the Tasks it makes
+     * should offer, so reading either back from a row the write has not reached yet would make the
+     * dialog's answer apply one run late — the user picks *Replace the Task*, presses Refresh, and
+     * watches a `keep` run report nothing replaced.
+     *
+     * The two are passed as the same value the write-back below records, which is what keeps the
+     * Todo and its Tasks agreeing about a run neither of them can see: the Todo's copy is what the
+     * next run will get, each Task's is what this one got, and both come from here.
      */
     private suspend fun applyImport(
         pending: PendingImport,
@@ -1581,6 +1614,7 @@ class ListsViewModel @JvmOverloads constructor(
                 importerKind = importer,
                 keepTree = options.keepTree,
                 contentPolicy = options.contentPolicy,
+                assetControls = options.assetControls,
                 followUpstream = settings.value.followUpstreamNewTodos,
                 now = now()
             )
@@ -1604,7 +1638,10 @@ class ListsViewModel @JvmOverloads constructor(
                 recoverFrom = recoverFrom?.sourceId,
                 // The dialog's answer, not the row's: the write-back below records it, and a run
                 // that waited for that write would apply the tier the user just replaced.
-                contentPolicy = options.contentPolicy
+                contentPolicy = options.contentPolicy,
+                // Same rule, same reason: the Tasks this run produces are stamped from this map, so
+                // it has to be what the user just chose rather than what the Todo happens to hold.
+                assetControls = options.assetControls
             )
         }.getOrNull()
 
@@ -1619,7 +1656,8 @@ class ListsViewModel @JvmOverloads constructor(
             displayName = name,
             importerKind = importer,
             keepTree = options.keepTree,
-            contentPolicy = options.contentPolicy
+            contentPolicy = options.contentPolicy,
+            assetControls = options.assetControls
         )
 
         _importVersion.value += 1
@@ -1666,7 +1704,8 @@ class ListsViewModel @JvmOverloads constructor(
             importer = importer,
             displayName = source.displayName,
             keepTree = source.keepTree,
-            contentPolicy = ContentPolicy.fromKey(source.contentPolicy)
+            contentPolicy = ContentPolicy.fromKey(source.contentPolicy),
+            assetControls = settings.value.controlConfigsFor(source.assetControls)
         )
         applyImport(
             pending = PendingImport(
@@ -2150,17 +2189,28 @@ class ListsViewModel @JvmOverloads constructor(
         settingsStore.setFolderQuickReviewEnabled(enabled)
     }
 
-    fun addCustomAction() = launchDb { settingsStore.addCustomAction() }
+    /**
+     * The tags of one file kind, edited from Settings.
+     *
+     * [kind] is a parameter rather than something inferred, because since v0.5.0 the tags belong to
+     * a kind: the Settings screen draws one section per kind the asset-control definition is
+     * compatible with, and each section edits only its own. There is deliberately no "all kinds"
+     * form — a control that edited both at once would make *"video has two tags and images have
+     * three"*, which is the whole reason the sections exist, impossible to express.
+     */
+    fun addCustomAction(kind: AssetKind) = launchDb { settingsStore.addCustomAction(kind) }
 
-    fun setCustomActionDisplayName(id: String, name: String) = launchDb {
-        settingsStore.updateCustomAction(id, displayName = name)
+    fun setCustomActionDisplayName(kind: AssetKind, id: String, name: String) = launchDb {
+        settingsStore.updateCustomAction(kind, id, displayName = name)
     }
 
-    fun setCustomActionWebhookValue(id: String, value: String) = launchDb {
-        settingsStore.updateCustomAction(id, webhookValue = value)
+    fun setCustomActionWebhookValue(kind: AssetKind, id: String, value: String) = launchDb {
+        settingsStore.updateCustomAction(kind, id, webhookValue = value)
     }
 
-    fun removeCustomAction(id: String) = launchDb { settingsStore.removeCustomAction(id) }
+    fun removeCustomAction(kind: AssetKind, id: String) = launchDb {
+        settingsStore.removeCustomAction(kind, id)
+    }
 
     fun setDefaultWebhookEnabled(enabled: Boolean) = launchDb {
         settingsStore.setDefaultWebhookEnabled(enabled)
@@ -2320,6 +2370,13 @@ class ListsViewModel @JvmOverloads constructor(
         // multi-Asset Task, or one no List ever touched — must not silently drop out of the payload.
         // A Task with no single Asset to name it gets its stable wire id from legacy_task_ids,
         // minted lazily the first time it is reported.
+        // Read beside the decisions, for the same reason and with the same freshness: a payload
+        // built from the queue's frozen copy would report the tags a Task was imported under even
+        // after its Todo had been re-run, and the `actions` array is current configuration by
+        // definition.
+        val controls = writeOrder.withLock {
+            dao.getAssetControls(taskIds).associate { it.taskId to it.assetControls }
+        }
         val rows = writeOrder.withLock {
             val fresh = dao.getTaskStates(taskIds).associateBy { it.taskId }
             items.mapIndexedNotNull { index, item ->
@@ -2340,6 +2397,7 @@ class ListsViewModel @JvmOverloads constructor(
             requireEnabled = true,
             useDefaultWebhook = true,
             recordAgainstList = false,
+            assetControls = controls,
             // Both callers are automatic - a queue that ran out, or a review being left - so a
             // folder round always asks, exactly as a List round does.
             confirm = true
@@ -2481,17 +2539,24 @@ class ListsViewModel @JvmOverloads constructor(
         // The whole payload is read in one pass under the ordering lock, so an item write from
         // the swipe that triggered this has certainly landed and the list and its items cannot
         // disagree about what just happened.
+        // The controls are read inside the same pass as the rows, which is the point of the pass:
+        // the payload's `actions` are answered by the very configuration that names the slots, so a
+        // row and its control read at two different moments could disagree about which tag a
+        // selected slot is.
         val stored = writeOrder.withLock {
-            dao.getList(listId)?.let { it to scopedItems(listId, queueIds) }
+            dao.getList(listId)?.let {
+                ListDelivery(it, scopedItems(listId, queueIds), dao.getAssetControlsForList(listId))
+            }
         } ?: return
         deliverPayload(
-            list = stored.first,
-            rows = stored.second,
+            list = stored.list,
+            rows = stored.rows,
             event = event,
             requireEnabled = requireEnabled,
             useDefaultWebhook = useDefaultWebhook,
             recordAgainstList = true,
-            confirm = confirm
+            confirm = confirm,
+            assetControls = stored.controls.associate { it.taskId to it.assetControls }
         )
     }
 
@@ -2504,6 +2569,20 @@ class ListsViewModel @JvmOverloads constructor(
      * the notice, the history record, the empty-payload and switched-off cases — is deliberately
      * identical, because from the user's side it is the same webhook doing the same job.
      */
+    /**
+     * One list round's whole payload input, read in one pass under [writeOrder].
+     *
+     * A named type rather than a `Triple`, because the three parts are read together for a reason
+     * that has to travel with them: a row, the list it belongs to, and the control that names the
+     * row's action slots are one answer about one moment, and a caller that read them separately
+     * would be free to be wrong about which tag a selected slot is.
+     */
+    private data class ListDelivery(
+        val list: ListEntity,
+        val rows: List<ListItemEntity>,
+        val controls: List<TaskAssetControls>
+    )
+
     private suspend fun deliverPayload(
         list: ListEntity,
         rows: List<ListItemEntity>,
@@ -2511,17 +2590,19 @@ class ListsViewModel @JvmOverloads constructor(
         requireEnabled: Boolean,
         useDefaultWebhook: Boolean,
         recordAgainstList: Boolean,
-        confirm: Boolean
+        confirm: Boolean,
+        assetControls: Map<String, String> = emptyMap()
     ) {
         val current = settingsStore.read()
         val listId = list.id
         // Action wire values resolved now, not when the chips were tapped: an item's boolean
-        // means "slot 1 is selected", and what slot 1 is called is current configuration.
+        // means "slot 1 is selected", and what slot 1 is called is current configuration — which
+        // since v0.5.0 also means the *control* is current, because it is what names the slots.
         val items = webhookItems(rows, current)
 
         // Built before the branches below rather than just before the POST: a delivery that
         // never leaves is exactly the one whose body has to be kept.
-        val payload = buildWebhookPayload(event, list, items, current)
+        val payload = buildWebhookPayload(event, list, items, current, assetControls)
 
         // Whichever webhook this is, both halves of its configuration come from the same place:
         // the app default is switched on by the app's own setting, a list's by the list's own.

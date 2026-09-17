@@ -82,6 +82,9 @@ fun SourcesScreen(
     onOpenTodo: (SourceSummary) -> Unit
 ) {
     val sources by viewModel.sourceSummaries.collectAsStateWithLifecycle()
+    // Read for the asset-control line on a card, which resolves the Tasks' recorded record against
+    // the app's current tags and so cannot be answered from the row alone.
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
 
     if (sources.isEmpty()) {
         Column(modifier.fillMaxSize().padding(ListeaDimens.PagePadding)) {
@@ -105,6 +108,7 @@ fun SourcesScreen(
         items(sources, key = { it.id }) { source ->
             TodoCard(
                 source = source,
+                settings = settings,
                 available = source.rootUri in heldRoots,
                 onOpen = { onOpenTodo(source) },
                 onRefresh = { viewModel.requestSourceRefresh(source.id) },
@@ -119,6 +123,7 @@ fun SourcesScreen(
 @Composable
 private fun TodoCard(
     source: SourceSummary,
+    settings: AppSettings,
     available: Boolean,
     onOpen: () -> Unit,
     onRefresh: () -> Unit,
@@ -159,6 +164,14 @@ private fun TodoCard(
             // heading, because the row and the question are the same question.
             Text(
                 todoContentPolicyLabel(source),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            // Beside the tier, because the two are the Todo's standing answers and read as a pair:
+            // what a change to the material means, and what the material is judged with. Shown in
+            // the dialog's words, and under the dialog's own headings.
+            Text(
+                todoAssetControlLabel(source, settings),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -288,6 +301,47 @@ internal fun todoDetail(source: SourceSummary): String = buildString {
  */
 internal fun todoContentPolicyLabel(source: SourceSummary): String =
     "When a Task's content changes: " + ContentPolicy.fromKey(source.contentPolicy).label
+
+/**
+ * What a Todo's Tasks are judged with, said as the dialog that asked.
+ *
+ * The headings are [assetControlHeading]'s — the same words the Create Tasks dialog asked the
+ * question under — so a user who answered it recognises the answer here instead of learning a second
+ * name for it. The same rule [todoContentPolicyLabel] states for the tier beside it, and the two
+ * belong adjacent on the card for the same reason: they are the Todo's standing answers, and a card
+ * that named one of them differently would be the app talking about a decision the user made in
+ * words they never saw.
+ *
+ * **It reports the Tasks' control, not the Todo's** — [SourceSummary.taskAssetControls], never
+ * [SourceSummary.assetControls]. Those are two different facts and the difference is the point:
+ * editing Settings changes what the *next* run produces and leaves every Task already imported
+ * exactly as it was, so a card reporting the Todo's own would answer "what will the next run use"
+ * when the user is asking "what am I about to open". The drift is only legible here.
+ *
+ * A Todo with nothing recorded says so rather than showing nothing: an empty row is
+ * indistinguishable from a card that failed to render it, and "never chosen" is a real answer about
+ * a Todo whose next run has not happened yet.
+ */
+internal fun todoAssetControlLabel(source: SourceSummary, settings: AppSettings): String {
+    if (source.taskAssetControls.isEmpty()) return "Asset control: not chosen yet"
+    // Per kind rather than over the union. The card is the one place a user can see that images
+    // have three tags and videos have two without opening a Task and paging to a video, and that
+    // sentence is the whole reason this section exists. The union rule belongs to the badge row and
+    // the payload instead — they speak about a Task with no file on screen, where naming a tag that
+    // is not *this* file's would be the only honest thing to do.
+    //
+    // `controlFor` rather than the decoded map, so the answer is the one Review will show: a kind
+    // the record leaves out resolves to this app's current default for it, exactly as the chip row
+    // resolves it. A kind left out of the *sentence* when that default has no tags — a user who
+    // deleted every video tag — because a heading followed by nothing says less than no heading.
+    return configurableAssetKinds()
+        .mapNotNull { kind ->
+            val tags = settings.controlFor(source.taskAssetControls, kind).tags
+            if (tags.isEmpty()) null
+            else assetControlHeading(kind) + ": " + tags.joinToString(", ") { it.displayName }
+        }
+        .joinToString(" · ")
+}
 
 /**
  * What a Todo's last run did, or that it has never run.

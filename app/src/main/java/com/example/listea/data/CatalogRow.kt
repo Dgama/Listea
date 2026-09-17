@@ -21,10 +21,20 @@ data class CatalogProjection(
     val isCompleted: Boolean,
     val isFavorite: Boolean,
     val customActions: String,
+    val assetControls: String,
     val assetCount: Int,
     val missingAssets: Int,
     val sizeBytes: Long?,
     val lastModified: Long?
+)
+
+/**
+ * One Task's recorded asset control, for the queries that need it beside something else rather than
+ * on a row of its own. Query result, not a table — see `ListsDao.observeAssetControlsForList`.
+ */
+data class TaskAssetControls(
+    val taskId: String,
+    val assetControls: String
 )
 
 /** One Task in the catalog: what it is, where it sits, and whether any of its content cannot render. */
@@ -39,6 +49,16 @@ data class CatalogRow(
     val missingAssets: Int,
     val sizeBytes: Long?,
     val lastModified: Long?,
+
+    /**
+     * The asset control this Task was imported under, straight off `task_imports`.
+     *
+     * Undecoded and per Task, which is what every reader here needs it as: a catalog row is a Task
+     * with no file on screen, so the kind to resolve for is not yet known — see
+     * [ReviewItem.assetControls]. `""` is a Task imported before v0.5.0 and reads as this app's
+     * current default.
+     */
+    val assetControls: String = "",
 
     /** True when at least one required Asset has no viewer in this build — e.g. a PDF. */
     val hasUnviewableAsset: Boolean,
@@ -90,6 +110,35 @@ data class SourceSummary(
     val contentPolicy: String = ContentPolicy.Default.key,
     val followUpstream: Boolean = false,
     val keepStateOnDelete: Boolean = false,
+
+    /**
+     * The asset control the Todo was last imported under, as `sources.assetControls` holds it.
+     *
+     * Read for the same reason [contentPolicy] is: the card states the Todo's standing answers, and
+     * this one is what the *next* run's dialog opens on. It is not, however, what the card's label
+     * reports — see [taskAssetControls], which is, and the two exist side by side so the difference
+     * is visible in the type rather than only in a comment.
+     */
+    val assetControls: String = "",
+
+    /**
+     * The same, as the Todo's **Tasks** hold it: what a user will actually see on opening one.
+     *
+     * This is what the card's label reports, and it is deliberately not [assetControls]. A run
+     * stamps every Task it makes, and editing Settings afterwards changes what the *next* run
+     * produces while leaving every Task already imported exactly as it was — so the two values drift,
+     * and a card reporting the Todo's own would say "the next run will use these" at the one moment
+     * the user is asking "what am I about to look at". Decision 8's whole point is that the drift is
+     * legible where it matters, which is here.
+     *
+     * `MAX` over the Tasks, which is a stable pick rather than a meaningful one, and stable in the
+     * direction that helps: `''` sorts below every record, so a Todo holding one Task with a record
+     * and one without shows the record — the answer a reader would have reached anyway — instead of
+     * the empty string that means *never chosen*. Tasks under one Todo are stamped by one run and
+     * normally agree; when they do not, this names one of them and the Tasks remain the authority.
+     * `''` for a Todo with no Tasks at all, which is a Todo whose next run has not happened yet.
+     */
+    val taskAssetControls: String = "",
 
     val lastImportAt: Long?,
     val lastImportStatus: String?,

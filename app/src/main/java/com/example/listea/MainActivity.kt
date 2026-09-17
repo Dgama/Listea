@@ -80,6 +80,8 @@ import com.example.listea.data.ReviewDecisions
 import com.example.listea.data.SharedFileState
 import com.example.listea.data.SourceSummary
 import com.example.listea.data.decodeActionIds
+import com.example.listea.domain.AssetKind
+import com.example.listea.domain.Templates
 import com.example.listea.ui.theme.ListeaTheme
 
 class MainActivity : ComponentActivity() {
@@ -1458,6 +1460,22 @@ private fun ImportConfirmDialog(
     // Null is "start fresh" and is the seeded answer, so a user who does not read this far gets the
     // Todo they would have got before histories existed.
     var recoverFrom by rememberSaveable(runKey) { mutableStateOf<String?>(null) }
+    // The draft is held *encoded* rather than as a map, and that is not a workaround for
+    // `rememberSaveable` — it is the same value the run will be given and the Todo will record, so
+    // the draft and the write are one expression rather than two that agree. It also makes the
+    // draft survive a rotation, which a `Map<AssetKind, …>` would not without a custom saver.
+    var controls by rememberSaveable(runKey) {
+        mutableStateOf(encodeAssetControls(seed.assetControls))
+    }
+    val draft = remember(controls) { decodeAssetControls(controls) }
+
+    // One edit, one re-encode. Keyed by kind, because a tag id is only unique within its own kind —
+    // the two sections both start from `custom1` — so an edit that did not name its kind would
+    // rename the other section's tag as well.
+    fun editKind(kind: AssetKind, change: (List<CustomAction>) -> List<CustomAction>) {
+        val current = draft[kind] ?: AssetControlConfig(Templates.MediaAssetControl.ref, emptyList())
+        controls = encodeAssetControls(draft + (kind to current.copy(tags = change(current.tags))))
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1541,6 +1559,28 @@ private fun ImportConfirmDialog(
                     selected = policy,
                     onSelect = { policy = it }
                 )
+                // Drawn for a refresh too, and for the same reason the tier above is: an asset
+                // control is not a fact about the Source, it is what this run is to be given, and a
+                // refresh is exactly the run that re-stamps every Task it touches.
+                //
+                // Once per kind the folder actually holds, so a folder of photographs is asked one
+                // question rather than two with one of them meaningless. Nothing is asked at all for
+                // a folder of PDFs and text — no kind there can be configured.
+                request.assetKinds.forEach { kind ->
+                    AssetControlTagEditor(
+                        heading = assetControlHeading(kind),
+                        tags = draft[kind]?.tags.orEmpty(),
+                        keyPrefix = kind,
+                        onRename = { id, displayName -> editKind(kind) { tags ->
+                            tags.map { if (it.id == id) it.copy(displayName = sanitizeActionText(displayName)) else it }
+                        } },
+                        onRewire = { id, webhookValue -> editKind(kind) { tags ->
+                            tags.map { if (it.id == id) it.copy(webhookValue = sanitizeActionText(webhookValue)) else it }
+                        } },
+                        onRemove = { id -> editKind(kind) { tags -> tags.filterNot { it.id == id } } },
+                        onAdd = { editKind(kind) { tags -> tags + nextCustomActionDefaults(tags) } }
+                    )
+                }
                 // Read outside the grouping branch, because a history says nothing about grouping:
                 // what it holds is matched against the new Todo's own `groupPath`s, and a history
                 // whose grouping differs simply matches none of them. Only Create Tasks sets it —
@@ -1563,7 +1603,12 @@ private fun ImportConfirmDialog(
                             importer = importer,
                             displayName = name,
                             keepTree = keepTree,
-                            contentPolicy = policy
+                            contentPolicy = policy,
+                            // The draft whole, not only the kinds the folder holds: a kind the
+                            // dialog did not ask about was seeded from the Todo's own answer or
+                            // from Settings, and dropping it here would clear the configuration of
+                            // every kind absent from *this* folder's scan.
+                            assetControls = draft
                         ),
                         // Resolved here rather than in the ViewModel, because the id is what
                         // survives a configuration change and the object is what the report needs.
@@ -2252,13 +2297,15 @@ private fun SharedFileDialog(
 /** One Todo's line: which Todo, what its Task over this file is called, and what it decided. */
 @Composable
 private fun SharedFileStateRow(state: SharedFileState, settings: AppSettings) {
+    // Resolved over the Task's kinds, not one file's: this row names what a whole Task decided, and
+    // the drill-in is reached from a file that several Tasks may be over.
     val actions = itemActionLabel(
         ReviewDecisions(
             isCompleted = state.isCompleted,
             isFavorite = state.isFavorite,
             customActions = decodeActionIds(state.customActions)
         ),
-        settings
+        settings.controlForTask(state.assetControls)
     )
 
     Row(

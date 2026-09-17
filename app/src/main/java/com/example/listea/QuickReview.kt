@@ -275,5 +275,9 @@ private fun reviewItemFor(
     sizeBytes = file?.sizeBytes ?: row.sizeBytes,
     lastModified = file?.lastModified ?: row.lastModified,
     assets = row.assets,
-    rootRelativePath = row.groupPath
+    rootRelativePath = row.groupPath,
+    // Off the catalog row, which is where an import's own answers live — the same place the name,
+    // the measurements and the block come from, and frozen for the same reason as those: a round
+    // fixes what the *material* is and re-reads only what has been decided about it.
+    assetControls = row.assetControls
 )

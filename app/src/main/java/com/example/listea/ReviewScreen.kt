@@ -128,7 +128,7 @@ fun reviewItemInfo(
     sourceUri = item.sourceUri,
     sourceMissing = item.sourceMissing,
     isCompleted = item.decisions.isCompleted,
-    actionLabel = itemActionLabel(item.decisions, settings),
+    actionLabel = itemActionLabel(item.decisions, settings.controlForTask(item.assetControls)),
     listTitle = listTitle
 )
 
@@ -571,6 +571,19 @@ fun ReviewSession(
     // instead of writing state from a composition.
     val assets = assetsOf(item)
     val currentAsset = assetIndex.coerceIn(0, maxOf(assets.lastIndex, 0))
+
+    // The bands' two answers, resolved here because this is the only place that knows both which
+    // Task is on screen and which of its files. The chip row belongs to the *file* — its kind comes
+    // off the Asset's own basename rather than the Task's, so paging from a photograph to a video
+    // changes it, which is the release. The badge row belongs to the *Task* and is resolved over
+    // every kind the Task is configured for, because it is drawn under the Task's name with no
+    // particular file on screen. See [ItemActionTags].
+    //
+    // `name` and not `relativePath`: a classifier wants the basename, and it is what
+    // `reviewBlockFor` already hands `assetViewerAvailable` for the same file.
+    val kind = assetKindOf(assets.getOrNull(currentAsset)?.name.orEmpty())
+    val control = settings.controlFor(item.assetControls, kind)
+    val taskControl = settings.controlForTask(item.assetControls)
     // A level with nothing to move between is not a level, so a one-file Task keeps the bar it has
     // always had: no file name beside the title, no `(1 / 1)`, no inner pair of arrows.
     val hasAssetLevel = assets.size > 1
@@ -588,10 +601,12 @@ fun ReviewSession(
             // and not about the page: a tag is set and read from the same Task whichever Asset is
             // on screen, and a tap that clears the picture must not take the answer with it.
             //
-            // [settings] is the same flow the action chips below are drawn from, so a chip and its
-            // badge cannot disagree, and it is the live one — the round re-reads its decisions on
-            // every write now, so toggling a chip fills this in the same frame.
-            tags = { ItemActionTags(item, settings) },
+            // Resolved from the same record the chip row below is, so a chip and its badge cannot
+            // name the same tag differently — but over the Task's kinds rather than this page's,
+            // which is the one difference between them and is deliberate. It is the live record:
+            // the round re-reads its decisions on every write now, so toggling a chip fills this in
+            // the same frame.
+            tags = { ItemActionTags(item, taskControl) },
             // The queue's own position, and inside it the page's. For Quick Review this is the
             // folder's items and not the owning list's total: completion progress is a list's
             // business and lives on its page.
@@ -635,10 +650,11 @@ fun ReviewSession(
         assetControls = {
             ReviewAssetControls(
                 item = item,
-                // Observed by the caller rather than threaded through every screen: renaming an
-                // action in Settings relabels the chips immediately, with no restart and no item
-                // touched.
-                settings = settings,
+                // This page's own control, resolved above from the Task's record and the Asset's
+                // kind. Renaming a tag relabels the chips of every Task whose control carries it,
+                // with no restart and no row touched — and no longer every chip on every Asset,
+                // which is the point of the release.
+                control = control,
                 onToggleAction = { action, enabled ->
                     viewModel.setItemAction(item, action, enabled)
                 },

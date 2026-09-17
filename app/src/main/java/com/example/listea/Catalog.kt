@@ -3,6 +3,7 @@ package com.example.listea
 import com.example.listea.data.CatalogRow
 import com.example.listea.data.ReviewAsset
 import com.example.listea.data.ReviewBlock
+import com.example.listea.domain.AssetKind
 
 /**
  * The catalog's containment algebra and the one place content viewability is classified.
@@ -46,10 +47,16 @@ fun directChildOf(groupPath: String, scope: String): Boolean =
  * catalog badge both call this; it is filename-based because a Task nobody is looking at must still
  * be answerable, and because `MediaPreview` classifies mime-first at render time, which a stored
  * fact would not.
+ *
+ * Written in terms of [assetKindOf] rather than of `mediaKindOf` directly, which is what makes this
+ * and the asset-control lookup the *same* opinion rather than two that agree. A file that has a tag
+ * row is exactly a file whose Task can be submitted, and that has to be true by construction: if
+ * the two were separate, a file could be judged by no control or governed by a control that never
+ * appears, and the user would find it before a test did.
  */
-fun assetViewerAvailable(name: String): Boolean {
-    val kind = mediaKindOf(name) ?: return false
-    return kind == MediaKind.PICTURE || kind == MediaKind.VIDEO
+fun assetViewerAvailable(name: String): Boolean = when (assetKindOf(name)) {
+    AssetKind.IMAGE, AssetKind.VIDEO -> true
+    AssetKind.OTHER -> false
 }
 
 /**

@@ -29,7 +29,7 @@ import java.util.UUID
         UpstreamEntity::class,
         DissolvedTaskStateEntity::class
     ],
-    version = 19,
+    version = 20,
     exportSchema = true
 )
 abstract class ListeaDatabase : RoomDatabase() {
@@ -862,6 +862,48 @@ abstract class ListeaDatabase : RoomDatabase() {
         }
 
         /**
+         * V20 lets a Todo, and each Task under it, record which asset control governs its files.
+         *
+         * Two `ALTER`s and nothing else, both not-null with a default, so SQLite fills every
+         * existing row in the statement itself and the table is never briefly in a state the entity
+         * cannot describe — the shape `MIGRATION_14_15`'s `keepTree` and `MIGRATION_18_19`'s
+         * `contentPolicy` already use, and they say why.
+         *
+         * ## `''` means "never chosen", and nothing here may be read as "no tags"
+         *
+         * This is the one thing about this version worth being careful with, and it is subtler than
+         * the defaults the two migrations above chose. `'keep'` was a policy that could be described
+         * and applied; `''` is the *absence of an answer*, and every reader has to resolve it as
+         * *this app's current configuration for the kind* rather than as an empty tag set. A reader
+         * that gets it wrong strips the tag row off every Asset of every Todo already on the device
+         * — silently, without an error, and without a row changing.
+         *
+         * ## Why nothing is backfilled
+         *
+         * Two reasons, and the second is the real one. The mechanical one: a migration runs against
+         * SQLite and cannot read DataStore, so the tags the user currently has are not available to
+         * it. The one that matters: there is nothing correct to write even if they were. What a Todo
+         * predating this version "chose" is *the app default, continuously* — so freezing a snapshot
+         * of today's list onto the row would not preserve the old behaviour, it would end it, and
+         * the user would see it end the next time they edited Settings.
+         *
+         * Absence is therefore both behaviour-preserving and self-healing: every Asset offers what
+         * it offered yesterday, and the next import run stamps the answer the user gives it. That is
+         * the same "a read rather than a one-off rewrite" argument `SettingsStore`'s per-kind tag
+         * keys make from the other side, and the two together are the whole upgrade path.
+         */
+        internal val MIGRATION_19_20 = object : Migration(19, 20) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
+                    "ALTER TABLE sources ADD COLUMN assetControls TEXT NOT NULL DEFAULT ''"
+                )
+                connection.execSQL(
+                    "ALTER TABLE task_imports ADD COLUMN assetControls TEXT NOT NULL DEFAULT ''"
+                )
+            }
+        }
+
+        /**
          * The four tables V14 introduces, in the shape the entities declare and `14.json` records.
          *
          * Written out one statement at a time, for the same reason [createTaskTables] is: a column
@@ -1163,7 +1205,8 @@ abstract class ListeaDatabase : RoomDatabase() {
                     MIGRATION_15_16,
                     MIGRATION_16_17,
                     MIGRATION_17_18,
-                    MIGRATION_18_19
+                    MIGRATION_18_19,
+                    MIGRATION_19_20
                 )
                     .build()
                     .also { instance = it }

@@ -276,10 +276,26 @@ fun buildWebhookPayload(
     event: String,
     list: ListEntity,
     items: List<ListItemEntity>,
-    settings: AppSettings
+    settings: AppSettings,
+    /**
+     * What each item's Task was imported under, by Task id, as `task_imports.assetControls` holds
+     * it.
+     *
+     * A lookup passed in rather than a field on [ListItemEntity], because the record belongs to the
+     * Task and neither row this builder is handed carries it: a list round's rows come from a
+     * membership query that does not join `task_imports`, and a folder round's are synthetic.
+     * Absent, it resolves to this app's current default — which is the behaviour-preserving reading
+     * and is what every caller that predates v0.5.0 means.
+     *
+     * It is keyed by Task because that is what a control *is* keyed by, and it is read here rather
+     * than resolved by the caller because the wire values a tag sends are answered by the same
+     * configuration that decides which tags exist — one lookup, so the `actions` array cannot name
+     * a tag the row's kind never offered.
+     */
+    assetControls: Map<String, String> = emptyMap()
 ): String {
     val itemsJson = JSONArray()
-    items.forEach { itemsJson.put(itemJson(list, it, settings)) }
+    items.forEach { itemsJson.put(itemJson(list, it, settings, assetControls[it.taskId].orEmpty())) }
     return JSONObject()
         .put("event", event)
         .put(
@@ -304,12 +320,25 @@ fun buildWebhookPayload(
  * row id is not on the wire at all: it was only ever meaningful inside this one database, and
  * sending it invited a receiver to key on it.
  *
- * Action wire values come from [settings] as they stand right now, not from whatever they were
+ * Action wire values come from the control as it stands right now, not from whatever they were
  * when the user tapped the chip.
+ *
+ * **One entry per Task, resolved over every kind the Task is configured for** — the union, exactly
+ * as the badge row resolves it, and for the same reason: a payload is about a Task and names no
+ * file, so an `actions` array built from one kind would silently omit a tag the user can see
+ * selected in the app. [AppSettings.controlForTask] is the resolver; [AppSettings.controlFor] is the
+ * per-file one the chip row uses.
  */
-private fun itemJson(list: ListEntity, item: ListItemEntity, settings: AppSettings): JSONObject {
+private fun itemJson(
+    list: ListEntity,
+    item: ListItemEntity,
+    settings: AppSettings,
+    assetControls: String
+): JSONObject {
     val actions = JSONArray()
-    itemActionNames(item.decisions, settings).forEach { actions.put(it) }
+    itemActionNames(item.decisions, settings.controlForTask(assetControls)).forEach {
+        actions.put(it)
+    }
     return JSONObject()
         .put("id", item.publicId)
         .put("title", item.title)

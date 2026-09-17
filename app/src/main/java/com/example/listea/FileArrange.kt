@@ -1,5 +1,6 @@
 package com.example.listea
 
+import com.example.listea.domain.AssetKind
 import java.util.Calendar
 
 /**
@@ -198,6 +199,52 @@ fun mediaKindOf(name: String): MediaKind? {
     val extension = fileExtension(name)
     if (extension.isEmpty()) return null
     return MediaKind.entries.firstOrNull { extension in it.extensions }
+}
+
+/**
+ * Which kind of template content [name] holds, for choosing what governs it.
+ *
+ * Defined as a total mapping through [mediaKindOf] rather than as its own list of extensions, and
+ * that is the whole point of the function. A second list would agree with this one exactly until
+ * somebody added an extension to one of them, and then a file would render with no tag row or have
+ * a tag row it could not render — a failure a user finds and a test does not.
+ *
+ * [AssetKind.OTHER] rather than null, because the callers are choosing a *control*: a file no
+ * control governs still needs an answer, and "no kind" would push a null check into every one of
+ * them. It is the same reason `AssetKind` has an `OTHER` at all.
+ *
+ * By extension and not by asking the content provider, for the two reasons `mediaKindOf` gives and
+ * one more that is specific to this: an import stamps a kind onto every Task it creates, and the
+ * dialog that starts that run asks about the kinds a folder holds before anything has been opened.
+ * A kind that needed a provider round trip could not be stamped identically at import time and
+ * re-derived at review time, and an import record that disagrees with the screen it describes is
+ * worse than a misnamed file being governed by its name. See the note on `AssetKind` itself.
+ */
+fun assetKindOf(name: String): AssetKind = when (mediaKindOf(name)) {
+    MediaKind.PICTURE -> AssetKind.IMAGE
+    MediaKind.VIDEO -> AssetKind.VIDEO
+    MediaKind.TEXT, null -> AssetKind.OTHER
+}
+
+/**
+ * Which of the configurable kinds a set of file names actually contains, in declaration order.
+ *
+ * What the Create Tasks dialog asks about, and the reason it can ask a question the folder answers
+ * rather than a question with three parts: a folder of photographs is asked about images and
+ * nothing else, and a folder holding both — the fixture's `Whatsapp` — is asked about both. Asking
+ * about a kind nothing in the folder is of would be offering a control whose effect the user cannot
+ * observe in the run in front of them.
+ *
+ * The input is names rather than a tree so this stays a classification rule rather than a scan:
+ * the caller has already walked the folder to decide Task boundaries, and this reads that same
+ * answer. Nothing here may start a second walk.
+ *
+ * Restricted to the kinds a control accepts, so `OTHER` cannot arrive from a folder of PDFs and
+ * `rubric.txt` cannot open a section. See [configurableAssetKinds].
+ */
+fun assetKindsPresent(names: List<String>): List<AssetKind> {
+    val present = names.mapTo(mutableSetOf()) { assetKindOf(it) }
+    return configurableAssetKinds().filter { it in present }
 }
 
 /** Lower-cased extension without the dot, or "" when the name has none. */

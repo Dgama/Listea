@@ -669,11 +669,18 @@ fun TaskCompletionBar(
  * another chip that can be switched on. Both outer edges are a 48dp touch target, and the FlowRow
  * wraps rather than clipping: a pair of unusually long custom names costs a second line instead of
  * an unreachable control.
+ *
+ * [control] is the answer for **the file on screen**, not for the Task: the caller derives the kind
+ * from the Asset's own name and resolves that kind's configuration out of the Task's record, so
+ * paging from a photograph to a video inside one Task changes this row. Taking an [AppSettings]
+ * instead is what this used to do, and it is exactly the shape of the bug the release exists to
+ * fix — a global object with no notion of kind cannot be wrong about a file it was never told about,
+ * and so it is silently wrong about every file.
  */
 @Composable
 fun ReviewAssetControls(
     item: ReviewItem,
-    settings: AppSettings,
+    control: ResolvedAssetControl,
     onToggleAction: (ItemAction, Boolean) -> Unit,
     onInfo: () -> Unit,
     modifier: Modifier = Modifier
@@ -694,11 +701,12 @@ fun ReviewAssetControls(
             itemVerticalAlignment = Alignment.CenterVertically
         ) {
             // Fixed order, so the row never reshuffles as actions are toggled.
-            settings.actions.forEach { action ->
+            control.actions.forEach { action ->
                 val isSet = action.isSetOn(item.decisions)
                 if (action == ItemAction.Favourite) {
                     // The only action whose meaning is fixed, so it is the only one shown as a
-                    // symbol; the custom ones say whatever Settings has named them.
+                    // symbol; the custom ones say whatever the control that governs this file has
+                    // named them.
                     FilterChip(
                         selected = isSet,
                         onClick = { onToggleAction(action, !isSet) },
@@ -716,7 +724,7 @@ fun ReviewAssetControls(
                         onClick = { onToggleAction(action, !isSet) },
                         label = {
                             Text(
-                                settings.labelOf(action),
+                                control.labelOf(action),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 // A custom name can be anything; past this it stops being a chip
@@ -744,13 +752,21 @@ private val CustomActionLabelMaxWidth = 88.dp
  * Lives here rather than in one of its two callers because there are now two, and they are two
  * halves of the same answer: a List's row shows the tags *before* a review, and a review surface
  * shows them *while* one is happening — and a tag set in either has to appear in the other the
- * moment it is set. One function reading one [AppSettings.actions] is what makes that true rather
- * than two renderings that agree until one of them is changed.
+ * moment it is set. Both draw it from the same resolved control, which is what makes that true
+ * rather than two renderings that agree until one of them is changed.
+ *
+ * **This row is the Task's, and [control] is therefore resolved over every kind the Task is
+ * configured for — not over the kind of any one file.** It is drawn under a Task's name, where no
+ * particular Asset is on screen, so a tag set on a video has to be nameable while a photograph is
+ * being shown; resolving per file would make the badge read "unknown id" for a tag the user can see,
+ * or drop it entirely. That is the one place the chip row and this row legitimately differ, and the
+ * difference is the design rather than a drift — [AppSettings.controlForTask] is the resolver for
+ * this and [AppSettings.controlFor] the one for the chips.
  *
  * One badge per action rather than a single joined string, because these are independent flags and
  * the row is read at a glance — "★  Save" as one line invites reading it as one label. Favourite is
  * tinted, the custom ones are not: the star is the only one whose meaning is fixed, and the rest
- * say whatever Settings has named them.
+ * say whatever the control that governs them has named them.
  *
  * Drawn from the configured actions rather than from the item, so an id left behind by a deleted
  * action stays on the row and off the screen. Emits nothing at all for an item with no actions set,
@@ -759,10 +775,10 @@ private val CustomActionLabelMaxWidth = 88.dp
 @Composable
 fun ItemActionTags(
     item: ReviewItem,
-    settings: AppSettings,
+    control: ResolvedAssetControl,
     modifier: Modifier = Modifier
 ) {
-    val tags = settings.actions.filter { it.isSetOn(item.decisions) }
+    val tags = control.actions.filter { it.isSetOn(item.decisions) }
     if (tags.isEmpty()) return
 
     Row(
@@ -771,7 +787,7 @@ fun ItemActionTags(
     ) {
         tags.forEach { action ->
             ListeaBadge(
-                text = settings.labelOf(action),
+                text = control.labelOf(action),
                 container = if (action == ItemAction.Favourite) {
                     MaterialTheme.colorScheme.primaryContainer
                 } else {

@@ -5,6 +5,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
+import com.example.listea.AssetControlConfig
 import com.example.listea.ContentDecision
 import com.example.listea.ContentPolicy
 import com.example.listea.ImporterKind
@@ -12,10 +13,12 @@ import com.example.listea.ImportPlan
 import com.example.listea.PlannedTask
 import com.example.listea.assetViewerAvailable
 import com.example.listea.decideContentDecision
+import com.example.listea.encodeAssetControls
 import com.example.listea.hasSourceChanges
 import com.example.listea.isAncestorOrSame
 import com.example.listea.normalizeKeepTree
 import com.example.listea.taskChanges
+import com.example.listea.domain.AssetKind
 import com.example.listea.domain.ReviewContext
 import com.example.listea.domain.ReviewEventId
 import com.example.listea.domain.ReviewEventKind
@@ -122,6 +125,59 @@ abstract class ListsDao {
         """
     )
     abstract fun observeAssetsForList(listId: Long): Flow<List<AssetEntity>>
+
+    /**
+     * The asset control each of a List's Tasks was imported under.
+     *
+     * A query of its own rather than two more lines on [observeItems], for two reasons. The control
+     * lives on `task_imports`, which the membership query would have to join — and a *left* join,
+     * because a manual item and a legacy Task have no import row and an inner one would take them
+     * out of somebody's list. And the column it brings back is not a slot on [ListItemEntity]: that
+     * entity's `isCompleted`, `isFavorite` and `customActions` are projections Room fills because
+     * they were *once columns of the row*, and adding a field there would mean a schema change to
+     * carry a value that was never this table's. This is the same move [observeAssetsForList] makes
+     * directly above it for the same reason — read the Task's side table, keyed by the Task.
+     *
+     * Tasks with no import row are simply absent, and [ReviewItem.assetControls] defaults to `""`,
+     * which is the correct reading of a Task nobody imported.
+     */
+    @Query(
+        """
+        SELECT ti.taskId AS taskId, ti.assetControls AS assetControls
+        FROM task_imports ti
+        JOIN list_items i ON i.taskId = ti.taskId
+        WHERE i.listId = :listId
+        """
+    )
+    abstract fun observeAssetControlsForList(listId: Long): Flow<List<TaskAssetControls>>
+
+    /** The same, once, for the two paths that build a payload rather than drive a screen. */
+    @Query(
+        """
+        SELECT ti.taskId AS taskId, ti.assetControls AS assetControls
+        FROM task_imports ti
+        JOIN list_items i ON i.taskId = ti.taskId
+        WHERE i.listId = :listId
+        """
+    )
+    abstract suspend fun getAssetControlsForList(listId: Long): List<TaskAssetControls>
+
+    /**
+     * The same for a named set of Tasks, which is what a folder round has instead of a list.
+     *
+     * Addressed by Task id rather than by the registration rows the payload is built from, because
+     * a folder round's Tasks need not have a registration row at all — a multi-Asset Task has none —
+     * and a payload that dropped one for want of a row would be the same failure
+     * [ListsViewModel.deliverFolderReview] already avoids for decisions.
+     */
+    @Query(
+        """
+        SELECT taskId AS taskId, assetControls AS assetControls
+        FROM task_imports
+        WHERE taskId IN (:taskIds)
+        """
+    )
+    abstract suspend fun getAssetControls(taskIds: List<String>): List<TaskAssetControls>
 
     @Insert
     abstract suspend fun insertList(list: ListEntity): Long
@@ -1015,7 +1071,8 @@ abstract class ListsDao {
                COALESCE(ti.groupPath = a.relativePath, 0) AS isOwnTask,
                ts.isCompleted AS isCompleted,
                ts.isFavorite AS isFavorite,
-               ts.customActions AS customActions
+               ts.customActions AS customActions,
+               ti.assetControls AS assetControls
         FROM assets a
         JOIN task_imports ti ON ti.taskId = a.taskId
         JOIN sources s ON s.id = ti.sourceId
@@ -1947,6 +2004,8 @@ abstract class ListsDao {
                s.keepStateOnDelete AS keepStateOnDelete,
                s.lastImportAt AS lastImportAt,
                s.lastImportStatus AS lastImportStatus,
+               s.assetControls AS assetControls,
+               COALESCE(MAX(ti.assetControls), '') AS taskAssetControls,
                COUNT(ti.taskId) AS taskCount
         FROM sources s
         LEFT JOIN task_imports ti ON ti.sourceId = s.id
@@ -1970,6 +2029,8 @@ abstract class ListsDao {
                s.keepStateOnDelete AS keepStateOnDelete,
                s.lastImportAt AS lastImportAt,
                s.lastImportStatus AS lastImportStatus,
+               s.assetControls AS assetControls,
+               COALESCE(MAX(ti.assetControls), '') AS taskAssetControls,
                COUNT(ti.taskId) AS taskCount
         FROM sources s
         LEFT JOIN task_imports ti ON ti.sourceId = s.id
@@ -2039,7 +2100,8 @@ abstract class ListsDao {
         keepTree: Boolean = true,
         contentPolicy: ContentPolicy = ContentPolicy.Default,
         followUpstream: Boolean = false,
-        now: Long
+        now: Long,
+        assetControls: Map<AssetKind, AssetControlConfig> = emptyMap()
     ): SourceEntity {
         val source = SourceEntity(
             id = UUID.randomUUID().toString(),
@@ -2051,7 +2113,8 @@ abstract class ListsDao {
             createdAt = now,
             keepTree = normalizeKeepTree(importerKind, keepTree),
             contentPolicy = contentPolicy.key,
-            followUpstream = followUpstream
+            followUpstream = followUpstream,
+            assetControls = encodeAssetControls(assetControls)
         )
         insertSource(source)
         return source
@@ -2087,13 +2150,15 @@ abstract class ListsDao {
         displayName: String,
         importerKind: ImporterKind,
         keepTree: Boolean,
-        contentPolicy: ContentPolicy = ContentPolicy.Default
+        contentPolicy: ContentPolicy = ContentPolicy.Default,
+        assetControls: Map<AssetKind, AssetControlConfig> = emptyMap()
     ) = setSourceConfig(
         id,
         displayName,
         importerKind.key,
         normalizeKeepTree(importerKind, keepTree),
-        contentPolicy.key
+        contentPolicy.key,
+        encodeAssetControls(assetControls)
     )
 
     /**
@@ -2167,8 +2232,17 @@ abstract class ListsDao {
         plan: ImportPlan,
         now: Long,
         recoverFrom: String? = null,
-        contentPolicy: ContentPolicy? = null
-    ): ImportResult = runImportInternal(sourceId, coverage, plan, now, recoverFrom, contentPolicy)
+        contentPolicy: ContentPolicy? = null,
+        assetControls: Map<AssetKind, AssetControlConfig> = emptyMap()
+    ): ImportResult = runImportInternal(
+        sourceId,
+        coverage,
+        plan,
+        now,
+        recoverFrom,
+        contentPolicy,
+        assetControls
+    )
 
     /**
      * The body of [runImport], split out so a composed operation such as [createFolderList] can run
@@ -2186,10 +2260,20 @@ abstract class ListsDao {
         plan: ImportPlan,
         now: Long,
         recoverFrom: String? = null,
-        contentPolicy: ContentPolicy? = null
+        contentPolicy: ContentPolicy? = null,
+        assetControlsByKind: Map<AssetKind, AssetControlConfig> = emptyMap()
     ): ImportResult {
         val source = getSource(sourceId) ?: return ImportResult(outcome = ImportOutcome.FAILED)
         val importer = ImporterKind.fromKey(source.importerKind)
+
+        // Encoded once, here, and stamped onto every Task this run touches — the ones it creates,
+        // the ones it adopts and the ones it merely sees again — so that a Task's control is
+        // always a statement about one run rather than a mixture of when each Task last moved.
+        //
+        // From the *argument*, never from `source.assetControls`. The row was written by an earlier
+        // run or by nobody; a run that read it back would apply the dialog's answer one run late,
+        // which is the failure `contentPolicy`'s parameter exists to avoid and this one copies.
+        val assetControls = encodeAssetControls(assetControlsByKind)
 
         // A folder-as-Task Task is assembled from a whole subtree, so a half-scanned group is a
         // group whose Asset list is wrong. Refuse a scoped refresh rather than write one. FAILED
@@ -2249,11 +2333,11 @@ abstract class ListsDao {
             val existing = owned[task.groupPath]
             if (existing != null) {
                 reconciled++
-                val delta = reconcileTask(source, existing.taskId, task, now)
+                val delta = reconcileTask(source, existing.taskId, task, now, assetControls)
                 assetsCreated += delta.created
                 assetsUpdated += delta.updated
             } else {
-                val delta = resolveNewTask(source, importer, task, now)
+                val delta = resolveNewTask(source, importer, task, now, assetControls)
                 if (delta.conflict != null) {
                     conflicts += delta.conflict
                 } else {
@@ -2369,8 +2453,25 @@ abstract class ListsDao {
     @Insert
     protected abstract suspend fun insertTaskImport(import: TaskImportEntity)
 
-    @Query("UPDATE task_imports SET lastSeenAt = :lastSeenAt WHERE taskId = :taskId")
-    protected abstract suspend fun updateTaskImportLastSeen(taskId: String, lastSeenAt: Long)
+    /**
+     * A Task this Source already holds, met again by a run.
+     *
+     * `assetControls` is re-stamped here, on the same statement that records the sighting, because
+     * it is the same fact: what this Task is and what governs it are both claims about an import,
+     * and a run that saw the Task and left a stale control on it would be a Task describing an
+     * import that never happened. Re-stamping on every run is deliberate — a Todo whose template
+     * was edited moves its Tasks at the *next* run, and a run over an unchanged folder is still a
+     * run the user asked for.
+     */
+    @Query(
+        "UPDATE task_imports SET lastSeenAt = :lastSeenAt, assetControls = :assetControls " +
+            "WHERE taskId = :taskId"
+    )
+    protected abstract suspend fun touchTaskImport(
+        taskId: String,
+        lastSeenAt: Long,
+        assetControls: String
+    )
 
     @Query("DELETE FROM legacy_source_tasks WHERE taskId = :taskId")
     protected abstract suspend fun deleteLegacyClaim(taskId: String)
@@ -2457,14 +2558,16 @@ abstract class ListsDao {
 
     @Query(
         "UPDATE sources SET displayName = :displayName, importerKind = :importerKind, " +
-            "keepTree = :keepTree, contentPolicy = :contentPolicy WHERE id = :id"
+            "keepTree = :keepTree, contentPolicy = :contentPolicy, " +
+            "assetControls = :assetControls WHERE id = :id"
     )
     protected abstract suspend fun setSourceConfig(
         id: String,
         displayName: String,
         importerKind: String,
         keepTree: Boolean,
-        contentPolicy: String
+        contentPolicy: String,
+        assetControls: String
     )
 
     /**
@@ -2480,6 +2583,7 @@ abstract class ListsDao {
                ts.isCompleted AS isCompleted,
                ts.isFavorite AS isFavorite,
                ts.customActions AS customActions,
+               ti.assetControls AS assetControls,
                COUNT(a.id) AS assetCount,
                COALESCE(SUM(a.sourceMissing), 0) AS missingAssets,
                SUM(a.sizeBytes) AS sizeBytes,
@@ -2505,6 +2609,7 @@ abstract class ListsDao {
                 isCompleted = projection.isCompleted,
                 isFavorite = projection.isFavorite,
                 customActions = projection.customActions,
+                assetControls = projection.assetControls,
                 assetCount = projection.assetCount,
                 missingAssets = projection.missingAssets,
                 sizeBytes = projection.sizeBytes,
@@ -2558,7 +2663,8 @@ abstract class ListsDao {
         source: SourceEntity,
         taskId: String,
         task: PlannedTask,
-        now: Long
+        now: Long,
+        assetControls: String
     ): ReconcileDelta {
         val existing = assetsForTask(taskId).associateBy { it.relativePath }
         var created = 0
@@ -2586,7 +2692,7 @@ abstract class ListsDao {
             }
         }
 
-        updateTaskImportLastSeen(taskId, now)
+        touchTaskImport(taskId, now, assetControls)
         return ReconcileDelta(created, updated)
     }
 
@@ -2616,7 +2722,8 @@ abstract class ListsDao {
         source: SourceEntity,
         importer: ImporterKind?,
         task: PlannedTask,
-        now: Long
+        now: Long,
+        assetControls: String
     ): NewTaskDelta {
         var adoptTaskId: String? = null
         for (asset in task.assets) {
@@ -2658,7 +2765,8 @@ abstract class ListsDao {
                     groupPath = task.groupPath,
                     displayName = task.displayName,
                     importedAt = now,
-                    lastSeenAt = now
+                    lastSeenAt = now,
+                    assetControls = assetControls
                 )
             )
             deleteLegacyClaim(adoptTaskId)
@@ -2681,7 +2789,8 @@ abstract class ListsDao {
                 groupPath = task.groupPath,
                 displayName = task.displayName,
                 importedAt = now,
-                lastSeenAt = now
+                lastSeenAt = now,
+                assetControls = assetControls
             )
         )
         for (asset in task.assets) {

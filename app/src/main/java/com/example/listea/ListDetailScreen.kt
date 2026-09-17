@@ -283,6 +283,11 @@ fun ListDetailScreen(
                     ItemRow(
                         item = item,
                         settings = settings,
+                        // Resolved here rather than inside the row, because [ReviewItem] carries the
+                        // record and not the control: the row would have to be handed both settings
+                        // and the item anyway, and a row that resolved for itself would be a second
+                        // place the union rule was written down.
+                        control = settings.controlForTask(item.assetControls),
                         onToggle = { viewModel.setItemCompleted(item, it) },
                         onOpen = { viewingItemId = item.id },
                         onDelete = { item.rowId?.let { viewModel.deleteItem(listId, it) } }
@@ -711,17 +716,20 @@ private fun WebhookSection(
  * column alone, so the checkbox and the delete button keep their own meanings and a tap aimed at
  * either cannot fall through to opening the viewer.
  *
- * The tags are read-only here — actions are set in Review — and carry whatever names Settings
- * currently gives them, which is why [settings] is passed in rather than the labels.
+ * The tags are read-only here — actions are set in Review — and carry whatever names the Task's own
+ * control currently gives them, which is why [control] is passed in rather than the labels.
  *
- * This row and the review surface's action chips are two renderings of one answer and read it from
- * one place: [ItemActionTags] takes the names, the tints and the order from Settings, so a rename
- * relabels both and a starred item is starred wherever it is looked at.
+ * This row and the review surface's badge are two renderings of one answer and read it from one
+ * place: [ItemActionTags] takes the names, the tints and the order from the resolved control, so a
+ * rename relabels both and a starred item is starred wherever it is looked at. It is resolved over
+ * every kind the Task is configured for, because a list row is drawn beside a Task's title with no
+ * one Asset on screen — see [ItemActionTags].
  */
 @Composable
 private fun ItemRow(
     item: ReviewItem,
     settings: AppSettings,
+    control: ResolvedAssetControl,
     onToggle: (Boolean) -> Unit,
     onOpen: () -> Unit,
     onDelete: () -> Unit
@@ -756,7 +764,7 @@ private fun ItemRow(
             item.relativePath?.takeIf { it != item.title }?.let { path ->
                 StatusLine(path)
             }
-            ItemActionTags(item, settings)
+            ItemActionTags(item, control)
             // Subtle: the item stays checkable and is never hidden or removed.
             if (item.sourceMissing) {
                 StatusLine(

@@ -222,5 +222,9 @@ internal fun CatalogRow.asPreviewItem(rootUri: String): ReviewItem = ReviewItem(
     sizeBytes = sizeBytes,
     lastModified = lastModified,
     assets = assets,
-    rootRelativePath = groupPath
+    rootRelativePath = groupPath,
+    // Carried for the same reason the decisions are: this screen draws no chip row today, but the
+    // item it hands the renderer is the same shape every other surface hands it, and a control left
+    // off here would be a second kind of item the moment this screen grows one.
+    assetControls = assetControls
 )

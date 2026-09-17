@@ -371,7 +371,17 @@ data class SharedFileState(
     val isOwnTask: Boolean,
     val isCompleted: Boolean,
     val isFavorite: Boolean,
-    val customActions: String
+    val customActions: String,
+
+    /**
+     * The control the Task was imported under, so this row's tags can be *named* rather than
+     * reported as bare ids.
+     *
+     * The same raw column [ReviewItem.assetControls] carries and for the same reason: a row that
+     * says a Task carries `custom1` is unreadable on screen, and what `custom1` is called is
+     * whatever the control governing that Task says it is.
+     */
+    val assetControls: String = ""
 )
 
 /**
@@ -550,7 +560,25 @@ data class ReviewItem(
      * and carried rather than re-derived on the surface, so a list screen and a review surface agree
      * about what is blocked and why.
      */
-    val reviewBlocked: ReviewBlock? = null
+    val reviewBlocked: ReviewBlock? = null,
+
+    /**
+     * The asset control this Task was imported under, as `task_imports.assetControls` holds it.
+     *
+     * Raw and undecoded, deliberately. What the middle band needs is *one kind's* configuration, and
+     * the kind is a property of the file on screen rather than of the Task — so the resolution that
+     * turns this string into chips is [AppSettings.controlFor], performed per page, at the one place
+     * that knows which page is showing. A card carrying a resolved list would have had to pick a kind
+     * while building the queue, which is one frame before the user says which file they are looking
+     * at.
+     *
+     * `""` means the Task has no record — every Task imported before v0.5.0 — and reads as this
+     * app's current default for whatever kind is asked about. See [TaskImportEntity.assetControls].
+     *
+     * Bounded to the Task's own row, like [rootRelativePath] and for the same reason: a Task a
+     * payload names must be answerable without walking back to the Todo that imported it.
+     */
+    val assetControls: String = ""
 )
 
 /**
@@ -561,7 +589,10 @@ data class ReviewItem(
  * function is one of the places that assumption is visible rather than one of the places it is
  * made. Nothing here reads a decision out of the `list_items` table.
  */
-fun ListItemEntity.toReviewItem(rootUri: String?): ReviewItem = ReviewItem(
+fun ListItemEntity.toReviewItem(
+    rootUri: String?,
+    assetControls: String = ""
+): ReviewItem = ReviewItem(
     id = id,
     // The row's own column, not a projection: `list_items.taskId` is where membership records
     // which Task it is of, and it is the one column of this row that a decision is actually
@@ -580,7 +611,13 @@ fun ListItemEntity.toReviewItem(rootUri: String?): ReviewItem = ReviewItem(
     decisions = decisions,
     sizeBytes = sourceSizeBytes,
     lastModified = sourceModifiedAt,
-    rowId = id
+    rowId = id,
+    // A parameter rather than a projection on this row, which is the one place this function
+    // differs from `decisions` above it. A membership row cannot answer it: the control is the
+    // Task's and reaches this entity only from `task_imports`, which the list query does not join,
+    // so the caller reads it beside and hands it in. Defaulted, because a manual item has no
+    // import row at all and a Task with no record is the honest answer for it.
+    assetControls = assetControls
 )
 
 /**

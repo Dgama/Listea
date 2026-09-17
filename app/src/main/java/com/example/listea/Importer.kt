@@ -1,6 +1,7 @@
 package com.example.listea
 
 import com.example.listea.data.ScannedFile
+import com.example.listea.domain.AssetKind
 
 /**
  * The importer layer: a pure grouping rule that turns a folder snapshot into planned Tasks.
@@ -51,7 +52,20 @@ data class ImportOptions(
     val importer: ImporterKind = ImporterKind.FILE_AS_TASK,
     val displayName: String = "",
     val keepTree: Boolean = true,
-    val contentPolicy: ContentPolicy = ContentPolicy.Default
+    val contentPolicy: ContentPolicy = ContentPolicy.Default,
+
+    /**
+     * The asset control the dialog collected, per file kind, for the run this describes.
+     *
+     * Empty means nothing was chosen, which is the behaviour-preserving value: it encodes to the
+     * column default, every Task resolves back to the app's own tags, and an install that never
+     * opens the new section behaves exactly as it did before there was one.
+     *
+     * An instruction *for this run* rather than a record of one, exactly as [contentPolicy] is —
+     * see `applyImport`, which passes it into the run rather than reading it back from the row it
+     * is about to write. The two travel together for the same reason.
+     */
+    val assetControls: Map<AssetKind, AssetControlConfig> = emptyMap()
 )
 
 /**

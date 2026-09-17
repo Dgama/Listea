@@ -16,6 +16,11 @@ import com.example.listea.data.ItemAction
 import com.example.listea.data.ReviewDecisions
 import com.example.listea.data.ListItemEntity
 import com.example.listea.data.newActionId
+import com.example.listea.domain.AssetKind
+import com.example.listea.domain.TemplateDefinition
+import com.example.listea.domain.TemplateId
+import com.example.listea.domain.TemplateVersionRef
+import com.example.listea.domain.Templates
 
 /**
  * App-wide configuration: the settings that outlive any one list, folder or review.
@@ -32,14 +37,21 @@ data class AppSettings(
     val folderQuickReviewEnabled: Boolean = true,
 
     /**
-     * The actions the review bar offers, beyond the built-in favourite, in the order it offers
-     * them and the order the webhook emits them.
+     * The tags a *new* Todo starts with, per file kind.
      *
-     * A list rather than a fixed pair: there can be none, there can be many, and adding one is
-     * not a schema change because an item stores the ids it carries rather than a column each.
-     * Two are configured out of the box, which is what every existing install already had.
+     * A seed rather than the live configuration, which is the change v0.5.0 makes: the answer a
+     * Todo actually uses is recorded on the Todo and on each of its Tasks, and editing this decides
+     * only what the next import run is offered. [defaultContentPolicy] is the same kind of statement
+     * and is documented as one.
+     *
+     * Keyed by kind because a tag row is a function of two things, and this is the half Settings
+     * knows. Images and video start with the same list, which is what the app did when the list was
+     * app-wide; they are separate entries so that editing one does not silently move the other.
+     *
+     * A kind absent from this map is not "no tags" — see [controlFor], which falls back to
+     * [DefaultCustomActions] rather than to nothing.
      */
-    val customActions: List<CustomAction> = DefaultCustomActions,
+    val assetControlTags: Map<AssetKind, List<CustomAction>> = DefaultAssetControlTags,
 
     val defaultWebhookEnabled: Boolean = false,
     val defaultWebhookUrl: String = "",
@@ -184,35 +196,109 @@ data class AppSettings(
     val webhookOnReviewExit: Boolean = false
 ) {
     /**
-     * What the user sees this action called. Favourite is not configurable in V3.8, so it answers
-     * with its built-in label.
-     */
-    fun labelOf(action: ItemAction): String = when (action) {
-        ItemAction.Favourite -> ItemAction.Favourite.Label
-        is ItemAction.Custom -> customActionOf(action.id)?.displayName ?: action.id
-    }
-
-    /**
-     * Every action the bar offers, favourite first and the configured ones in their own order.
+     * The control governing one Asset, from what its Task recorded and the kind of the file.
      *
-     * The one place that order is decided, so the bar, the Info sheet and the payload cannot
-     * disagree about it.
+     * The whole of the lookup, and the only way any surface is meant to reach an action row. One
+     * call per Asset rather than one per screen, because the answer changes as a user pages from a
+     * photograph to a video inside a single Task — which is the release.
+     *
+     * **Never null.** A kind with nothing recorded falls back to this app's tags for that kind, so
+     * there is one rule — *no recorded configuration for this kind means the app's current default
+     * for it* — rather than one for an empty column and another for a partly-filled one. The case
+     * it removes is a Task whose folder held only photographs when it was imported and a video
+     * later: a control-less chip row showing nothing but `★` is an answer nobody chose, and the
+     * default is at least the one the dialog would have offered.
+     *
+     * [recorded] is the raw column, not a decoded map, so no caller can hold a half-resolved value:
+     * the decoding, the per-kind fallback and the definition lookup happen together or not at all.
      */
-    val actions: List<ItemAction>
-        get() = listOf(ItemAction.Favourite) + customActions.map { ItemAction.Custom(it.id) }
-
-    /** The configuration behind an id, or null once the user has deleted it. */
-    fun customActionOf(id: String): CustomAction? = customActions.firstOrNull { it.id == id }
+    fun controlFor(recorded: String, kind: AssetKind): ResolvedAssetControl {
+        val config = decodeAssetControls(recorded)[kind] ?: defaultConfigFor(kind)
+        return ResolvedAssetControl(
+            favourite = favouriteOf(config.ref),
+            tags = config.tags
+        )
+    }
 
     /**
-     * What the webhook calls this action. Resolved from settings at delivery time, never stored
-     * on the item: an item's boolean means "custom slot 1 is selected", not "the string cust1 was
-     * selected", so renaming the wire value changes future payloads without migrating any row.
+     * The control governing a whole Task: the tags of every kind it is configured for, together.
+     *
+     * For the two surfaces that speak about the Task rather than about the file in front of the
+     * user — the badge row under the filename, and the webhook payload, which carries one entry per
+     * Task. A tag set on a video has to be nameable while a photograph is on screen, or the badge
+     * would report an unknown id for a tag the user can see.
+     *
+     * Ordered: `★` first, then kinds in declaration order, then each kind's tags in configured
+     * order, first occurrence winning. Stable because it decides the order of a webhook's `actions`
+     * array, and an array that reshuffles itself is one a receiver cannot diff.
      */
-    fun wireOf(action: ItemAction): String = when (action) {
-        ItemAction.Favourite -> ItemAction.Favourite.WireName
-        is ItemAction.Custom -> customActionOf(action.id)?.webhookValue ?: action.id
+    fun controlForTask(recorded: String): ResolvedAssetControl {
+        val decoded = decodeAssetControls(recorded)
+        val kinds = AssetKind.entries.filter { it != AssetKind.OTHER }
+
+        val seen = mutableSetOf<String>()
+        val tags = kinds.flatMap { kind ->
+            (decoded[kind] ?: defaultConfigFor(kind)).tags
+        }.filter { seen.add(it.id) }
+
+        return ResolvedAssetControl(
+            // Any control carrying `★` is enough for the Task to offer it: it is one action, not one
+            // per kind, and an item stores one boolean for it.
+            favourite = kinds.any { favouriteOf((decoded[it] ?: defaultConfigFor(it)).ref) },
+            tags = tags
+        )
     }
+
+    /** This app's tags for a kind that was never configured, as a config naming the built-in. */
+    private fun defaultConfigFor(kind: AssetKind): AssetControlConfig = AssetControlConfig(
+        ref = Templates.MediaAssetControl.ref,
+        tags = assetControlTags[kind] ?: DefaultCustomActions
+    )
+
+    /**
+     * The app's tags as configurations naming the built-in — what the Create Tasks dialog opens on.
+     *
+     * The same value [controlFor] falls back to, reached from the other direction: that one is
+     * asked with a column and fills a gap, this one is asked before there is a column at all. Kept
+     * as one expression so the dialog's pre-fill and the runtime fallback cannot come to differ —
+     * a dialog offering something other than what an unanswered kind would get is a difference the
+     * user would only ever see as a bug.
+     *
+     * `OTHER` is absent, because nothing may be configured for it.
+     */
+    fun defaultControlConfigs(): Map<AssetKind, AssetControlConfig> =
+        AssetKind.entries
+            .filter { it != AssetKind.OTHER }
+            .associateWith { defaultConfigFor(it) }
+
+    /**
+     * A recorded column as a complete configuration — the shape a run and the dialog both take.
+     *
+     * [controlFor] answers *what one file offers*; this answers *what a run is to be given*, and the
+     * difference is completeness. A run has to stamp both kinds, not only the ones that happen to be
+     * named in the column, or a Todo that has never been configured would write `''` over a Task
+     * that had — so a kind the column leaves out is filled with this app's default for it, exactly as
+     * [controlFor] would have resolved it for a reader.
+     *
+     * This is why a refresh does not simply pass `decodeAssetControls(source.assetControls)` along:
+     * that map is *partial* by nature, and partial here means "delete the configuration of every kind
+     * the user never touched", one run at a time.
+     */
+    fun controlConfigsFor(recorded: String): Map<AssetKind, AssetControlConfig> =
+        defaultControlConfigs() + decodeAssetControls(recorded)
+
+    /**
+     * Whether the definition a config names carries `★`.
+     *
+     * Read from the definition rather than from a constant, because `★` being a property of the
+     * template rather than of the review surface is the point of it living there at all. An
+     * unknown reference — a config written by a build whose control this one has never heard of —
+     * falls back to the built-in's answer, which is `true`: starring has never been optional in
+     * any shipped version, and dropping it would lose the one action no user configured.
+     */
+    private fun favouriteOf(ref: TemplateVersionRef): Boolean =
+        (Templates.byRef(ref)?.definition as? TemplateDefinition.AssetControl)?.favourite
+            ?: MediaAssetControlDefinition.favourite
 }
 
 /**
@@ -244,6 +330,130 @@ val DefaultCustomActions: List<CustomAction> = listOf(
 )
 
 /**
+ * The tags every kind starts with, which is the same list for both.
+ *
+ * Written as two entries rather than as a `withDefault`, because the two are independent from here:
+ * a user who gives video its own two tags must not find that images moved as well, and a map whose
+ * absent keys answer with a shared list makes that failure a matter of remembering.
+ */
+val DefaultAssetControlTags: Map<AssetKind, List<CustomAction>> = mapOf(
+    AssetKind.IMAGE to DefaultCustomActions,
+    AssetKind.VIDEO to DefaultCustomActions
+)
+
+/** The built-in's shape, for the one place that needs an answer before a definition is known. */
+private val MediaAssetControlDefinition: TemplateDefinition.AssetControl =
+    Templates.MediaAssetControl.definition as TemplateDefinition.AssetControl
+
+/**
+ * One kind's configuration: which definition governs it, and the tags it was given.
+ *
+ * The definition is a *reference*, never a copy. That is what makes a stored configuration
+ * meaningful after the definition it named moves on — it still says which control these tags were
+ * chosen for, and a later reader that wants to know what that control looked like can look it up.
+ *
+ * [tags] is a `List<CustomAction>` rather than a type of its own. A tag is exactly what an action
+ * already is — an id nothing shows, a name, and a wire value — so the id generator, the sanitiser
+ * and the item-side encoding all apply to it with no second implementation to keep in step.
+ */
+@Immutable
+data class AssetControlConfig(
+    val ref: TemplateVersionRef,
+    val tags: List<CustomAction>
+)
+
+/**
+ * An asset control with its configuration resolved: what this file's row actually offers.
+ *
+ * The completed answer, and the only shape any surface takes. Built from a definition and a
+ * configuration by [AppSettings.controlFor] or [AppSettings.controlForTask], and thereafter
+ * self-contained — a chip row, an Info sheet and a payload all resolve labels and wire values from
+ * one of these rather than from settings, which is what stops them disagreeing about which kind
+ * they are describing.
+ */
+@Immutable
+data class ResolvedAssetControl(
+    val favourite: Boolean,
+    val tags: List<CustomAction>
+) {
+    /**
+     * Every action the row offers, `★` first and the tags in their own order.
+     *
+     * The one place that order is decided, so the chip row, the badge and the payload cannot
+     * disagree about it.
+     */
+    val actions: List<ItemAction>
+        get() = (if (favourite) listOf(ItemAction.Favourite) else emptyList()) +
+            tags.map { ItemAction.Custom(it.id) }
+
+    /** What the user sees this action called. `★` is not configurable, so it answers for itself. */
+    fun labelOf(action: ItemAction): String = when (action) {
+        ItemAction.Favourite -> ItemAction.Favourite.Label
+        is ItemAction.Custom -> tags.firstOrNull { it.id == action.id }?.displayName ?: action.id
+    }
+
+    /**
+     * What the webhook calls this action. Resolved here, at delivery time, and never stored on an
+     * item: an item's set means "the tag with this id is selected", not "the string `price` was
+     * selected", so renaming the wire value changes future payloads without migrating a single row.
+     *
+     * An id these tags do not define answers with the id itself rather than with null. That case is
+     * unreachable from [actions] — which is built *from* the tags — and the reason it is written
+     * this way is that a null here would have to be handled by every caller to describe a state
+     * none of them can be in. What actually keeps a deleted tag out of a payload is [actions]
+     * omitting it, not this: a tag deleted from a control leaves the id on the items that carry it,
+     * and stops being offered, labelled and sent, all by the same omission.
+     */
+    fun wireOf(action: ItemAction): String = when (action) {
+        ItemAction.Favourite -> ItemAction.Favourite.WireName
+        is ItemAction.Custom -> tags.firstOrNull { it.id == action.id }?.webhookValue ?: action.id
+    }
+
+    companion object {
+        /** The action set of a Task with nothing recorded and no defaults — `★` and nothing else. */
+        val FavouriteOnly = ResolvedAssetControl(favourite = true, tags = emptyList())
+    }
+}
+
+/**
+ * The file kinds an asset control may be configured for: the built-in's own answer, in declaration
+ * order.
+ *
+ * Read from the definition rather than written out as `listOf(IMAGE, VIDEO)`, because the *only*
+ * thing that makes a tag settable for a kind is that a control accepts that kind — `OTHER` is not
+ * configurable because [Templates.MediaAssetControl] does not accept it, not because a screen
+ * happens to leave it out. A second control that accepted a third kind would then be a definition
+ * change and nothing else.
+ *
+ * Declaration order rather than the set's, so the sections a user sees do not reshuffle between
+ * builds. [AppSettings.controlForTask] orders by the same rule for the same reason.
+ */
+fun configurableAssetKinds(): List<AssetKind> {
+    val accepted =
+        (Templates.MediaAssetControl.definition as TemplateDefinition.AssetControl).compatibleKinds
+    return AssetKind.entries.filter { it in accepted }
+}
+
+/**
+ * What one kind's asset control is called, everywhere it is named.
+ *
+ * One function rather than a literal at each surface, because the whole point of the phrase is that
+ * a user meets the *same words* twice: Settings asks the question under this heading, the Create
+ * Tasks dialog asks it under this heading, and the Todo card answers it under this heading. A card
+ * that called it something else would make the user learn a second name for an answer they already
+ * gave — the same rule `todoContentPolicyLabel` states for the tier beside it.
+ *
+ * `OTHER` has a heading even though nothing offers one, so this cannot be the thing that decides
+ * which kinds are configurable: that is [TemplateDefinition.AssetControl.compatibleKinds], and a
+ * heading for a kind nobody asks about is harmless where a missing one would be a crash.
+ */
+fun assetControlHeading(kind: AssetKind): String = when (kind) {
+    AssetKind.IMAGE -> "Image asset control"
+    AssetKind.VIDEO -> "Video asset control"
+    AssetKind.OTHER -> "File asset control"
+}
+
+/**
  * How the action list is stored: one record per line, three tab-separated fields.
  *
  * Hand-rolled rather than JSON because org.json is Android's and this has to be readable by a
@@ -270,9 +480,92 @@ fun decodeCustomActions(text: String): List<CustomAction> =
         )
     }
 
-/** Keeps typed text to one line, so it cannot break the record it is stored in. */
-fun sanitizeActionText(value: String): String =
-    value.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ').trim()
+/**
+ * Keeps typed text to one line, so it cannot break the record it is stored in.
+ *
+ * `\t` and `\n` separate *records* — a line is an action, a tab is a field within it. `|` and `:`
+ * separate the parts of an asset-control tag, which is a record nested one level deeper: the tags
+ * of a kind live in a single field of the line above them. Stripping all four in one place is what
+ * lets a tag's display name be anything at all without the format having to be thought about again,
+ * and it is why there is one sanitiser rather than one per encoding.
+ */
+fun sanitizeActionText(value: String): String = value
+    .replace('\t', ' ')
+    .replace('\n', ' ')
+    .replace('\r', ' ')
+    .replace('|', ' ')
+    .replace(':', ' ')
+    .trim()
+
+/**
+ * The asset-control configuration as stored on a `sources` or `task_imports` row.
+ *
+ * One record per kind, four tab-separated fields: the kind's key, the template id, the version, and
+ * the tags. Line-per-kind rather than a nested bag because both halves of the outer format already
+ * exist — [encodeCustomActions] writes actions this way, and the fields are the same three.
+ *
+ * ```text
+ * image	builtin.media.asset-control	1	a1:Price:price|a2:Quality:quality
+ * video	builtin.media.asset-control	1	a3:Fresh:fresh
+ * ```
+ *
+ * The template id and version are recorded rather than left implicit in the schema default, because
+ * a configuration outlives the definition it was chosen for: once a second control version exists,
+ * "which control were these tags picked for" is a question with more than one answer, and a column
+ * that cannot say is a column whose reader has to guess. They are *not* hashed into anything — a
+ * configuration is not part of a definition — so this is a record, not a commitment.
+ *
+ * An empty map writes `""`, which is the column default and means *nothing was ever chosen*. That
+ * is not the same as an empty tag set, and [AppSettings.controlFor] is the only thing that should
+ * ever interpret it. See the migration comment for what breaking that reading would cost.
+ */
+fun encodeAssetControls(controls: Map<AssetKind, AssetControlConfig>): String =
+    controls.entries
+        // Declaration order rather than the map's, so the same configuration always writes the same
+        // string — storage that varies with iteration order looks changed when nothing has.
+        .sortedBy { (kind, _) -> kind.ordinal }
+        .joinToString("\n") { (kind, config) ->
+            val tags = config.tags.joinToString("|") {
+                "${it.id}:${it.displayName}:${it.webhookValue}"
+            }
+            "${kind.key}\t${config.ref.templateId.value}\t${config.ref.version}\t$tags"
+        }
+
+/**
+ * Tolerant in the same way [decodeCustomActions] is, and for the same reason: this reads rows a
+ * previous build wrote, so every failure costs its own record and never the whole column.
+ *
+ * A line whose kind this build does not know is dropped, a line with no template id is dropped, a
+ * tag with an empty id or with a comma in it is dropped — the comma is what items store with, see
+ * [encodeActionIds] — and a tag with no display name keeps the empty one rather than inventing a
+ * label. An unparseable version reads as 1 rather than dropping the line, because 1 is the only
+ * version any shipped build has written and a control with no tags is worse than a control whose
+ * version is wrong but whose tags survive.
+ */
+fun decodeAssetControls(text: String): Map<AssetKind, AssetControlConfig> =
+    text.split('\n').mapNotNull { line ->
+        if (line.isBlank()) return@mapNotNull null
+        val fields = line.split('\t')
+        val kind = AssetKind.fromKey(fields.getOrNull(0)?.trim())
+            ?: return@mapNotNull null
+        val templateId = fields.getOrNull(1)?.trim().orEmpty()
+        if (templateId.isEmpty()) return@mapNotNull null
+        val version = fields.getOrNull(2)?.trim()?.toIntOrNull() ?: 1
+
+        kind to AssetControlConfig(
+            ref = TemplateVersionRef(TemplateId(templateId), version),
+            tags = fields.getOrNull(3).orEmpty().split('|').mapNotNull { tag ->
+                val parts = tag.split(':')
+                val id = parts.getOrNull(0)?.trim().orEmpty()
+                if (id.isEmpty() || id.contains(',')) return@mapNotNull null
+                CustomAction(
+                    id = id,
+                    displayName = parts.getOrNull(1).orEmpty(),
+                    webhookValue = parts.getOrNull(2).orEmpty()
+                )
+            }
+        )
+    }.toMap()
 
 /**
  * The name and wire value a newly added action starts with.
@@ -294,14 +587,14 @@ fun nextCustomActionDefaults(existing: List<CustomAction>): CustomAction {
  * a strange thing to do but not a dangerous one, and emitting `["tag","tag"]` would be worse for
  * a receiver than emitting it once. Order stays fixed either way.
  */
-fun itemActionNames(decisions: ReviewDecisions, settings: AppSettings): List<String> =
-    settings.actions.filter { it.isSetOn(decisions) }.map { settings.wireOf(it) }.distinct()
+fun itemActionNames(decisions: ReviewDecisions, control: ResolvedAssetControl): List<String> =
+    control.actions.filter { it.isSetOn(decisions) }.map { control.wireOf(it) }.distinct()
 
 /** Compact "★ · Save" summary for a checklist row, or null when the item carries no actions. */
-fun itemActionLabel(decisions: ReviewDecisions, settings: AppSettings): String? =
-    settings.actions.filter { it.isSetOn(decisions) }
+fun itemActionLabel(decisions: ReviewDecisions, control: ResolvedAssetControl): String? =
+    control.actions.filter { it.isSetOn(decisions) }
         .takeIf { it.isNotEmpty() }
-        ?.joinToString(" · ") { settings.labelOf(it) }
+        ?.joinToString(" · ") { control.labelOf(it) }
 
 /** Rejects only what would actually break something: an empty or whitespace-only value. */
 fun settingsTextError(value: String): String? =
@@ -326,7 +619,7 @@ class SettingsStore(context: Context) {
             AppSettings(
                 folderQuickReviewEnabled = prefs[KEY_QUICK_REVIEW]
                     ?: defaults.folderQuickReviewEnabled,
-                customActions = readCustomActions(prefs),
+                assetControlTags = readAssetControlTags(prefs),
                 defaultWebhookEnabled = prefs[KEY_WEBHOOK_ENABLED]
                     ?: defaults.defaultWebhookEnabled,
                 defaultWebhookUrl = prefs[KEY_WEBHOOK_URL] ?: defaults.defaultWebhookUrl,
@@ -380,25 +673,27 @@ class SettingsStore(context: Context) {
         put { it[KEY_QUICK_REVIEW] = enabled }
 
     /**
-     * Appends an action, named from the first free slot.
+     * Appends a tag to one kind, named from the first free slot.
      *
      * Read-modify-write inside one edit, like every other change to this list, so two taps in
-     * quick succession add two actions rather than racing to add the same one.
+     * quick succession add two tags rather than racing to add the same one.
      */
-    suspend fun addCustomAction() = put { prefs ->
-        val existing = readCustomActions(prefs)
-        prefs[KEY_CUSTOM_ACTIONS] =
-            encodeCustomActions(existing + nextCustomActionDefaults(existing))
+    suspend fun addCustomAction(kind: AssetKind) = put { prefs ->
+        val existing = tagsOf(prefs, kind)
+        writeTags(prefs, kind, existing + nextCustomActionDefaults(existing))
     }
 
-    /** Renames one action, or changes what it sends. An unknown id writes nothing. */
+    /** Renames one tag of one kind, or changes what it sends. An unknown id writes nothing. */
     suspend fun updateCustomAction(
+        kind: AssetKind,
         id: String,
         displayName: String? = null,
         webhookValue: String? = null
     ) = put { prefs ->
-        prefs[KEY_CUSTOM_ACTIONS] = encodeCustomActions(
-            readCustomActions(prefs).map { action ->
+        writeTags(
+            prefs,
+            kind,
+            tagsOf(prefs, kind).map { action ->
                 if (action.id != id) {
                     action
                 } else {
@@ -412,16 +707,18 @@ class SettingsStore(context: Context) {
     }
 
     /**
-     * Takes an action off the bar.
+     * Takes a tag off one kind's row.
      *
      * Items that carry it are not touched. The id stays on the rows that hold it, invisible and
-     * unsent, because deleting a button is a decision about the bar and not about the files
+     * unsent, because deleting a button is a decision about the row and not about the files
      * somebody has already marked with it — and because this app does not quietly rewrite
      * decisions the user made.
+     *
+     * Only this kind is affected. The other kind keeps its own key and its own tags, which is the
+     * whole reason the configuration is stored per kind rather than as one list.
      */
-    suspend fun removeCustomAction(id: String) = put { prefs ->
-        prefs[KEY_CUSTOM_ACTIONS] =
-            encodeCustomActions(readCustomActions(prefs).filterNot { it.id == id })
+    suspend fun removeCustomAction(kind: AssetKind, id: String) = put { prefs ->
+        writeTags(prefs, kind, tagsOf(prefs, kind).filterNot { it.id == id })
     }
 
     suspend fun setDefaultWebhookEnabled(enabled: Boolean) =
@@ -481,20 +778,42 @@ class SettingsStore(context: Context) {
     }
 
     /**
-     * The configured actions, from the list if one has ever been written and from the two
-     * original slots if not.
+     * The tags a new Todo starts with, per kind.
      *
-     * The fallback is the upgrade path, and it is a read rather than a one-off rewrite on
-     * purpose: an install that never opens this page keeps working off its old keys forever, and
-     * the first change made here is what settles the new form. The ids match what the database
-     * migration wrote onto the items, so a file marked C1 in the old world is still marked C1.
+     * Two fallbacks stacked, and both are reads rather than one-off rewrites on purpose. A kind's
+     * own key wins once it has been written; failing that the app-wide list that existed before
+     * v0.5.0 applies to *both* kinds; failing that the two original slots. So an install that never
+     * opens this page keeps working off its oldest keys forever, and the first edit made in either
+     * section is what settles that section's new form.
+     *
+     * Both kinds falling back to the same app-wide list is the whole of the upgrade story for the
+     * tags themselves, and it is why the migration does not carry them: on the day this ships,
+     * every existing Todo's Assets go on offering exactly the tags they offered the day before.
      */
-    private fun readCustomActions(
+    private fun readAssetControlTags(
+        prefs: androidx.datastore.preferences.core.Preferences
+    ): Map<AssetKind, List<CustomAction>> =
+        AssetKind.entries
+            // `OTHER` is not configurable, and offering a key nothing can be configured for would
+            // put a tag set in the map that no Asset can ever resolve to.
+            .filter { it != AssetKind.OTHER }
+            .associateWith { kind ->
+                prefs[tagsKeyFor(kind)]?.let(::decodeCustomActions) ?: readLegacyCustomActions(prefs)
+            }
+
+    /**
+     * The app-wide list that predates per-kind tags, from the list if one was ever written and from
+     * the two original slots if not.
+     *
+     * The ids match what the database migration wrote onto the items, so a file marked C1 in the
+     * old world is still marked C1 in the new one, under both kinds.
+     */
+    private fun readLegacyCustomActions(
         prefs: androidx.datastore.preferences.core.Preferences
     ): List<CustomAction> {
         prefs[KEY_CUSTOM_ACTIONS]?.let { return decodeCustomActions(it) }
 
-        val legacy = DefaultCustomActions.mapIndexed { index, default ->
+        return DefaultCustomActions.mapIndexed { index, default ->
             val name = if (index == 0) prefs[KEY_C1_NAME] else prefs[KEY_C2_NAME]
             val value = if (index == 0) prefs[KEY_C1_VALUE] else prefs[KEY_C2_VALUE]
             default.copy(
@@ -502,7 +821,35 @@ class SettingsStore(context: Context) {
                 webhookValue = value ?: default.webhookValue
             )
         }
-        return legacy
+    }
+
+    /** Where one kind's tags live. `OTHER` has no key because it has no configuration. */
+    private fun tagsKeyFor(kind: AssetKind) = when (kind) {
+        AssetKind.IMAGE -> KEY_ASSET_CONTROL_TAGS_IMAGE
+        AssetKind.VIDEO -> KEY_ASSET_CONTROL_TAGS_VIDEO
+        AssetKind.OTHER -> error("OTHER has no asset control and no key to store one under")
+    }
+
+    /** The tags currently configured for one kind, written or fallen back — the same read as above. */
+    private fun tagsOf(
+        prefs: androidx.datastore.preferences.core.Preferences,
+        kind: AssetKind
+    ): List<CustomAction> =
+        prefs[tagsKeyFor(kind)]?.let(::decodeCustomActions) ?: readLegacyCustomActions(prefs)
+
+    /**
+     * Writes one kind's tags, whatever the caller decided they should now be.
+     *
+     * Every mutation below goes through this, so that the first edit to a kind is also the moment
+     * its fallback stops applying — and so that no mutation accidentally writes the *legacy* list
+     * back into a key, which would freeze a kind at whatever it happened to be sharing.
+     */
+    private fun writeTags(
+        prefs: androidx.datastore.preferences.core.MutablePreferences,
+        kind: AssetKind,
+        tags: List<CustomAction>
+    ) {
+        prefs[tagsKeyFor(kind)] = encodeCustomActions(tags)
     }
 
     private suspend fun put(block: (androidx.datastore.preferences.core.MutablePreferences) -> Unit) {
@@ -511,6 +858,13 @@ class SettingsStore(context: Context) {
 
     private companion object {
         val KEY_QUICK_REVIEW = booleanPreferencesKey("folder_quick_review_enabled")
+
+        val KEY_ASSET_CONTROL_TAGS_IMAGE = stringPreferencesKey("asset_control_tags_image")
+        val KEY_ASSET_CONTROL_TAGS_VIDEO = stringPreferencesKey("asset_control_tags_video")
+
+        // Read-only from here on: the app-wide list, which both kinds fall back to until each has
+        // been edited once. Deleting it would strip the tags off every Todo that predates v0.5.0
+        // the next time Settings was read.
         val KEY_CUSTOM_ACTIONS = stringPreferencesKey("custom_actions")
 
         // Read-only from here on: what an install configured before actions became a list.

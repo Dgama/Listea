@@ -122,6 +122,26 @@ data class SourceEntity(
      */
     val followUpstream: Boolean = false,
 
+    /**
+     * The asset control this Todo was last imported under, per file kind, encoded.
+     *
+     * The answer the Create Tasks dialog collected, kept so the next run opens on what the user
+     * said rather than on what Settings happens to default to now — exactly the role
+     * [contentPolicy] plays, and stored here for the same reason: a Todo with no Tasks yet still
+     * has to be able to say what its next run will use, and a value derived from its Tasks could
+     * not.
+     *
+     * **`""` means nothing was ever chosen, not "no tags".** Every row that predates v0.5.0 holds
+     * `""`, and the whole of that upgrade rests on it being read as *this app's current default for
+     * the kind* rather than as an empty tag set. Reading it the other way strips the tag row off
+     * every Asset of every Todo already on the device, silently. `Settings.controlFor` is the only
+     * thing that should ever interpret this, and it is the only place that gets it right.
+     *
+     * See [TaskImportEntity.assetControls] for what this is not: this is what the Todo *asked* for,
+     * the other is what a Task *got*.
+     */
+    val assetControls: String = "",
+
     val lastImportAt: Long? = null,
     val lastImportStatus: String? = null
 )
@@ -166,7 +186,28 @@ data class TaskImportEntity(
     val groupPath: String,
     val displayName: String,
     val importedAt: Long,
-    val lastSeenAt: Long
+    val lastSeenAt: Long,
+
+    /**
+     * The asset control this Task was imported under, per file kind, encoded.
+     *
+     * **This is the copy review reads**, and the reason it exists rather than being looked up from
+     * [SourceEntity.assetControls] on demand. A Task must be able to say what it is judged with at
+     * the moment it is judged, without walking back to its Todo; and a later edit to Settings, or
+     * to the Todo, must not silently re-label Tasks that were already imported and possibly already
+     * judged. What a Task offers is a fact about its import, like [groupPath], and it belongs with
+     * the rest of them.
+     *
+     * It is *re-stamped by every run*, from the answer that run was given rather than from the
+     * Todo's row — see `ImportOptions.assetControls`. So the two can disagree after a Settings edit,
+     * and that disagreement is the point: the Todo is what the next run will get, the Task is what
+     * this one did. The Todo card reports the Tasks' value, because that is what the user will
+     * actually see when they open one.
+     *
+     * `""` reads as this app's current default for the kind, for the same reason and with the same
+     * consequence as [SourceEntity.assetControls].
+     */
+    val assetControls: String = ""
 )
 
 /**

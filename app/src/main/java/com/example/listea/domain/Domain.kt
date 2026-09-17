@@ -35,18 +35,42 @@ data class SourceRef(val rootUri: String, val relativePath: String)
  * its content is something no viewer claims yet, and the alternative — refusing to construct the
  * Asset, or guessing a kind — turns "Listea cannot show you this yet" into "this file is gone".
  *
- * There is no resolver here, and that is the decision rather than an omission. §6 keeps kind out of
- * storage precisely so a stored label cannot disagree with what actually renders, which means the
- * answer comes from the file's name and mime at the moment the viewer is chosen — next to
- * `MediaPreview`, which is where it will be written. Freezing it into the domain now would give
- * this package a second opinion about images, and two opinions is how the last model drifted.
+ * There is no resolver here, and that is still the decision rather than an omission. §6 keeps kind
+ * out of storage, and this package states what a kind *is* without ever being the place that works
+ * one out. Freezing a resolver here would give this package an opinion about images, and this is
+ * the package that is supposed to have none.
+ *
+ * The resolver was written in v0.5.0, and not where this note originally said it would be. The note
+ * anticipated name-and-mime, next to `MediaPreview`; what exists is `assetKindOf`, name-only, in
+ * `FileArrange.kt` beside `mediaKindOf`. The reason is that the two answers are needed in places
+ * that have no bytes to hand and cannot afford to look: a todo's import stamps a kind onto every
+ * Task it creates, and the dialog that starts that run asks about the kinds a folder holds before
+ * anything has been opened. `previewKindOf` needs a `Context` and a content-provider call, and says
+ * so itself — blocking, IO dispatcher. A kind resolved from mime is a kind that cannot be stamped
+ * identically at import time and re-derived at review time, and an import record that disagrees with
+ * the screen is the drift this note was warning about, arrived at from the other direction.
+ *
+ * So the divergence from `previewKindOf` is deliberate and stays: preview answers *can I draw these
+ * bytes*, with the bytes in hand; kind answers *which control governs this file*, and must be
+ * answerable without them. `assetViewerAvailable` is now expressed in terms of `assetKindOf`, which
+ * is what collapsed the two name-based opinions into one — before v0.5.0 there were two.
  *
  * Not to be confused with `MediaKind`, which is the *filter* vocabulary and answers a different
  * question: what may the user narrow a listing to. That one has a `TEXT` member for files Listea
  * can filter but cannot present, so the two sets agree on pictures and videos and diverge
  * everywhere else — on purpose.
  */
-enum class AssetKind { IMAGE, VIDEO, OTHER }
+enum class AssetKind(val key: String) {
+    IMAGE("image"),
+    VIDEO("video"),
+    OTHER("other");
+
+    companion object {
+        /** The kind a stored [key] names, or null for a key this build has never written. */
+        fun fromKey(key: String?): AssetKind? =
+            entries.firstOrNull { it.key == key }
+    }
+}
 
 /**
  * The unit that gets judged: an opaque identity, and when it arrived.
