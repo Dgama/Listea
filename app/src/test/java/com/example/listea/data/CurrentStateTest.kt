@@ -235,7 +235,8 @@ class CurrentStateTest {
     fun `the one-shot read agrees with the observed one`() = runTest {
         registerFiles("a.jpg", "b.jpg")
         dao.setTaskCompleted(dao.taskIdOf(ROOT, "a.jpg"), completed = true, now = 2000)
-        dao.setTaskAction(dao.taskIdOf(ROOT, "b.jpg"), ItemAction.Favourite, enabled = true, now = 2000)
+        val b = dao.pairOf(ROOT, "b.jpg")
+        dao.setAssetAction(b.taskId, b.assetId, ItemAction.Favourite, enabled = true, now = 2000)
 
         val observed = dao.observeFileStates(ROOT, listOf("a.jpg", "b.jpg")).first()
             .associate { it.relativePath to it.decisions }
@@ -355,15 +356,15 @@ class CurrentStateTest {
     }
 
     @Test
-    fun `clearing a manual item's action clears only that action`() = runTest {
+    fun `a manual item keeps its completion and has no actions to carry`() = runTest {
         val listId = manualList()
         database.writeLegacyManualItem(listId, "Buy milk", now = 1000)
         val milk = dao.getItems(listId).single()
         dao.setTaskCompleted(milk.taskId, completed = true, now = 2000)
 
-        dao.setTaskAction(milk.taskId, ItemAction.Favourite, enabled = true, now = 3000)
-        dao.setTaskAction(milk.taskId, ItemAction.Favourite, enabled = false, now = 4000)
-
+        // A typed entry has no file, so it has no pair, so there is nowhere for `★` or a tag to be
+        // recorded — the middle band is not drawn for it at all. Completion is the Task's own half
+        // and is untouched by that: see `v0.5.1.md`, *A Task with no Asset loses the middle band*.
         val after = dao.getItems(listId).single().decisions
         assertFalse(after.isFavorite)
         assertTrue(after.isCompleted)

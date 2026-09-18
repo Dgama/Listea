@@ -21,8 +21,6 @@ class CatalogSelectionTest {
         groupPath = groupPath,
         displayName = groupPath.substringAfterLast('/'),
         isCompleted = false,
-        isFavorite = false,
-        customActions = "",
         assetCount = 1,
         missingAssets = 0,
         sizeBytes = null,

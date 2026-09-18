@@ -434,7 +434,8 @@ class MigrationChainTest {
             ListeaDatabase.MIGRATION_16_17,
             ListeaDatabase.MIGRATION_17_18,
             ListeaDatabase.MIGRATION_18_19,
-            ListeaDatabase.MIGRATION_19_20
+            ListeaDatabase.MIGRATION_19_20,
+            ListeaDatabase.MIGRATION_20_21
         )
 
         val CHAIN_FROM_9 = arrayOf(
@@ -448,7 +449,8 @@ class MigrationChainTest {
             ListeaDatabase.MIGRATION_16_17,
             ListeaDatabase.MIGRATION_17_18,
             ListeaDatabase.MIGRATION_18_19,
-            ListeaDatabase.MIGRATION_19_20
+            ListeaDatabase.MIGRATION_19_20,
+            ListeaDatabase.MIGRATION_20_21
         )
     }
 }

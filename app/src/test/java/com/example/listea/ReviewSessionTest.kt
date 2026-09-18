@@ -2,7 +2,6 @@ package com.example.listea
 
 import androidx.compose.runtime.State
 import com.example.listea.data.DecisionTarget
-import com.example.listea.data.ReviewDecisions
 import com.example.listea.data.ReviewItem
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -126,7 +125,7 @@ class ReviewSessionTest {
         relativePath = title,
         sourceMissing = false,
         target = DecisionTarget.File("content://root", title),
-        decisions = ReviewDecisions(isCompleted = completed),
+        isCompleted = completed,
         rowId = id
     )
 }

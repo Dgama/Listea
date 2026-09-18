@@ -102,10 +102,12 @@ class SharedTaskTest {
         val first = importFile(chilli, "a.jpg", now = 1000)
         val second = importFile(tomato, "a.jpg", now = 2000)
 
-        dao.setTaskAction(first, ItemAction.Custom("custom1"), enabled = true, now = 3000)
+        // Addressed by the pair, which is the whole point of the test: the file is one file, and
+        // the two records about it are the two Tasks' own.
+        dao.setAssetAction(first, assetOf(first), ItemAction.Custom("custom1"), enabled = true, now = 3000)
 
-        assertEquals("custom1", rawText("SELECT customActions FROM task_state WHERE taskId = '$first'"))
-        assertEquals("", rawText("SELECT customActions FROM task_state WHERE taskId = '$second'"))
+        assertEquals("custom1", rawText("SELECT customActions FROM task_asset_state WHERE assetId = '${assetOf(first)}'"))
+        assertEquals("", rawText("SELECT customActions FROM task_asset_state WHERE assetId = '${assetOf(second)}'"))
     }
 
     // --- the reads that had to stop emitting a row per Asset ---------------------------------------
@@ -248,7 +250,7 @@ class SharedTaskTest {
         val first = importFile(chilli, "a.jpg", now = 1000)
         val second = importFile(tomato, "a.jpg", now = 2000)
         dao.setTaskCompleted(first, completed = true, now = 3000)
-        dao.setTaskAction(second, ItemAction.Custom("custom1"), enabled = true, now = 3000)
+        dao.setAssetAction(second, assetOf(second), ItemAction.Custom("custom1"), enabled = true, now = 3000)
 
         val states = dao.getSharedFileStates(ROOT, "a.jpg")
 
@@ -464,6 +466,16 @@ class SharedTaskTest {
         relativePath = relativePath,
         updatedAt = 1000
     )
+
+    /**
+     * The Asset one Task presents, read straight from the row a mark is addressed at.
+     *
+     * These fixtures import one file per Task, so the Task's Asset is that file — and reading it
+     * here rather than re-resolving it keeps the write addressed exactly where the schema says it
+     * lands, which is the half of this file that is about two Tasks over one file.
+     */
+    private fun assetOf(taskId: String): String =
+        rawText("SELECT id FROM assets WHERE taskId = '$taskId'")
 
     private fun rawInt(sql: String): Int =
         database.openHelper.writableDatabase.query(sql).use { cursor ->

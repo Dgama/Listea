@@ -1,7 +1,9 @@
 package com.example.listea
 
+import com.example.listea.data.AssetDecisions
 import com.example.listea.data.ListEntity
 import com.example.listea.data.ListItemEntity
+import com.example.listea.data.assetDecisions
 import com.example.listea.data.decisions
 import com.example.listea.data.encodeActionIds
 import com.example.listea.domain.AssetKind
@@ -52,6 +54,15 @@ class WebhookPayloadTest {
             )
         )
     )
+
+    /**
+     * The action half of a row, which is what every assertion below is about.
+     *
+     * A list row reports both halves — see [ReviewDecisions] — and goes through the same
+     * conversion the webhook's own item entry does, so these tests exercise the path the payload
+     * takes rather than a decision record assembled for them.
+     */
+    private fun ListItemEntity.actionDecisions(): AssetDecisions = decisions.assetDecisions
 
     /**
      * The control a payload is built under, over whatever the app's tags are.
@@ -114,19 +125,19 @@ class WebhookPayloadTest {
     @Test
     fun `actions serialize in a fixed order, whatever is set`() {
         val control = control()
-        assertEquals(emptyList<String>(), itemActionNames(item("a.jpg").decisions, control))
+        assertEquals(emptyList<String>(), itemActionNames(item("a.jpg").actionDecisions(), control))
         assertEquals(
             listOf("favorite"),
-            itemActionNames(item("a.jpg", favorite = true).decisions, control)
+            itemActionNames(item("a.jpg", favorite = true).actionDecisions(), control)
         )
         assertEquals(
             listOf("favorite", "cust2"),
-            itemActionNames(item("a.jpg", "custom2", favorite = true).decisions, control)
+            itemActionNames(item("a.jpg", "custom2", favorite = true).actionDecisions(), control)
         )
         assertEquals(
             listOf("favorite", "cust1", "cust2"),
             itemActionNames(
-                item("a.jpg", "custom1", "custom2", favorite = true).decisions,
+                item("a.jpg", "custom1", "custom2", favorite = true).actionDecisions(),
                 control
             )
         )
@@ -134,10 +145,17 @@ class WebhookPayloadTest {
 
     @Test
     fun `completion and actions are independent`() {
+        // The row carries both halves and the tags are read off the pair's half alone, so flipping
+        // the Task's completion moves nothing in the actions. Since v0.5.1 that is also a fact
+        // about the schema — the two are separate tables — and this is the assertion that would
+        // fail if a reader went looking for either of them in the other's place.
         val control = control()
-        val unchecked = item("a.jpg", "custom1").decisions.copy(isCompleted = false)
-        assertEquals(listOf("cust1"), itemActionNames(unchecked, control))
-        assertEquals(listOf("cust1"), itemActionNames(unchecked.copy(isCompleted = true), control))
+        val unchecked = item("a.jpg", "custom1")
+        assertEquals(listOf("cust1"), itemActionNames(unchecked.actionDecisions(), control))
+        assertEquals(
+            listOf("cust1"),
+            itemActionNames(unchecked.copy(isCompleted = true).actionDecisions(), control)
+        )
     }
 
     @Test
@@ -146,7 +164,7 @@ class WebhookPayloadTest {
         assertEquals(
             listOf("favorite", "tag1", "tag2"),
             itemActionNames(
-                item("a.jpg", "custom1", "custom2", favorite = true).decisions,
+                item("a.jpg", "custom1", "custom2", favorite = true).actionDecisions(),
                 control
             )
         )
@@ -158,7 +176,7 @@ class WebhookPayloadTest {
         val control = control(settings(c1Value = "favorite"))
         assertEquals(
             listOf("favorite"),
-            itemActionNames(item("a.jpg", favorite = true).decisions, control)
+            itemActionNames(item("a.jpg", favorite = true).actionDecisions(), control)
         )
     }
 
@@ -167,7 +185,7 @@ class WebhookPayloadTest {
         val control = control(settings(c1Value = "tag", c2Value = "tag"))
         assertEquals(
             listOf("tag"),
-            itemActionNames(item("a.jpg", "custom1", "custom2").decisions, control)
+            itemActionNames(item("a.jpg", "custom1", "custom2").actionDecisions(), control)
         )
     }
 
@@ -175,7 +193,7 @@ class WebhookPayloadTest {
     fun `renaming an action does not change which actions are selected`() {
         // The item holds the id, so it is untouched and only the emitted string moves. This is
         // the whole point of keeping names out of the item row.
-        val marked = item("a.jpg", "custom1").decisions
+        val marked = item("a.jpg", "custom1").actionDecisions()
         assertEquals(listOf("cust1"), itemActionNames(marked, control()))
         assertEquals(listOf("archive"), itemActionNames(marked, control(settings(c1Value = "archive"))))
     }
@@ -184,7 +202,7 @@ class WebhookPayloadTest {
     fun `an action the user deleted is carried but not sent`() {
         // Deleting a button is a decision about the bar, not about the files already marked with
         // it: the id stays on the row, and stops resolving to anything the webhook can name.
-        val marked = item("a.jpg", "custom1", favorite = true).decisions
+        val marked = item("a.jpg", "custom1", favorite = true).actionDecisions()
         // Both kinds emptied, not just the image one: a Task's control is resolved *over* its kinds,
         // so a kind left out of the settings map still answers with the app's default tags and the
         // deleted id would come back through the other side. Two kinds is what a Task has.

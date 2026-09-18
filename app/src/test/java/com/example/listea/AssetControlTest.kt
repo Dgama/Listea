@@ -1,7 +1,7 @@
 package com.example.listea
 
 import com.example.listea.data.ItemAction
-import com.example.listea.data.ReviewDecisions
+import com.example.listea.data.AssetDecisions
 import com.example.listea.domain.AssetKind
 import com.example.listea.domain.TemplateId
 import com.example.listea.domain.TemplateVersionRef
@@ -339,7 +339,7 @@ class AssetControlTest {
                 AssetKind.VIDEO to listOf(tag("v1", "Later", "later"))
             )
         )
-        val marked = ReviewDecisions(customActions = setOf("v1"))
+        val marked = AssetDecisions(customActions = setOf("v1"))
 
         assertEquals(listOf("later"), itemActionNames(marked, settings.controlForTask("")))
         assertEquals(listOf("later"), itemActionNames(marked, settings.controlFor("", AssetKind.VIDEO)))

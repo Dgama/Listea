@@ -7,7 +7,6 @@ import com.example.listea.data.ListEntity
 import com.example.listea.data.ListItemEntity
 import com.example.listea.data.manualItemIdentity
 import com.example.listea.data.newItemPublicId
-import com.example.listea.data.ReviewDecisions
 import com.example.listea.data.ReviewItem
 import com.example.listea.data.toReviewItem
 import org.junit.Assert.assertEquals
@@ -57,11 +56,7 @@ class ListArrangeTest {
             rootRelativePath = "folder/$name",
             sourceSizeBytes = sizeBytes,
             sourceModifiedAt = lastModified
-        ).toReviewItem(rootUri = null).copy(
-            // A source-backed row reads its decision from the file state, which the query
-            // projects into the entity; `rootUri = null` above only keeps the target simple.
-            decisions = ReviewDecisions(isCompleted = completed)
-        )
+        ).toReviewItem(rootUri = null)
     }
 
     /** A typed entry: no file, so nothing to measure. */
@@ -78,7 +73,7 @@ class ListArrangeTest {
             relativePath = null,
             sourceMissing = false,
             target = DecisionTarget.ManualItem(1, id),
-            decisions = ReviewDecisions(isCompleted = completed)
+            isCompleted = completed
         )
     }
 
@@ -229,7 +224,7 @@ class ListArrangeTest {
         // The round is walked to the end: every item in it comes back checked.
         val queued = round.map { it.id }.toSet()
         val after = before.map {
-            if (it.id in queued) it.copy(decisions = it.decisions.copy(isCompleted = true)) else it
+            if (it.id in queued) it.copy(isCompleted = true) else it
         }
 
         val detail = ListDetail(list, after)
@@ -258,7 +253,7 @@ class ListArrangeTest {
             now = now
         )
 
-        assertEquals(round.size, round.count { it.decisions.isCompleted })
+        assertEquals(round.size, round.count { it.isCompleted })
         // Completion is the stored `completedAt`, recalculated over every row by the database —
         // the round has no way to reach it, and the unfiltered count says why it must not.
         assertEquals(1, ListDetail(list, items).completedCount)

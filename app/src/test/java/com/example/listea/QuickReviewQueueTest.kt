@@ -1,12 +1,15 @@
 package com.example.listea
 
+import com.example.listea.data.AssetDecisions
+import com.example.listea.data.AssetStateEntity
 import com.example.listea.data.CatalogRow
 import com.example.listea.data.DecisionTarget
 import com.example.listea.data.FileReviewStateEntity
-import com.example.listea.data.ReviewDecisions
+import com.example.listea.data.ReviewAsset
 import com.example.listea.data.ReviewItem
 import com.example.listea.data.TaskStateEntity
 import com.example.listea.data.encodeActionIds
+import com.example.listea.data.taskDecisions
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -38,12 +41,20 @@ class QuickReviewQueueTest {
         lastModified = lastModified
     )
 
+    /**
+     * A catalog row with one Asset, which is what a row's tags hang on since v0.5.1.
+     *
+     * `favorite` and `actions` mark that Asset rather than the row, because a row has no tags of
+     * its own to mark — that is the whole of the change these tests are here to pin, and a helper
+     * that took them and put them back on the row would be asserting the shape that was removed.
+     */
     private fun catalogRow(
         taskId: String,
         groupPath: String,
         displayName: String,
         completed: Boolean = false,
         favorite: Boolean = false,
+        actions: Set<String> = emptySet(),
         missingAssets: Int = 0,
         unviewable: Boolean = false,
         sizeBytes: Long? = null,
@@ -53,13 +64,22 @@ class QuickReviewQueueTest {
         groupPath = groupPath,
         displayName = displayName,
         isCompleted = completed,
-        isFavorite = favorite,
-        customActions = "",
         assetCount = 1,
         missingAssets = missingAssets,
         sizeBytes = sizeBytes,
         lastModified = lastModified,
-        hasUnviewableAsset = unviewable
+        hasUnviewableAsset = unviewable,
+        assets = listOf(
+            ReviewAsset(
+                assetId = "$taskId#0",
+                sourceUri = "content://tree/Listea/doc/$groupPath",
+                name = displayName,
+                sourceMissing = false,
+                sizeBytes = sizeBytes,
+                lastModified = lastModified,
+                decisions = AssetDecisions(isFavorite = favorite, customActions = actions)
+            )
+        )
     )
 
     private fun state(id: Long, path: String) = FileReviewStateEntity(
@@ -72,14 +92,20 @@ class QuickReviewQueueTest {
 
     private fun pathOf(item: ReviewItem) = (item.target as DecisionTarget.File).relativePath
 
-    private fun taskState(
-        taskId: String,
-        completed: Boolean = false,
-        favorite: Boolean = false,
-        actions: Set<String> = emptySet()
-    ) = TaskStateEntity(
+    /** A Task's own half: completion and nothing else, now that the marks live on the pairs. */
+    private fun taskState(taskId: String, completed: Boolean = false) = TaskStateEntity(
         taskId = taskId,
         isCompleted = completed,
+        updatedAt = 0
+    )
+
+    /** One pair's half, for the live reads below. */
+    private fun assetState(
+        assetId: String,
+        favorite: Boolean = false,
+        actions: Set<String> = emptySet()
+    ) = AssetStateEntity(
+        assetId = assetId,
         isFavorite = favorite,
         customActions = encodeActionIds(actions),
         updatedAt = 0
@@ -120,9 +146,10 @@ class QuickReviewQueueTest {
             listOf(state(1, "sub/a.jpg"), state(2, "sub/b.jpg"))
         )
 
-        assertTrue(queue[0].decisions.isCompleted)
-        assertTrue(queue[0].decisions.isFavorite)
-        assertEquals(false, queue[1].decisions.isCompleted)
+        assertTrue(queue[0].isCompleted)
+        // The mark comes off the row's Asset, which is the only place a row can carry one now.
+        assertTrue(queue[0].taskDecisions.isFavorite)
+        assertEquals(false, queue[1].isCompleted)
         assertEquals(true, reviewFacts(queue[0]).isChecked)
         assertEquals(false, reviewFacts(queue[1]).isChecked)
     }
@@ -249,23 +276,59 @@ class QuickReviewQueueTest {
         // is the decision, or a checkbox tapped on a review surface writes to the database and
         // draws nothing — which is exactly what a round that emitted once used to do.
         val queue = taskReviewQueue(root, listOf(catalogRow("task-a", "a.jpg", "a.jpg")))
-        assertTrue(queue.single().decisions.isCompleted.not())
+        assertTrue(queue.single().isCompleted.not())
 
+        // Both halves move at once, which is the point: completion arrives by Task and the marks by
+        // pair, and a re-read that carried one and not the other would leave a tick that follows the
+        // write beside a chip that does not.
         val live = withLiveDecisions(
             queue,
-            listOf(taskState("task-a", completed = true, favorite = true, actions = setOf("a1")))
+            states = listOf(taskState("task-a", completed = true)),
+            assetStates = listOf(assetState("task-a#0", favorite = true, actions = setOf("a1")))
         )
 
-        assertTrue(live.single().decisions.isCompleted)
-        assertTrue(live.single().decisions.isFavorite)
-        assertEquals(setOf("a1"), live.single().decisions.customActions)
+        assertTrue(live.single().isCompleted)
+        assertTrue(live.single().taskDecisions.isFavorite)
+        assertEquals(setOf("a1"), live.single().taskDecisions.customActions)
         // Unchecking is the same write seen from the other side, so the merge has to carry it back
         // down as readily as it carried it up.
         assertEquals(
             false,
-            withLiveDecisions(live, listOf(taskState("task-a", completed = false))).single()
-                .decisions.isCompleted
+            withLiveDecisions(live, listOf(taskState("task-a", completed = false)), emptyList())
+                .single().isCompleted
         )
+    }
+
+    @Test
+    fun `a live read moves one file's marks without touching its neighbour's`() {
+        // The bug v0.5.1 was opened for, at the level the fix lives on: two files of one Task, and a
+        // re-read that names only the first leaves the second exactly as the queue resolved it.
+        val row = catalogRow("task-a", "a.jpg", "a.jpg").copy(
+            assets = listOf(
+                ReviewAsset(
+                    assetId = "task-a#0",
+                    sourceUri = "content://tree/Listea/doc/a.jpg",
+                    name = "a.jpg",
+                    sourceMissing = false
+                ),
+                ReviewAsset(
+                    assetId = "task-a#1",
+                    sourceUri = "content://tree/Listea/doc/b.jpg",
+                    name = "b.jpg",
+                    sourceMissing = false
+                )
+            )
+        )
+        val queue = taskReviewQueue(root, listOf(row))
+
+        val live = withLiveDecisions(
+            queue,
+            states = emptyList(),
+            assetStates = listOf(assetState("task-a#0", actions = setOf("a1")))
+        ).single()
+
+        assertEquals(setOf("a1"), live.assets[0].decisions.customActions)
+        assertTrue(live.assets[1].decisions.customActions.isEmpty())
     }
 
     @Test
@@ -279,7 +342,8 @@ class QuickReviewQueueTest {
             listOf(catalogRow("task-a", "2026-07-11/a.jpg", "a.jpg", sizeBytes = 10L))
         )
 
-        val live = withLiveDecisions(queue, listOf(taskState("task-a", completed = true))).single()
+        val live = withLiveDecisions(queue, listOf(taskState("task-a", completed = true)), emptyList())
+            .single()
 
         assertEquals(queue.single().title, live.title)
         assertEquals(queue.single().relativePath, live.relativePath)
@@ -300,16 +364,18 @@ class QuickReviewQueueTest {
         )
         val queue = taskReviewQueue(root, rows)
 
-        val live = withLiveDecisions(queue, listOf(taskState("task-b", completed = true)))
+        val live = withLiveDecisions(queue, listOf(taskState("task-b", completed = true)), emptyList())
 
         assertEquals(listOf("a.jpg", "b.jpg"), live.map { it.title })
-        assertTrue(live[0].decisions.isCompleted)
-        assertTrue(live[1].decisions.isCompleted)
+        assertTrue(live[0].isCompleted)
+        assertTrue(live[1].isCompleted)
     }
 
     @Test
     fun `an empty round has nothing to re-read`() {
-        assertTrue(withLiveDecisions(emptyList(), listOf(taskState("task-a"))).isEmpty())
+        assertTrue(
+            withLiveDecisions(emptyList(), listOf(taskState("task-a")), emptyList()).isEmpty()
+        )
     }
 
     @Test
@@ -453,7 +519,7 @@ class QuickReviewQueueTest {
                 relativePath = file.name,
                 sourceMissing = false,
                 target = DecisionTarget.File(root, file.rootRelativePath),
-                decisions = ReviewDecisions(isCompleted = file.name in checked),
+                isCompleted = file.name in checked,
                 sizeBytes = file.sizeBytes,
                 lastModified = file.lastModified
             )

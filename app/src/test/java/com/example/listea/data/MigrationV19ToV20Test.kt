@@ -430,7 +430,10 @@ class MigrationV19ToV20Test {
 
     private fun migrate(): ListeaDatabase =
         Room.databaseBuilder(context, ListeaDatabase::class.java, V19_DB)
-            .addMigrations(ListeaDatabase.MIGRATION_19_20)
+            .addMigrations(
+                ListeaDatabase.MIGRATION_19_20,
+                ListeaDatabase.MIGRATION_20_21
+            )
             .build()
 
     private fun ListeaDatabase.count(sql: String): Int =

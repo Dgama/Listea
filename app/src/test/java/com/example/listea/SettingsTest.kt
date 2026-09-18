@@ -1,7 +1,7 @@
 package com.example.listea
 
 import com.example.listea.data.ItemAction
-import com.example.listea.data.ReviewDecisions
+import com.example.listea.data.AssetDecisions
 import com.example.listea.domain.AssetKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
@@ -20,7 +20,7 @@ class SettingsTest {
     private val custom2 = ItemAction.Custom("custom2")
 
     private fun item(vararg actions: String, favorite: Boolean = false) =
-        ReviewDecisions(isFavorite = favorite, customActions = actions.toSet())
+        AssetDecisions(isFavorite = favorite, customActions = actions.toSet())
 
     /** The two out-of-the-box actions, renamed. Ids stay put — that is what is being tested. */
     private fun settings(

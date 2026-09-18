@@ -51,11 +51,15 @@ class TaskWriteTest {
     @Test
     fun `a write addressed at a Task that does not exist mints no replacement`() = runTest {
         dao.setTaskCompleted("no-such-task", completed = true, now = 2000)
-        dao.setTaskAction("no-such-task", ItemAction.Favourite, enabled = true, now = 2100)
+        dao.setAssetAction(
+            "no-such-task", "no-such-asset", ItemAction.Favourite, enabled = true, now = 2100
+        )
 
-        // A vanished address is a no-op, not an invitation to invent a Task to write to.
+        // A vanished address is a no-op, not an invitation to invent a Task to write to. Both
+        // halves of the pair are addressed and neither exists, so neither table gains a row.
         assertEquals(0, rawInt("SELECT COUNT(*) FROM tasks"))
         assertEquals(0, rawInt("SELECT COUNT(*) FROM task_state"))
+        assertEquals(0, rawInt("SELECT COUNT(*) FROM task_asset_state"))
         assertEquals(0, rawInt("SELECT COUNT(*) FROM assets"))
     }
 

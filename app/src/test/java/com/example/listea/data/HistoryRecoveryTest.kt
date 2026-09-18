@@ -33,6 +33,15 @@ import org.robolectric.annotation.Config
  * here and would make a recovery a thing you can only do once.
  *
  * Everything here is real SQL through Room, for the reason [ListsDaoTest] gives.
+ *
+ * **What this file stopped covering in v0.5.1, and does not pretend to.** The feature reads and
+ * writes `task_state.isFavorite` / `customActions`, which v0.5.1 retired — the marks live on the
+ * Task–Asset pairs now. So [judge] and [stateOf] are the *dead* columns at both ends, and every
+ * `favorite` and `actions` assertion below still passes while the app would show neither. The
+ * `completed` half is honest, because completion stayed on `task_state`. This is recorded rather
+ * than repaired: the fix is a per-file history and a schema step, and it is `v0.5.1-plan.md` §9.
+ * Until then, read these tests as covering *scope* — which Todo a judgment reaches — and not the
+ * marks themselves.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -101,6 +110,9 @@ class HistoryRecoveryTest {
 
         assertEquals(2, result.tasksRecovered)
         val fresh = sourceOf("photos")
+        // `completed` is the half of this that is still true of the app. The `favorite` and `urgent`
+        // in the same triple are read off the retired columns — see the class note — so this test
+        // says the judgment *reaches* the right Task and not that a user would see it.
         assertEquals(Judgment(true, true, "urgent"), stateOf(fresh, "photos/a.jpg"))
         // Untouched stays untouched. Recovering a Task that was never judged writes the absence of a
         // judgment rather than inventing one, which is why the snapshot records the absence too.
@@ -297,6 +309,9 @@ class HistoryRecoveryTest {
      *
      * The judgment is the fixture here and the recovery is the subject; going through the review
      * path would also record an event and refresh completion, which are other tests' business.
+     *
+     * `isFavorite` and `customActions` are the columns v0.5.1 retired, so this seam writes what the
+     * feature writes and nothing a user can see. See the class note, and `v0.5.1-plan.md` §9.
      */
     private fun judge(
         sourceId: String,

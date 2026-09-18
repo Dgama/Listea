@@ -4,7 +4,6 @@ import com.example.listea.data.DecisionTarget
 import com.example.listea.data.fileIdentity
 import com.example.listea.data.ListItemEntity
 import com.example.listea.data.newItemPublicId
-import com.example.listea.data.ReviewDecisions
 import com.example.listea.data.ReviewItem
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -36,7 +35,7 @@ class ReviewRoundTest {
             relativePath = "item$id.jpg",
             sourceMissing = false,
             target = DecisionTarget.File("content://tree/Listea", "folder/item$id.jpg"),
-            decisions = ReviewDecisions(isCompleted = completed)
+            isCompleted = completed
         )
     }
 
@@ -48,8 +47,7 @@ class ReviewRoundTest {
     ): Array<String> =
         reviewRound(items, arrangement, uncheckedOnly, now = 0L).map { it.taskId }.toTypedArray()
 
-    private fun checked(item: ReviewItem) =
-        item.copy(decisions = item.decisions.copy(isCompleted = true))
+    private fun checked(item: ReviewItem) = item.copy(isCompleted = true)
 
     /** The stored row a queued task resolves back to when its payload is built. */
     private fun row(item: ReviewItem) = ListItemEntity(
@@ -58,7 +56,7 @@ class ReviewRoundTest {
         listId = 1,
         taskId = item.taskId,
         title = item.title,
-        isCompleted = item.decisions.isCompleted,
+        isCompleted = item.isCompleted,
         sortOrder = 0,
         createdAt = 0,
         sourceUri = item.sourceUri,

@@ -98,7 +98,7 @@ class ReviewSubmissionTest {
         val listId = folderList(folderPath = "", files = listOf("a.jpg"))
         registerFiles("a.jpg")
         val taskId = dao.getItems(listId).single().taskId
-        dao.setTaskAction(taskId, ItemAction.Favourite, enabled = true, now = 1500)
+        dao.setAssetAction(taskId, fileAsset("a.jpg"), ItemAction.Favourite, enabled = true, now = 1500)
 
         dao.submitReview(
             taskId = taskId,
@@ -263,10 +263,11 @@ class ReviewSubmissionTest {
         registerFiles("a.jpg")
         val taskId = dao.getItems(listId).single().taskId
 
-        dao.setTaskAction(taskId, ItemAction.Favourite, enabled = true, now = 2000)
-        dao.setTaskAction(taskId, ItemAction.Custom("custom1"), enabled = true, now = 2100)
+        val assetId = fileAsset("a.jpg")
+        dao.setAssetAction(taskId, assetId, ItemAction.Favourite, enabled = true, now = 2000)
+        dao.setAssetAction(taskId, assetId, ItemAction.Custom("custom1"), enabled = true, now = 2100)
 
-        assertEquals(1, rawInt("SELECT isFavorite FROM task_state"))
+        assertEquals(1, rawInt("SELECT isFavorite FROM task_asset_state"))
         // A mark is metadata a submission carries a snapshot of, never a submission in itself.
         assertEquals(0, rawInt("SELECT COUNT(*) FROM review_events"))
     }
@@ -278,7 +279,7 @@ class ReviewSubmissionTest {
         val listId = folderList(folderPath = "", files = listOf("a.jpg"))
         registerFiles("a.jpg")
         val taskId = dao.getItems(listId).single().taskId
-        dao.setTaskAction(taskId, ItemAction.Favourite, enabled = true, now = 1500)
+        dao.setAssetAction(taskId, fileAsset("a.jpg"), ItemAction.Favourite, enabled = true, now = 1500)
         dao.submitReview(
             taskId = taskId,
             response = media(completed = true, favorite = true),
@@ -300,7 +301,7 @@ class ReviewSubmissionTest {
         // And the state did not move for the second one, which is the whole reason these are two
         // facts: a review count derived from completions could never have seen the second.
         assertEquals(1, rawInt("SELECT isCompleted FROM task_state"))
-        assertEquals(1, rawInt("SELECT isFavorite FROM task_state"))
+        assertEquals(1, rawInt("SELECT isFavorite FROM task_asset_state"))
         // Re-reviewing a list that was already complete is not a second completion, so nothing
         // downstream is told to deliver again.
         assertEquals(emptyList<Long>(), second)
@@ -346,8 +347,9 @@ class ReviewSubmissionTest {
         val listId = folderList(folderPath = "", files = listOf("a.jpg"))
         registerFiles("a.jpg")
         val taskId = dao.getItems(listId).single().taskId
-        dao.setTaskAction(taskId, ItemAction.Favourite, enabled = true, now = 1500)
-        dao.setTaskAction(taskId, ItemAction.Custom("kept"), enabled = true, now = 1500)
+        val assetId = fileAsset("a.jpg")
+        dao.setAssetAction(taskId, assetId, ItemAction.Favourite, enabled = true, now = 1500)
+        dao.setAssetAction(taskId, assetId, ItemAction.Custom("kept"), enabled = true, now = 1500)
 
         dao.submitReview(
             taskId = taskId,
@@ -362,10 +364,10 @@ class ReviewSubmissionTest {
             "completed=true;favorite=false;actions=stale",
             rawString("SELECT response FROM review_events")
         )
-        // The write moved completion and nothing else: the marks on the Task are untouched.
+        // The write moved completion and nothing else: the marks on the pair are untouched.
         assertEquals(1, rawInt("SELECT isCompleted FROM task_state"))
-        assertEquals(1, rawInt("SELECT isFavorite FROM task_state"))
-        assertEquals("kept", rawString("SELECT customActions FROM task_state"))
+        assertEquals(1, rawInt("SELECT isFavorite FROM task_asset_state"))
+        assertEquals("kept", rawString("SELECT customActions FROM task_asset_state"))
     }
 
     // --- helpers -----------------------------------------------------------------------------------
@@ -406,6 +408,11 @@ class ReviewSubmissionTest {
                 updatedAt = 1000
             )
         }
+    )
+
+    /** The Asset the list made for one file: half the address a mark is written to. */
+    private fun fileAsset(relativePath: String): String = rawString(
+        "SELECT id FROM assets WHERE rootUri = '$ROOT' AND relativePath = '$relativePath'"
     )
 
     private fun rawInt(sql: String): Int =

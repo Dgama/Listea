@@ -23,8 +23,6 @@ class CatalogScopeTest {
         groupPath = groupPath,
         displayName = displayName,
         isCompleted = false,
-        isFavorite = false,
-        customActions = "",
         assetCount = 1,
         missingAssets = 0,
         sizeBytes = null,
