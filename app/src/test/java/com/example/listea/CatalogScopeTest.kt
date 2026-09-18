@@ -2,6 +2,7 @@ package com.example.listea
 
 import com.example.listea.data.CatalogRow
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -137,5 +138,52 @@ class CatalogScopeTest {
         )
         // A flat Todo shows every Task it holds at one level, whatever depth their paths sit at.
         assertEquals(4, catalogLevel(flatCatalog, "bilibili", flat = true).size)
+    }
+
+    // --- whether a scope offers a way into picking --------------------------------------------------
+
+    @Test
+    fun `a scope made only of folders offers a selection, and no Quick Review`() {
+        // The defect, as a property rather than as a button: a tree Todo's root holds folders and
+        // no Tasks of its own. Quick Review is right to be absent there — a round queues the Tasks
+        // that lie exactly here and does not descend — and Select was wrong to follow it, because a
+        // folder's box takes the whole folder.
+        val root = catalogAtScope(flatCatalog, "")
+
+        assertTrue(root.scopes.isNotEmpty())
+        assertTrue(root.offersSelection())
+        // The narrowing Quick Review keeps, stated here so the two questions cannot be collapsed
+        // into one again by someone reading only one of them.
+        assertEquals(listOf("a.jpg"), catalogLevel(flatCatalog, "").map { it.groupPath })
+    }
+
+    @Test
+    fun `a scope holding a Task offers a selection whether or not it has folders`() {
+        // A folder with both: `bilibili` has two Tasks and a subfolder. Offered, as it always was.
+        assertTrue(catalogAtScope(flatCatalog, "bilibili").offersSelection())
+        // A leaf holding only Tasks, and nothing to descend into. Offered, as it always was.
+        assertTrue(catalogAtScope(flatCatalog, "bilibili/sub").offersSelection())
+    }
+
+    @Test
+    fun `a scope with nothing in it at all offers nothing`() {
+        // The one case the button is genuinely about: a folder the scan found nothing under, where
+        // every selection would be empty and the offer would be a List of nothing.
+        val empty = catalogAtScope(listOf(row("a.jpg")), "camera")
+
+        assertTrue(empty.tasks.isEmpty())
+        assertTrue(empty.scopes.isEmpty())
+        assertFalse(empty.offersSelection())
+    }
+
+    @Test
+    fun `a flat Todo with no Tasks offers nothing`() {
+        // A flat Todo has no scopes by construction, so its only reason to offer a selection is a
+        // Task — and a Todo whose every Task was dropped has none. This is the shape where the
+        // answer comes from the flat branch, and it must not fall back to the tree's.
+        val view = catalogAtScope(emptyList(), "", flat = true)
+
+        assertTrue(view.scopes.isEmpty())
+        assertFalse(view.offersSelection())
     }
 }

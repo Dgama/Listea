@@ -502,7 +502,8 @@ class MigrationV20ToV21Test {
             // effect on *this* fixture is asserted by the row counts and the column lists below.
             .addMigrations(
                 ListeaDatabase.MIGRATION_20_21,
-                ListeaDatabase.MIGRATION_21_22
+                ListeaDatabase.MIGRATION_21_22,
+                ListeaDatabase.MIGRATION_22_23
             )
             .build()
 
