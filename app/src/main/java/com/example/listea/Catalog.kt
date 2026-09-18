@@ -135,6 +135,24 @@ data class CatalogView(
 )
 
 /**
+ * Whether this scope offers a way into picking — the question the Select button is drawn from.
+ *
+ * A Task here is something to pick, and so is a folder below it, because a folder's box takes the
+ * whole folder. A scope made of folders is therefore where a selection is *most* useful rather than
+ * where it is unavailable, which is what the defect this function exists to fix had backwards.
+ *
+ * [catalogLevel]'s question is the narrower one and is deliberately not this function. A Quick
+ * Review round queues the Tasks that lie **exactly** here and does not descend (§7), so a
+ * folders-only root honestly has nothing for it — the two buttons look alike, sit side by side, and
+ * answer different questions, and collapsing them is what made a tree Todo impossible to build a
+ * List from.
+ *
+ * False only where a scope holds neither — a folder with nothing under it, where every selection
+ * would be empty and the button would offer a List of nothing.
+ */
+fun CatalogView.offersSelection(): Boolean = tasks.isNotEmpty() || scopes.isNotEmpty()
+
+/**
  * A Source's catalog as [scope] shows it: the folder scopes below it, and the Tasks that lie
  * exactly here.
  *

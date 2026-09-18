@@ -561,6 +561,12 @@ abstract class ListsDao {
                 listItemForTask(taskId, listId, index, now, folderRelativePath = null)
             }
         )
+        // A List made from Tasks that are already finished is finished the moment it exists. The
+        // membership just moved, and that is the only thing this question is asked about — a caller
+        // that skipped this would leave the row reading `N / N` while the screen filed it under
+        // *In progress*, which is what the caller that imports a recovered Todo and builds a List
+        // from it used to do.
+        refreshCompletion(listId, now)
         return listId
     }
 
@@ -593,6 +599,12 @@ abstract class ListsDao {
             }
         )
         clearDissolutionNote(listId)
+        // The same re-answer a creation gets, and for the same reason: the membership moved, in
+        // both directions. A List that was waiting on nothing but finished rows stops being
+        // finished the moment an unfinished one arrives, and one that was complete because it was
+        // empty stays empty rather than complete. The early return above is deliberate — with no
+        // additions nothing moved, so there is no new answer to write.
+        refreshCompletion(listId, now)
         return additions.size
     }
 
@@ -1812,6 +1824,12 @@ abstract class ListsDao {
         deleteSourceRow(sourceId)
         for (row in held) {
             noteDissolution(row.listId, row.itemCount, now, DissolutionReason.Dissolved.key)
+            // The rows that went took their answer with them. A List waiting on this Todo's one
+            // unfinished Task is finished now, and nothing else was going to say so; a List that
+            // was complete and has just been emptied is not finished, which is the same rule
+            // `refreshCompletion` applies everywhere else. The note above says what was lost and
+            // this says what is left, and neither implies the other.
+            refreshCompletion(row.listId, now)
         }
         return DissolutionReport(
             sourceName = source.displayName,
@@ -1968,6 +1986,9 @@ abstract class ListsDao {
         deleteTaskRow(taskId)
         for (row in held) {
             noteDissolution(row.listId, row.itemCount, now, DissolutionReason.Dropped.key)
+            // `drop` is a dissolution of one Task and the Lists it leaves behind are in exactly
+            // the state a whole-Todo delete would leave them in, so they get the same re-answer.
+            refreshCompletion(row.listId, now)
         }
     }
 

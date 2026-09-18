@@ -30,7 +30,7 @@ import java.util.UUID
         UpstreamEntity::class,
         DissolvedTaskStateEntity::class
     ],
-    version = 22,
+    version = 23,
     exportSchema = true
 )
 abstract class ListeaDatabase : RoomDatabase() {
@@ -1000,6 +1000,53 @@ abstract class ListeaDatabase : RoomDatabase() {
         }
 
         /**
+         * Repairs the Lists whose recorded completion had drifted from their own rows. **No DDL** —
+         * the schema is unchanged, and this step exists because a stored answer can be wrong.
+         *
+         * `lists.completedAt` answers *is this List finished*, and it is what the Lists screen files
+         * a row under, while the `N / N` beside it is counted live. Four writes moved a List's
+         * membership without re-asking the question — `createListFromTasks`, `addTasksToList`,
+         * `deleteTodo` and `dropTask` — so a List built from Tasks that were already done was
+         * recorded as unfinished and stayed that way. The four are fixed in this release, so nothing
+         * drifts again; this is for the rows that already had, which is the difference between
+         * fixing the bug and fixing the users.
+         *
+         * **The two statements are [ListsDao.refreshCompletion] written as SQL**, because a
+         * migration cannot call a DAO. The first completes a List that has rows and none unfinished;
+         * the second clears one that has no rows at all or any unfinished row, which is the same
+         * refusal to call an empty List finished that the DAO makes and the reason a List emptied by
+         * a dissolution is repaired *out* of completion rather than left in it. They are mirrors of
+         * `itemCount` and `unfinishedItemCount`'s join, deliberately, so the two can be diffed.
+         *
+         * **A repaired row is stamped with the upgrade time.** The moment it really became complete
+         * was never written down, and `completedAt` is sent in webhook payloads — so an invented
+         * earlier value would be a worse answer than an honest "as of now". Rows that were already
+         * right are not touched at all, which is what keeps a real completion time intact.
+         */
+        internal val MIGRATION_22_23 = object : Migration(22, 23) {
+            override fun migrate(connection: SQLiteConnection) {
+                val now = System.currentTimeMillis()
+                connection.execSQL(
+                    "UPDATE lists SET completedAt = $now " +
+                        "WHERE completedAt IS NULL " +
+                        "AND EXISTS (SELECT 1 FROM list_items WHERE listId = lists.id) " +
+                        "AND NOT EXISTS (" + UNFINISHED_ITEMS_OF_LIST + ")"
+                )
+                connection.execSQL(
+                    "UPDATE lists SET completedAt = NULL " +
+                        "WHERE completedAt IS NOT NULL " +
+                        "AND (NOT EXISTS (SELECT 1 FROM list_items WHERE listId = lists.id) " +
+                        "OR EXISTS (" + UNFINISHED_ITEMS_OF_LIST + "))"
+                )
+            }
+        }
+
+        /** The unfinished memberships of `lists.id`, as both of the statements above ask for them. */
+        private const val UNFINISHED_ITEMS_OF_LIST =
+            "SELECT 1 FROM list_items i LEFT JOIN task_state ts ON ts.taskId = i.taskId " +
+                "WHERE i.listId = lists.id AND COALESCE(ts.isCompleted, 0) = 0"
+
+        /**
          * The four tables V14 introduces, in the shape the entities declare and `14.json` records.
          *
          * Written out one statement at a time, for the same reason [createTaskTables] is: a column
@@ -1304,7 +1351,8 @@ abstract class ListeaDatabase : RoomDatabase() {
                     MIGRATION_18_19,
                     MIGRATION_19_20,
                     MIGRATION_20_21,
-                    MIGRATION_21_22
+                    MIGRATION_21_22,
+                    MIGRATION_22_23
                 )
                     .build()
                     .also { instance = it }

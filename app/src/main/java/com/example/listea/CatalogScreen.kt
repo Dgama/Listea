@@ -214,11 +214,16 @@ fun CatalogScreen(
                 if (onQuickReview != null && !selecting && view.tasks.isNotEmpty()) {
                     TextButton(onClick = onQuickReview) { Text("Quick Review") }
                 }
-                // Offering a List of nothing is the same mistake one step further on, so Select
-                // follows the same rule — except while a selection is already on, where it is the
-                // only way to abandon one. Descending into an empty folder mid-selection must not
-                // strand the user in a mode with no way out of it.
-                if (selecting || view.tasks.isNotEmpty()) {
+                // Select does *not* follow the rule above, and the difference is the whole of a
+                // defect rather than a nicety: a selection reaches down — a folder's box takes the
+                // whole folder — so a scope of folders is where a List is most wanted, not where
+                // the offer is missing. It was hidden at a tree Todo's root, which is exactly the
+                // scope this button is for. See [CatalogView.offersSelection].
+                //
+                // While a selection is already on it is offered unconditionally, because it is then
+                // the only way to abandon one: descending into an empty folder mid-selection must
+                // not strand the user in a mode with no way out of it.
+                if (selecting || view.offersSelection()) {
                     TextButton(onClick = {
                         selecting = !selecting
                         if (!selecting) {
