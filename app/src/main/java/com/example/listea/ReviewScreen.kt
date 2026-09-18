@@ -40,8 +40,10 @@ import androidx.compose.ui.semantics.semantics
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.exoplayer.ExoPlayer
 import coil3.ImageLoader
+import com.example.listea.data.AssetDecisions
 import com.example.listea.data.ReviewAsset
 import com.example.listea.data.ReviewItem
+import com.example.listea.data.taskDecisions
 import com.example.listea.domain.ListId
 import com.example.listea.domain.ReviewContext
 import com.example.listea.domain.TaskAction
@@ -117,9 +119,17 @@ data class ReviewItemInfo(
  *
  * [listTitle] is null for a folder review, which lands on no list at all — the Info sheet says so
  * rather than naming one, because naming one would be a claim about where the decision went.
+ *
+ * [decisions] is the **page's** pair record and not the Task's, which is the sheet telling the
+ * truth about the file in front of the user: the actions it lists are the ones set on this file,
+ * so a tag set on a video does not appear in a photograph's sheet. They are named through the
+ * Task's control — [AppSettings.controlForTask] — so that an id set under a control the page's own
+ * kind no longer defines still reads as the label the user knows rather than as a bare id. The
+ * same pair of choices the badge row makes, for the same reasons.
  */
 fun reviewItemInfo(
     item: ReviewItem,
+    decisions: AssetDecisions,
     settings: AppSettings,
     listTitle: String?
 ): ReviewItemInfo = ReviewItemInfo(
@@ -127,8 +137,8 @@ fun reviewItemInfo(
     relativePath = item.relativePath,
     sourceUri = item.sourceUri,
     sourceMissing = item.sourceMissing,
-    isCompleted = item.decisions.isCompleted,
-    actionLabel = itemActionLabel(item.decisions, settings.controlForTask(item.assetControls)),
+    isCompleted = item.isCompleted,
+    actionLabel = itemActionLabel(decisions, settings.controlForTask(item.assetControls)),
     listTitle = listTitle
 )
 
@@ -581,14 +591,41 @@ fun ReviewSession(
     //
     // `name` and not `relativePath`: a classifier wants the basename, and it is what
     // `reviewBlockFor` already hands `assetViewerAvailable` for the same file.
-    val kind = assetKindOf(assets.getOrNull(currentAsset)?.name.orEmpty())
+    val page = assets.getOrNull(currentAsset)
+    val kind = assetKindOf(page?.name.orEmpty())
     val control = settings.controlFor(item.assetControls, kind)
     val taskControl = settings.controlForTask(item.assetControls)
+    // The page's own record, and the whole of v0.5.1 on the surface. `assets` is empty only for a
+    // Task with no Asset at all — a manual item — where there is no pair to have recorded anything
+    // and the middle band is not drawn in any case.
+    val pageDecisions = page?.decisions ?: AssetDecisions()
     // A level with nothing to move between is not a level, so a one-file Task keeps the bar it has
     // always had: no file name beside the title, no `(1 / 1)`, no inner pair of arrows.
     val hasAssetLevel = assets.size > 1
     val assetForward = assetStep(assets.size, currentAsset, forward = true)
     val assetBack = assetStep(assets.size, currentAsset, forward = false)
+
+    // The middle band, and null where there is no file for it to be about. A Task with no Asset —
+    // a legacy manual item — has no pair, so it has nowhere to record an action and no kind to
+    // offer one for; a row of chips there would be a control whose every tap went nowhere. It keeps
+    // its name, its position and its checkbox, which is the whole of what the other two bands are
+    // for. See v0.5.1's out-of-scope note.
+    //
+    // [control] is this page's own, resolved from the Task's record and the file's kind, and
+    // [ReviewAsset.decisions] is this page's own record — the pair, both halves of it, which is
+    // what the band is.
+    val assetBand: (@Composable () -> Unit)? = page?.let { current ->
+        {
+            ReviewAssetControls(
+                decisions = current.decisions,
+                control = control,
+                onToggleAction = { action, enabled ->
+                    viewModel.setItemAction(item, current, action, enabled)
+                },
+                onInfo = { infoOpen = true }
+            )
+        }
+    }
 
     MediaShell(
         modifier = modifier,
@@ -596,17 +633,17 @@ fun ReviewSession(
             title = item.title,
             onBack = onBack,
             subtitle = assets.getOrNull(currentAsset)?.name?.takeIf { hasAssetLevel },
-            // What the Task is marked with, under its name and above the file's. It sits on the
-            // frame rather than in the file's own band because it says something about the *Task*
-            // and not about the page: a tag is set and read from the same Task whichever Asset is
-            // on screen, and a tap that clears the picture must not take the answer with it.
+            // What the *Task* is marked with, under its name and above the file's — the fold of
+            // every pair it presents, so a tag set on its video is legible while its photograph is
+            // on screen, and a tap that clears the picture does not take the answer with it.
             //
-            // Resolved from the same record the chip row below is, so a chip and its badge cannot
-            // name the same tag differently — but over the Task's kinds rather than this page's,
-            // which is the one difference between them and is deliberate. It is the live record:
-            // the round re-reads its decisions on every write now, so toggling a chip fills this in
-            // the same frame.
-            tags = { ItemActionTags(item, taskControl) },
+            // It is the one row on this surface that is not the page's, and v0.5.1 is what makes
+            // that a choice rather than an accident: the chip row below draws this pair's record,
+            // this draws all of them. Both are named through a control resolved over the Task's
+            // kinds, so a chip and its badge cannot name the same tag differently. It is the live
+            // record: the round re-reads its pairs on every write now, so toggling a chip fills
+            // this in the same frame.
+            tags = { ItemActionTags(item.taskDecisions, taskControl) },
             // The queue's own position, and inside it the page's. For Quick Review this is the
             // folder's items and not the owning list's total: completion progress is a list's
             // business and lives on its page.
@@ -647,20 +684,7 @@ fun ReviewSession(
                 }
             )
         },
-        assetControls = {
-            ReviewAssetControls(
-                item = item,
-                // This page's own control, resolved above from the Task's record and the Asset's
-                // kind. Renaming a tag relabels the chips of every Task whose control carries it,
-                // with no restart and no row touched — and no longer every chip on every Asset,
-                // which is the point of the release.
-                control = control,
-                onToggleAction = { action, enabled ->
-                    viewModel.setItemAction(item, action, enabled)
-                },
-                onInfo = { infoOpen = true }
-            )
-        }
+        assetControls = assetBand,
     ) {
         AssetRun(
             item = item,
@@ -686,11 +710,11 @@ fun ReviewSession(
 
     if (infoOpen) {
         ReviewItemInfoSheet(
-            info = reviewItemInfo(item, settings, chrome.listTitle),
+            info = reviewItemInfo(item, pageDecisions, settings, chrome.listTitle),
             // The file the sheet's rows and its two offers are about. Without it a Task standing
             // for several files has no single source to save or share and the offers disappear —
             // which is exactly what a folder-as-Task used to do.
-            asset = assets.getOrNull(currentAsset),
+            asset = page,
             onDismiss = { infoOpen = false }
         )
     }
@@ -871,7 +895,7 @@ fun ReviewItemInfoSheet(info: ReviewItemInfo, asset: ReviewAsset?, onDismiss: ()
  */
 internal fun resumeTaskId(persisted: Long?, items: List<ReviewItem>): String {
     items.firstOrNull { it.id == persisted }?.let { return it.taskId }
-    return (items.firstOrNull { !it.decisions.isCompleted } ?: items.first()).taskId
+    return (items.firstOrNull { !it.isCompleted } ?: items.first()).taskId
 }
 
 /**

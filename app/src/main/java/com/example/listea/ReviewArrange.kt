@@ -38,7 +38,7 @@ fun reviewFacts(item: ReviewItem): FileFacts = FileFacts(
     name = item.title,
     sizeBytes = item.sizeBytes,
     lastModified = item.lastModified,
-    isChecked = item.decisions.isCompleted
+    isChecked = item.isCompleted
 )
 
 /**
@@ -62,7 +62,7 @@ fun reviewRound(
     now: Long
 ): List<ReviewItem> =
     arrangeFiles(items, arrangement, now, ::reviewFacts)
-        .filter { !uncheckedOnly || !it.decisions.isCompleted }
+        .filter { !uncheckedOnly || !it.isCompleted }
 
 /**
  * The identity a List's arrangement is remembered under, alongside the folders'.

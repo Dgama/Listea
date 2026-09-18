@@ -4,6 +4,7 @@ import android.os.SystemClock
 import android.util.Log
 import com.example.listea.data.ListEntity
 import com.example.listea.data.ListItemEntity
+import com.example.listea.data.assetDecisions
 import com.example.listea.data.decisions
 import org.json.JSONArray
 import org.json.JSONObject
@@ -336,7 +337,7 @@ private fun itemJson(
     assetControls: String
 ): JSONObject {
     val actions = JSONArray()
-    itemActionNames(item.decisions, settings.controlForTask(assetControls)).forEach {
+    itemActionNames(item.decisions.assetDecisions, settings.controlForTask(assetControls)).forEach {
         actions.put(it)
     }
     return JSONObject()

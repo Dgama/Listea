@@ -227,11 +227,20 @@ data class ListItemEntity(
 
     /**
      * Slots the query fills, exactly as [isCompleted] is: an action is a decision about a file, and
-     * a decision about a file belongs to the file's Task. The queries that load these rows project
-     * `ts.isFavorite` and `ts.customActions` in, and the columns underneath are dead.
+     * a decision about a file belongs to the Task–Asset pair the file is under.
      *
-     * [customActions] uses [encodeActionIds]' encoding in both places, which is why an old copy of
-     * a set of ids stays legible — one format for one thing in this schema, not two.
+     * The queries that load these rows fold the Task's pairs in — `MAX(tas.isFavorite)` and
+     * `GROUP_CONCAT(tas.customActions)` over every Asset the row's Task holds — so a List row over a
+     * Task of several files reads the *union* of what was marked on them. That is the same answer
+     * [unionOf] gives in Kotlin, reached in SQL because a row that re-emits when any pair changes is
+     * worth more here than one that reads a single row. `GROUP_CONCAT` is a union rather than a
+     * concatenation because [decodeActionIds] splits and de-duplicates on the way out.
+     *
+     * [customActions] uses [encodeActionIds]' encoding, which is what makes that fold legible — one
+     * format for one thing in this schema, not two.
+     *
+     * The columns underneath are dead, and so are the `task_state` ones these were projected from
+     * before v0.5.1; [TaskStateEntity.isFavorite] is where that is stated.
      */
     val isFavorite: Boolean = false,
     val customActions: String = ""
@@ -286,8 +295,10 @@ data class FileReviewStateEntity(
     val relativePath: String,
 
     /**
-     * Slots the query fills. See the class doc: a decision lives on the Task now, and the queries
-     * that resolve a folder review project it in here.
+     * Slots the query fills. See the class doc: completion lives on the Task and a mark on the
+     * Task's pair with this file, and the queries that resolve a folder review project both in
+     * here — `ts.isCompleted`, and the pairs folded the way
+     * [ListItemEntity.customActions] describes.
      */
     val isCompleted: Boolean = false,
     val isFavorite: Boolean = false,
@@ -406,6 +417,52 @@ data class ReviewDecisions(
 )
 
 /**
+ * What a **Task–Asset pair** carries: the instance of that Task's asset control on that one file.
+ *
+ * The other half of [ReviewDecisions], and the half that is the template's. `★` and the tags are
+ * what a control *is*, so they are recorded where the control was applied — on the pair — while
+ * completion is the Task's own and is recorded once for the Task.
+ *
+ * A pair row — a catalog row, a List's row, a folder's file-state, a shared-file state — carries
+ * both halves and so still speaks [ReviewDecisions]. The split is between the two **state tables**,
+ * [com.example.listea.data.TaskStateEntity] and
+ * [com.example.listea.data.AssetStateEntity], and not between the row types that read them.
+ *
+ * Same encoding and same "an id no longer configured is kept" rule as [ReviewDecisions]: this is
+ * the same record, filed under a narrower key.
+ */
+data class AssetDecisions(
+    val isFavorite: Boolean = false,
+    val customActions: Set<String> = emptySet()
+)
+
+/**
+ * The pair's half of a row that carries both, for the callers that fold a Task rather than a file.
+ *
+ * A conversion and not a second opinion: the two fields are the same values, read off the same row,
+ * and this only says which half the reader is about to use. The webhook's one entry per Task is the
+ * caller that needs it — a payload names no file, so it reports everything the Task carries while
+ * the row it is built from still speaks [ReviewDecisions].
+ */
+val ReviewDecisions.assetDecisions: AssetDecisions
+    get() = AssetDecisions(isFavorite = isFavorite, customActions = customActions)
+
+/**
+ * A Task's pair records, together.
+ *
+ * The answer for a surface with no single file on screen — the badge row under a Task's name, a
+ * catalog card, a List's row, the webhook's one entry per Task — and the only honest one: a Task
+ * that presents three files and was marked on two of them is marked with what those two carry.
+ *
+ * `★` if any pair carries it, because it is one action and an item stores one boolean for it; every
+ * id any pair holds, because ids are what a pair holds and a union loses none of them.
+ */
+fun unionOf(decisions: List<AssetDecisions>): AssetDecisions = AssetDecisions(
+    isFavorite = decisions.any { it.isFavorite },
+    customActions = decisions.flatMapTo(mutableSetOf()) { it.customActions }
+)
+
+/**
  * How a set of action ids is stored in one column.
  *
  * Sorted, so the same set always writes the same string: storage that varies with the order the
@@ -519,7 +576,6 @@ data class ReviewItem(
     val relativePath: String?,
     val sourceMissing: Boolean,
     val target: DecisionTarget,
-    val decisions: ReviewDecisions,
 
     /**
      * What the file measures, for the filter and the sort that decide which items a page shows
@@ -540,6 +596,16 @@ data class ReviewItem(
      * belongs to no List and has no membership to edit.
      */
     val rowId: Long? = null,
+
+    /**
+     * Whether the Task is complete, and the whole of what an item records about its Task.
+     *
+     * It used to be [ReviewDecisions], carrying `★` and the tags beside it. Those are the pairs'
+     * since v0.5.1 — see [ReviewAsset.decisions] — because they are what the template records and
+     * the template is applied to a file. Completion is the outer band's, the Task's own, and
+     * checking it is one judgment about one Task however many files that Task presents.
+     */
+    val isCompleted: Boolean = false,
 
     /**
      * The Assets this Task is presented through, resolved once when the queue was built and carried
@@ -582,6 +648,24 @@ data class ReviewItem(
 )
 
 /**
+ * A Task's pair records, together: what a surface with no file on screen draws.
+ *
+ * The badge row under a Task's name, a List's own row, a catalog card, the webhook's one entry per
+ * Task. Each of those has to be able to name anything the Task can carry — a tag set on a video
+ * still has to be legible while a photograph is on screen — and each of them is answered by the
+ * same fold, taken from the same place: the pairs the item is already carrying.
+ *
+ * Derived rather than stored, and derived *here*, so there is exactly one way of asking the
+ * question. A caller that reached for a Task-level column instead would be reaching for a fact
+ * v0.5.1 deleted.
+ *
+ * Empty for a Task with no Asset, which is not a gap: a manual item has no pair, so it has no
+ * record, and the middle band is not drawn for it at all.
+ */
+val ReviewItem.taskDecisions: AssetDecisions
+    get() = unionOf(assets.map { it.decisions })
+
+/**
  * A stored row resolved for review, with its decisions taken from wherever they actually live.
  *
  * Its decisions come off the row's fields, but they were put there by the query that loaded it:
@@ -608,7 +692,7 @@ fun ListItemEntity.toReviewItem(
     } else {
         DecisionTarget.ManualItem(listId, id)
     },
-    decisions = decisions,
+    isCompleted = decisions.isCompleted,
     sizeBytes = sourceSizeBytes,
     lastModified = sourceModifiedAt,
     rowId = id,
@@ -635,11 +719,18 @@ fun ListItemEntity.toReviewItem(
  */
 sealed interface ItemAction {
 
-    /** Whether [decisions] currently carries this action. */
-    fun isSetOn(decisions: ReviewDecisions): Boolean
+    /**
+     * Whether [decisions] currently carries this action.
+     *
+     * [AssetDecisions] and not [ReviewDecisions], since v0.5.1. These are the actions a *control*
+     * offers and a *pair* records, and both of them live on the file. A row that reports a Task's
+     * whole answer — a List's row, a catalog card — hands in [unionOf] its pairs, which is the same
+     * type and the same question.
+     */
+    fun isSetOn(decisions: AssetDecisions): Boolean
 
     /** The same decisions with [enabled] applied, for a write that replaces the whole set. */
-    fun setOn(decisions: ReviewDecisions, enabled: Boolean): ReviewDecisions
+    fun setOn(decisions: AssetDecisions, enabled: Boolean): AssetDecisions
 
     data object Favourite : ItemAction {
 
@@ -649,17 +740,17 @@ sealed interface ItemAction {
         /** What it is called anywhere it has to be written rather than drawn. */
         const val Label = "★"
 
-        override fun isSetOn(decisions: ReviewDecisions): Boolean = decisions.isFavorite
+        override fun isSetOn(decisions: AssetDecisions): Boolean = decisions.isFavorite
 
-        override fun setOn(decisions: ReviewDecisions, enabled: Boolean): ReviewDecisions =
+        override fun setOn(decisions: AssetDecisions, enabled: Boolean): AssetDecisions =
             decisions.copy(isFavorite = enabled)
     }
 
     data class Custom(val id: String) : ItemAction {
 
-        override fun isSetOn(decisions: ReviewDecisions): Boolean = id in decisions.customActions
+        override fun isSetOn(decisions: AssetDecisions): Boolean = id in decisions.customActions
 
-        override fun setOn(decisions: ReviewDecisions, enabled: Boolean): ReviewDecisions =
+        override fun setOn(decisions: AssetDecisions, enabled: Boolean): AssetDecisions =
             decisions.copy(
                 customActions = if (enabled) {
                     decisions.customActions + id
@@ -829,6 +920,6 @@ data class ListDetail(
     val list: ListEntity,
     val items: List<ReviewItem>
 ) {
-    val completedCount: Int get() = items.count { it.decisions.isCompleted }
+    val completedCount: Int get() = items.count { it.isCompleted }
     val isComplete: Boolean get() = list.completedAt != null
 }

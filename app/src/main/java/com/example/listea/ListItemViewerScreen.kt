@@ -13,6 +13,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.media3.exoplayer.ExoPlayer
+import com.example.listea.data.AssetDecisions
 import com.example.listea.data.ReviewItem
 
 /**
@@ -141,9 +142,14 @@ fun ListItemViewerScreen(
     if (infoOpen) {
         // The same sheet Review shows, including the item's completion and its actions. Reading
         // them here is not a way to set them: the sheet has never had a control on it.
+        //
+        // The actions are the page's own pair record, taken from the same file the sheet is handed
+        // beside them, so the two halves of the sheet describe one file rather than one file and a
+        // neighbour's tags — see [ReviewItemInfoSheet].
+        val page = assets.getOrNull(currentAsset)
         ReviewItemInfoSheet(
-            info = reviewItemInfo(item, settings, listTitle),
-            asset = assets.getOrNull(currentAsset),
+            info = reviewItemInfo(item, page?.decisions ?: AssetDecisions(), settings, listTitle),
+            asset = page,
             onDismiss = { infoOpen = false }
         )
     }

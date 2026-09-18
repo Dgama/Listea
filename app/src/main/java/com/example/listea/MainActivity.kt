@@ -73,6 +73,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.example.listea.data.AssetDecisions
 import com.example.listea.data.DissolvedHistory
 import com.example.listea.data.ImportOutcome
 import com.example.listea.data.ImportResult
@@ -2300,8 +2301,7 @@ private fun SharedFileStateRow(state: SharedFileState, settings: AppSettings) {
     // Resolved over the Task's kinds, not one file's: this row names what a whole Task decided, and
     // the drill-in is reached from a file that several Tasks may be over.
     val actions = itemActionLabel(
-        ReviewDecisions(
-            isCompleted = state.isCompleted,
+        AssetDecisions(
             isFavorite = state.isFavorite,
             customActions = decodeActionIds(state.customActions)
         ),

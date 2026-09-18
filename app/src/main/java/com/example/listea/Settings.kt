@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import com.example.listea.data.AssetDecisions
 import com.example.listea.data.ItemAction
 import com.example.listea.data.ReviewDecisions
 import com.example.listea.data.ListItemEntity
@@ -583,15 +584,19 @@ fun nextCustomActionDefaults(existing: List<CustomAction>): CustomAction {
 /**
  * The enabled actions in [decisions] as wire values, in [ItemAction] order.
  *
+ * [AssetDecisions], because these are the actions a control offers and a pair records. A caller
+ * speaking about a whole Task — the payload, a List's row — hands in [unionOf] of its pairs, which
+ * is the same type and the same question asked of every file at once.
+ *
  * Duplicates are collapsed rather than rejected: two slots configured with the same wire value is
  * a strange thing to do but not a dangerous one, and emitting `["tag","tag"]` would be worse for
  * a receiver than emitting it once. Order stays fixed either way.
  */
-fun itemActionNames(decisions: ReviewDecisions, control: ResolvedAssetControl): List<String> =
+fun itemActionNames(decisions: AssetDecisions, control: ResolvedAssetControl): List<String> =
     control.actions.filter { it.isSetOn(decisions) }.map { control.wireOf(it) }.distinct()
 
 /** Compact "★ · Save" summary for a checklist row, or null when the item carries no actions. */
-fun itemActionLabel(decisions: ReviewDecisions, control: ResolvedAssetControl): String? =
+fun itemActionLabel(decisions: AssetDecisions, control: ResolvedAssetControl): String? =
     control.actions.filter { it.isSetOn(decisions) }
         .takeIf { it.isNotEmpty() }
         ?.joinToString(" · ") { control.labelOf(it) }

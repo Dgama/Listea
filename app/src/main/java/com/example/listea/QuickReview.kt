@@ -1,5 +1,6 @@
 package com.example.listea
 
+import com.example.listea.data.AssetStateEntity
 import com.example.listea.data.CatalogRow
 import com.example.listea.data.DecisionTarget
 import com.example.listea.data.FileReviewStateEntity
@@ -232,18 +233,31 @@ private fun reviewable(row: CatalogRow): Boolean =
  * fixed its membership. A Task the read does not name keeps what the queue gave it, which is what a
  * Task that has gone looks like from the review that is still holding it.
  *
- * The [ReviewItem.decisions] a queue carries are only meaningful where a query joined `task_state`
- * in, so this is the same value re-read and never a second opinion about it — the same re-read
- * [ListsViewModel.deliverFolderReview] already does before building a payload.
+ * The decisions a queue carries are only meaningful where a query joined `task_state` and its
+ * pairs' states in, so this is the same value re-read and never a second opinion about it — the
+ * same re-read [ListsViewModel.deliverFolderReview] already does before building a payload.
+ *
+ * Both halves, since v0.5.1: completion arrives by Task and the marks arrive by pair, and a round
+ * that re-read one and not the other would show a tick that follows the write and a chip that does
+ * not. A Task the read does not name, or a pair it does not carry, keeps what the queue gave it —
+ * the same treatment a Task that has gone already gets.
  */
 fun withLiveDecisions(
     queue: List<ReviewItem>,
-    states: List<TaskStateEntity>
+    states: List<TaskStateEntity>,
+    assetStates: List<AssetStateEntity>
 ): List<ReviewItem> {
     if (queue.isEmpty()) return queue
     val byTask = states.associateBy { it.taskId }
+    val byAsset = assetStates.associateBy { it.assetId }
     return queue.map { item ->
-        byTask[item.taskId]?.let { item.copy(decisions = it.decisions) } ?: item
+        val live = byTask[item.taskId]?.isCompleted
+        val assets = item.assets.map { it.copy(decisions = byAsset[it.assetId]?.decisions ?: it.decisions) }
+        if (live == null && assets == item.assets) {
+            item
+        } else {
+            item.copy(isCompleted = live ?: item.isCompleted, assets = assets)
+        }
     }
 }
 
@@ -271,7 +285,7 @@ private fun reviewItemFor(
     relativePath = file?.name ?: row.displayName,
     sourceMissing = false,
     target = DecisionTarget.File(rootUri, file?.rootRelativePath ?: row.groupPath),
-    decisions = ReviewDecisions(row.isCompleted, row.isFavorite, decodeActionIds(row.customActions)),
+    isCompleted = row.isCompleted,
     sizeBytes = file?.sizeBytes ?: row.sizeBytes,
     lastModified = file?.lastModified ?: row.lastModified,
     assets = row.assets,

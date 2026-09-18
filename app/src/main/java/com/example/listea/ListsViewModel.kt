@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.example.listea.data.AssetDecisions
 import com.example.listea.data.CatalogRow
 import com.example.listea.data.DecisionTarget
 import com.example.listea.data.DissolutionReport
@@ -43,6 +44,7 @@ import com.example.listea.data.ListSummary
 import com.example.listea.data.ListeaDatabase
 import com.example.listea.data.ListsDao
 import com.example.listea.data.newItemPublicId
+import com.example.listea.data.ReviewAsset
 import com.example.listea.data.ReviewItem
 import com.example.listea.data.ScannedFile
 import com.example.listea.data.SharedFileState
@@ -53,6 +55,7 @@ import com.example.listea.data.UpstreamEntity
 import com.example.listea.data.decisions
 import com.example.listea.data.encodeActionIds
 import com.example.listea.data.rootRelativePathOf
+import com.example.listea.data.taskDecisions
 import com.example.listea.data.toReviewAsset
 import com.example.listea.data.TaskAssetControls
 import com.example.listea.data.toReviewItem
@@ -776,17 +779,25 @@ class ListsViewModel @JvmOverloads constructor(
             dao.observeList(listId),
             dao.observeItems(listId),
             dao.observeAssetsForList(listId),
+            dao.observeAssetStatesForList(listId),
             dao.observeAssetControlsForList(listId)
-        ) { list, items, assets, controls ->
+        ) { list, items, assets, states, controls ->
             list?.let { owner ->
                 val byTask = assets.groupBy { it.taskId }
+                // The records, read beside the Assets and paired here, exactly as the fold of them
+                // onto the item is taken from the Assets themselves a few lines down. A pair that
+                // has never been written has no row, and `AssetDecisions()` is what that means: a
+                // file nobody has said anything about, which is not the same as a missing answer.
+                val stateByAsset = states.associate { it.assetId to it.decisions }
                 // A Task with no import row is absent, and the item's default `""` is the right
                 // answer for it: a manual entry has no run behind it to have been configured by.
                 val controlByTask = controls.associate { it.taskId to it.assetControls }
                 ListDetail(
                     owner,
                     items.map { item ->
-                        val resolved = byTask[item.taskId].orEmpty().map { it.toReviewAsset() }
+                        val resolved = byTask[item.taskId].orEmpty().map { asset ->
+                            asset.toReviewAsset(stateByAsset[asset.id] ?: AssetDecisions())
+                        }
                         item.toReviewItem(
                             rootUri = owner.sourceRootUri,
                             assetControls = controlByTask[item.taskId].orEmpty()
@@ -876,12 +887,9 @@ class ListsViewModel @JvmOverloads constructor(
         // opened, which is what the screen's own snapshot then narrows further — but its decisions
         // follow the state live. A checkbox or a tag tapped on this surface writes to the Task, and
         // until this the flow had already emitted its one value: the write landed and the control
-        // never moved. Room invalidates on `task_state`, so the re-emission arrives in the frame.
-        emitAll(
-            dao.observeTaskStates(queue.map { it.taskId }).map { fresh ->
-                FolderReview.Ready(items = withLiveDecisions(queue, fresh))
-            }
-        )
+        // never moved. Room invalidates on both state tables, so the re-emission arrives in the
+        // frame.
+        emitAll(liveDecisions(queue))
     }
 
     /**
@@ -927,12 +935,24 @@ class ListsViewModel @JvmOverloads constructor(
         // The same live decisions as a folder round, and for the same reason: this flow used to
         // emit exactly once, so a checkbox or a tag tapped on a Todo round was written to the
         // database and drawn nowhere — the value was still whatever the queue was built with.
-        emitAll(
-            dao.observeTaskStates(queue.map { it.taskId }).map { fresh ->
-                FolderReview.Ready(items = withLiveDecisions(queue, fresh))
-            }
-        )
+        emitAll(liveDecisions(queue))
     }
+
+    /**
+     * A round's queue, re-read on every write.
+     *
+     * Both state tables, combined, because a round draws both halves: `task_state` for the tick and
+     * `task_asset_state` for the marks, the latter scoped by Task through the Assets the queue is
+     * already holding. One flow and not two subscriptions, so a write that moves both — a
+     * submission — cannot be observed as a tick without its marks.
+     */
+    private fun liveDecisions(queue: List<ReviewItem>): Flow<FolderReview> =
+        combine(
+            dao.observeTaskStates(queue.map { it.taskId }),
+            dao.observeTaskAssetStates(queue.map { it.taskId })
+        ) { states, assetStates ->
+            FolderReview.Ready(items = withLiveDecisions(queue, states, assetStates))
+        }
 
     /**
      * Reads a browsed folder's direct files. Blocking: call on IO. Null when it cannot be read.
@@ -1258,19 +1278,22 @@ class ListsViewModel @JvmOverloads constructor(
      * review. Unchecking goes back through [setItemCompleted] even on that surface: retracting a
      * decision is not committing a judgment, and there is no retraction for a template to record.
      *
-     * The response is built from the item's decisions as the surface was showing them, which is
-     * what makes the stored snapshot the answer to "what did they commit" rather than to "what
-     * does the row say now".
+     * The response is built from the item's pairs as the surface was showing them, which is what
+     * makes the stored snapshot the answer to "what did they commit" rather than to "what the row
+     * says now". It is the **fold** of them and not the page's, because a submission is one
+     * judgment about one Task: a Task presenting three files commits what all three carry, which is
+     * also exactly what the payload built beside it reports.
      *
      * Everything after the write is [setItemCompleted]'s, unchanged and shared: the ordering lock,
      * the round bookkeeping and the completion transition are the same whether the completion came
      * from a judgment or an edit, so a List completes and fires its webhook identically either way.
      */
     fun submitItemReview(item: ReviewItem, terms: ReviewTerms) = launchDb {
+        val decisions = item.taskDecisions
         val response = ReviewResponse.MediaReview(
             completed = true,
-            favorite = item.decisions.isFavorite,
-            customActions = item.decisions.customActions
+            favorite = decisions.isFavorite,
+            customActions = decisions.customActions
         )
         val (transitioned, inRound) = writeOrder.withLock {
             val ids = dao.submitReview(item.taskId, response, terms.template, terms.context, now())
@@ -1280,13 +1303,22 @@ class ListsViewModel @JvmOverloads constructor(
     }
 
     /**
-     * Toggles one review action. Persisted immediately and nothing else: completion is untouched,
-     * so this never delivers a webhook. The value simply travels with the item into the next
-     * list.completed payload.
+     * Toggles one review action on one of a Task's files. Persisted immediately and nothing else:
+     * completion is untouched, so this never delivers a webhook. The value simply travels with the
+     * item into the next list.completed payload.
+     *
+     * Addressed by the **pair**, which is the whole of v0.5.1 at this boundary. The surface passes
+     * the page it is showing, and the write lands on that file's record alone — a tag ticked on one
+     * photograph of `Camera` is not ticked on the next.
      */
-    fun setItemAction(item: ReviewItem, action: ItemAction, enabled: Boolean) = launchDb {
+    fun setItemAction(
+        item: ReviewItem,
+        asset: ReviewAsset,
+        action: ItemAction,
+        enabled: Boolean
+    ) = launchDb {
         writeOrder.withLock {
-            dao.setTaskAction(item.taskId, action, enabled, now())
+            dao.setAssetAction(item.taskId, asset.assetId, action, enabled, now())
         }
     }
 
@@ -2378,15 +2410,15 @@ class ListsViewModel @JvmOverloads constructor(
             dao.getAssetControls(taskIds).associate { it.taskId to it.assetControls }
         }
         val rows = writeOrder.withLock {
-            val fresh = dao.getTaskStates(taskIds).associateBy { it.taskId }
-            items.mapIndexedNotNull { index, item ->
+            val fresh = dao.getTaskStates(taskIds)
+            val pairs = dao.getTaskAssetStates(taskIds)
+            withLiveDecisions(items, fresh, pairs).mapIndexed { index, item ->
                 val publicId = if (item.publicId.isNotEmpty()) {
                     item.publicId
                 } else {
                     dao.legacyTaskId(item.taskId, now())
                 }
-                item.copy(publicId = publicId, decisions = fresh[item.taskId]?.decisions ?: item.decisions)
-                    .toPayloadRow(index)
+                item.copy(publicId = publicId).toPayloadRow(index)
             }
         }
 
@@ -2430,15 +2462,20 @@ class ListsViewModel @JvmOverloads constructor(
         // dropped. This is not a sentinel meaning "broken row"; the row does not exist.
         taskId = "",
         title = title,
-        isCompleted = decisions.isCompleted,
+        isCompleted = isCompleted,
         sortOrder = sortOrder,
         createdAt = 0,
         sourceUri = sourceUri,
         sourceRelativePath = relativePath,
         rootRelativePath = (target as? DecisionTarget.File)?.relativePath,
         sourceMissing = sourceMissing,
-        isFavorite = decisions.isFavorite,
-        customActions = encodeActionIds(decisions.customActions)
+        // The fold, and not any one page's. A payload row is one entry for the whole Task, so the
+        // marks it reports are every mark the Task carries — the same rule by which the payload has
+        // always been able to name a tag set on a file that is not the one on screen. The pair the
+        // tag was set on is not reconstructed here and is not sent: a receiver is told what the
+        // Task says, once.
+        isFavorite = taskDecisions.isFavorite,
+        customActions = encodeActionIds(taskDecisions.customActions)
     )
 
 

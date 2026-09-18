@@ -88,6 +88,7 @@ import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.example.listea.data.AssetDecisions
 import com.example.listea.data.ItemAction
 import com.example.listea.data.ReviewBlock
 import com.example.listea.data.ReviewItem
@@ -639,12 +640,12 @@ fun TaskCompletionBar(
             )
         }
         Checkbox(
-            checked = item.decisions.isCompleted,
+            checked = item.isCompleted,
             onCheckedChange = onToggleCompleted,
             enabled = reviewBlocked == null,
             modifier = Modifier.semantics {
                 contentDescription =
-                    if (item.decisions.isCompleted) "Checked" else "Not checked"
+                    if (item.isCompleted) "Checked" else "Not checked"
             }
         )
     }
@@ -659,10 +660,10 @@ fun TaskCompletionBar(
  * what keeps an unthemed icon from being drawn black on black, which is what the icons here did
  * while they shared a row with the frame's own bars instead of being in one.
  *
- * Every control edits the decisions the [ReviewItem] carries, through the caller's ViewModel
- * calls, which is what keeps a decision reached in Quick Review indistinguishable from one
- * reached in Review — including the webhook it may fire. Nothing here navigates, and nothing here
- * completes: the checkbox that does is on the frame, a band below.
+ * Every control edits the pair's record, through the caller's ViewModel calls, which is what keeps
+ * a decision reached in Quick Review indistinguishable from one reached in Review — including the
+ * webhook it may fire. Nothing here navigates, and nothing here completes: the checkbox that does
+ * is on the frame, a band below.
  *
  * The tags are centred in what the Info button leaves and Info keeps the trailing edge. Info is
  * apart because it opens a panel rather than toggling anything, and should not be mistaken for
@@ -670,16 +671,19 @@ fun TaskCompletionBar(
  * wraps rather than clipping: a pair of unusually long custom names costs a second line instead of
  * an unreachable control.
  *
- * [control] is the answer for **the file on screen**, not for the Task: the caller derives the kind
- * from the Asset's own name and resolves that kind's configuration out of the Task's record, so
- * paging from a photograph to a video inside one Task changes this row. Taking an [AppSettings]
- * instead is what this used to do, and it is exactly the shape of the bug the release exists to
- * fix — a global object with no notion of kind cannot be wrong about a file it was never told about,
- * and so it is silently wrong about every file.
+ * **Both arguments are the file on screen, not the Task.** [control] is the Task's record resolved
+ * for this Asset's kind — derived from the Asset's own name, so paging from a photograph to a video
+ * inside one Task changes the row — and [decisions] is that same pair's record, so a chip ticked on
+ * one page is not ticked on the next.
+ *
+ * v0.5.0 fixed the first of those and left the second reading the Task: an [AppSettings] with no
+ * notion of kind cannot be wrong about a file it was never told about, and a Task-level record
+ * cannot be right about a file it was never told about either. Both are why the pair is passed in
+ * as a pair, and why neither argument can be reached for from the item.
  */
 @Composable
 fun ReviewAssetControls(
-    item: ReviewItem,
+    decisions: AssetDecisions,
     control: ResolvedAssetControl,
     onToggleAction: (ItemAction, Boolean) -> Unit,
     onInfo: () -> Unit,
@@ -702,7 +706,7 @@ fun ReviewAssetControls(
         ) {
             // Fixed order, so the row never reshuffles as actions are toggled.
             control.actions.forEach { action ->
-                val isSet = action.isSetOn(item.decisions)
+                val isSet = action.isSetOn(decisions)
                 if (action == ItemAction.Favourite) {
                     // The only action whose meaning is fixed, so it is the only one shown as a
                     // symbol; the custom ones say whatever the control that governs this file has
@@ -755,30 +759,40 @@ private val CustomActionLabelMaxWidth = 88.dp
  * moment it is set. Both draw it from the same resolved control, which is what makes that true
  * rather than two renderings that agree until one of them is changed.
  *
- * **This row is the Task's, and [control] is therefore resolved over every kind the Task is
- * configured for — not over the kind of any one file.** It is drawn under a Task's name, where no
- * particular Asset is on screen, so a tag set on a video has to be nameable while a photograph is
- * being shown; resolving per file would make the badge read "unknown id" for a tag the user can see,
- * or drop it entirely. That is the one place the chip row and this row legitimately differ, and the
- * difference is the design rather than a drift — [AppSettings.controlForTask] is the resolver for
- * this and [AppSettings.controlFor] the one for the chips.
+ * **This row is the Task's, and both of its arguments are therefore Task-wide.** It is drawn under
+ * a Task's name, where no particular Asset is on screen, so it takes [ReviewItem.taskDecisions] —
+ * the fold of the Task's pairs — and [control] resolved over every kind the Task is configured for
+ * rather than over the kind of any one file. A tag set on a video has to be nameable while a
+ * photograph is being shown; resolving per file would make the badge read "unknown id" for a tag
+ * the user can see, or drop it entirely. That is the one place the chip row and this row
+ * legitimately differ, and the difference is the design rather than a drift —
+ * [AppSettings.controlForTask] is the resolver for this and [AppSettings.controlFor] the one for
+ * the chips.
+ *
+ * The two are taken as arguments rather than read off a `ReviewItem` since v0.5.1, which is the
+ * same move v0.5.0 made when it replaced `AppSettings` with a resolved control: a composable left
+ * to find the marks itself is a composable that can find the wrong ones, and finding the Task's
+ * where the file's were asked for is precisely the bug this release closes. A caller that means
+ * one file's marks passes that pair's, and one that means the Task's passes the fold — both of
+ * which are [AssetDecisions], so the type says which question is being asked.
  *
  * One badge per action rather than a single joined string, because these are independent flags and
  * the row is read at a glance — "★  Save" as one line invites reading it as one label. Favourite is
  * tinted, the custom ones are not: the star is the only one whose meaning is fixed, and the rest
  * say whatever the control that governs them has named them.
  *
- * Drawn from the configured actions rather than from the item, so an id left behind by a deleted
- * action stays on the row and off the screen. Emits nothing at all for an item with no actions set,
- * so an untagged row stays quiet — which is what lets the review surface call it unconditionally.
+ * Drawn from the configured actions rather than from the decisions, so an id left behind by a
+ * deleted action stays on the row and off the screen. Emits nothing at all for an item with no
+ * actions set, so an untagged row stays quiet — which is what lets the review surface call it
+ * unconditionally.
  */
 @Composable
 fun ItemActionTags(
-    item: ReviewItem,
+    decisions: AssetDecisions,
     control: ResolvedAssetControl,
     modifier: Modifier = Modifier
 ) {
-    val tags = control.actions.filter { it.isSetOn(item.decisions) }
+    val tags = control.actions.filter { it.isSetOn(decisions) }
     if (tags.isEmpty()) return
 
     Row(

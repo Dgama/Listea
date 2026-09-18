@@ -19,8 +19,6 @@ data class CatalogProjection(
     val groupPath: String,
     val displayName: String,
     val isCompleted: Boolean,
-    val isFavorite: Boolean,
-    val customActions: String,
     val assetControls: String,
     val assetCount: Int,
     val missingAssets: Int,
@@ -37,14 +35,20 @@ data class TaskAssetControls(
     val assetControls: String
 )
 
-/** One Task in the catalog: what it is, where it sits, and whether any of its content cannot render. */
+/**
+ * One Task in the catalog: what it is, where it sits, and whether any of its content cannot render.
+ *
+ * It carries `isCompleted` and no other decision, since v0.5.1. The tags a Task's files were given
+ * live on the pairs, in [assets], because a tag is said about one file under one Task's control and
+ * a catalog row is a Task with no file on screen. It used to carry the Task's own `isFavorite` and
+ * `customActions`; both were read by nobody once the pair record arrived, and the columns under them
+ * are dead.
+ */
 data class CatalogRow(
     val taskId: String,
     val groupPath: String,
     val displayName: String,
     val isCompleted: Boolean,
-    val isFavorite: Boolean,
-    val customActions: String,
     val assetCount: Int,
     val missingAssets: Int,
     val sizeBytes: Long?,

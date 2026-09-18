@@ -19,6 +19,7 @@ import java.util.UUID
         TaskEntity::class,
         AssetEntity::class,
         TaskStateEntity::class,
+        AssetStateEntity::class,
         ReviewEventEntity::class,
         LegacyItemIdEntity::class,
         LegacyManualTaskEntity::class,
@@ -29,7 +30,7 @@ import java.util.UUID
         UpstreamEntity::class,
         DissolvedTaskStateEntity::class
     ],
-    version = 20,
+    version = 21,
     exportSchema = true
 )
 abstract class ListeaDatabase : RoomDatabase() {
@@ -904,6 +905,45 @@ abstract class ListeaDatabase : RoomDatabase() {
         }
 
         /**
+         * v0.5.1: the record moves from the Task down to the Task–Asset pair.
+         *
+         * A create and a copy, and the copy is the whole of the behaviour preservation. Every Asset
+         * that existed gets a row carrying its Task's marks, so a file that was showing `p2` and `p5`
+         * is still showing them the moment the app reopens — including every file of a multi-Asset
+         * Task, where the one Task-level record is copied to each of them.
+         *
+         * That last case is deliberate and is not an attempt to reconstruct a per-file answer: there
+         * was no such fact to recover, and inventing a distribution across three photographs would be
+         * this migration guessing. What it does is preserve what the user saw, so that the change is
+         * visible from the first tap afterwards rather than from the upgrade.
+         *
+         * **The `task_state` columns are left populated and are not read again.** Dropping them is a
+         * table rebuild — `DROP COLUMN` needs SQLite 3.35 and minSdk here is 24 — and they are the
+         * only remaining home for a legacy manual item's marks, since a Task with no Asset has no
+         * pair to have been copied to. Nothing consults them; the comment on
+         * [TaskStateEntity.isFavorite] is where that is stated for the reader who finds them.
+         *
+         * The `updatedAt` copied across is the Task's, which is the only timestamp the old record
+         * had. It is an honest "when this was last true" rather than a fabricated one.
+         */
+        internal val MIGRATION_20_21 = object : Migration(20, 21) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS task_asset_state (" +
+                        "assetId TEXT NOT NULL, isFavorite INTEGER NOT NULL, " +
+                        "customActions TEXT NOT NULL, updatedAt INTEGER NOT NULL, " +
+                        "PRIMARY KEY(assetId), FOREIGN KEY(assetId) REFERENCES assets(id) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE)"
+                )
+                connection.execSQL(
+                    "INSERT INTO task_asset_state (assetId, isFavorite, customActions, updatedAt) " +
+                        "SELECT a.id, ts.isFavorite, ts.customActions, ts.updatedAt " +
+                        "FROM assets a JOIN task_state ts ON ts.taskId = a.taskId"
+                )
+            }
+        }
+
+        /**
          * The four tables V14 introduces, in the shape the entities declare and `14.json` records.
          *
          * Written out one statement at a time, for the same reason [createTaskTables] is: a column
@@ -1206,7 +1246,8 @@ abstract class ListeaDatabase : RoomDatabase() {
                     MIGRATION_16_17,
                     MIGRATION_17_18,
                     MIGRATION_18_19,
-                    MIGRATION_19_20
+                    MIGRATION_19_20,
+                    MIGRATION_20_21
                 )
                     .build()
                     .also { instance = it }

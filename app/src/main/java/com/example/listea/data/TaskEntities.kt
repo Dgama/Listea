@@ -140,22 +140,74 @@ data class AssetEntity(
 data class TaskStateEntity(
     @PrimaryKey val taskId: String,
     val isCompleted: Boolean = false,
+
+    /**
+     * Dead since v0.5.1, along with [customActions]. The pair's record lives in [AssetStateEntity]
+     * now, and nothing reads these two or writes them — they hold whatever they held when
+     * `MIGRATION_20_21` copied them out, which is the only reason a legacy Task's marks are still
+     * recoverable at all: a manual item has no Asset, and so has no pair to have moved to.
+     *
+     * Kept rather than dropped because `ALTER TABLE … DROP COLUMN` needs SQLite 3.35 and this app
+     * ships minSdk 24, so the alternative is a full table rebuild for no reader's benefit — the
+     * same call v13 made about the decision columns on `list_items` and `file_review_state`.
+     */
     val isFavorite: Boolean = false,
 
-    /** The configured actions this Task carries, as ids, in [encodeActionIds]' encoding. */
+    /** Dead since v0.5.1. See [isFavorite]. */
     val customActions: String = "",
 
     val updatedAt: Long
 )
 
 /**
- * The decisions a Task's current state is carrying.
+ * What is true about one **Task–Asset pair** now: the instance of the asset control that governs
+ * this file, as the Task it belongs to recorded it.
  *
- * The same shape the two legacy carriers expose, so a caller that used to read a decision off a
- * `list_items` or `file_review_state` row reads it off this instead and sees nothing different.
+ * The successor to the two decision columns [TaskStateEntity] no longer uses, and the row
+ * `MIGRATION_20_21` fills for every Asset that existed at the time. It exists for every Asset from
+ * the moment the Asset does — the two insert points beside `insertAsset` write it in the same
+ * transaction — so the read paths need no `COALESCE` and no "has anybody marked this yet" branch.
+ *
+ * **[assetId] is the primary key and there is deliberately no `taskId` beside it.** The Asset is the
+ * pair: `AssetEntity.id` is a globally unique UUID that already knows its Task, so a second copy of
+ * that fact here would be a derivable value that can drift, and scoping by Task is one join on
+ * `index_assets_taskId`. The record is still the **Task's** and not the Asset's — that is what the
+ * foreign key chain says, and why an Asset the import run stops finding takes the record with it.
+ *
+ * Deliberately a different fact from [TaskStateEntity], which is the same relationship the two
+ * tables have always had: one Task, one completion; one pair, one instance of the control.
+ * [com.example.listea.data.ReviewEventEntity] stays outside both, as it always has.
  */
-val TaskStateEntity.decisions: ReviewDecisions
-    get() = ReviewDecisions(isCompleted, isFavorite, decodeActionIds(customActions))
+@Entity(
+    tableName = "task_asset_state",
+    foreignKeys = [
+        ForeignKey(
+            entity = AssetEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["assetId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ]
+)
+data class AssetStateEntity(
+    @PrimaryKey val assetId: String,
+    val isFavorite: Boolean = false,
+
+    /** The configured actions this pair carries, as ids, in [encodeActionIds]' encoding. */
+    val customActions: String = "",
+
+    val updatedAt: Long
+)
+
+/**
+ * The decisions one Task–Asset pair is carrying: the template's instance on the file.
+ *
+ * The half of [TaskStateEntity.decisions] this table took over. A caller holding both a Task's state
+ * and a pair's state has the whole of [ReviewDecisions]; a caller holding only one has the half its
+ * surface is about.
+ */
+val AssetStateEntity.decisions: AssetDecisions
+    get() = AssetDecisions(isFavorite, decodeActionIds(customActions))
 
 /**
  * One submitted review: what was decided, when, under which template, and from where.

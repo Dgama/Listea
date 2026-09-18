@@ -300,7 +300,7 @@ private fun QuickReviewQueue(
             // matters. "The scope" is the Todo for a Todo round and the folder for a folder one,
             // and [files] is that scope's queue either way.
             progress = ReviewProgress(
-                completed = files.count { it.decisions.isCompleted },
+                completed = files.count { it.isCompleted },
                 total = files.size
             )
         ),

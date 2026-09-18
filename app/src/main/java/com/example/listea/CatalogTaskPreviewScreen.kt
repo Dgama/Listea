@@ -199,10 +199,11 @@ fun CatalogTaskPreviewScreen(
 /**
  * A catalog row as the viewer's own shape.
  *
- * The decisions are carried across rather than dropped so that the renderer is given a whole
- * [ReviewItem] — but nothing on this screen reads them, sets them or shows them. They are here
- * because [AssetRun] renders an item and not a row, and inventing a second, thinner item type to
- * avoid passing them would put a second renderer behind the same picture.
+ * The completion and the Assets — which carry their own pair records — are carried across rather
+ * than dropped so that the renderer is given a whole [ReviewItem] — but nothing on this screen
+ * reads them, sets them or shows them. They are here because [AssetRun] renders an item and not a
+ * row, and inventing a second, thinner item type to avoid passing them would put a second renderer
+ * behind the same picture.
  *
  * [ReviewItem.id] is zero on purpose. It is a queue handle, and this screen has no queue: the
  * identity that matters here is [ReviewItem.taskId], which is the Task the assets belong to.
@@ -218,7 +219,7 @@ internal fun CatalogRow.asPreviewItem(rootUri: String): ReviewItem = ReviewItem(
     relativePath = groupPath,
     sourceMissing = false,
     target = DecisionTarget.File(rootUri, groupPath),
-    decisions = ReviewDecisions(isCompleted, isFavorite, decodeActionIds(customActions)),
+    isCompleted = isCompleted,
     sizeBytes = sizeBytes,
     lastModified = lastModified,
     assets = assets,

@@ -70,20 +70,33 @@ abstract class ListsDao {
     /**
      * One list's items with their decisions resolved.
      *
-     * A membership row holds no decision of its own any more. What is true of the thing judged
-     * lives on its Task, and this joins it back in — one path for every row, whether it is a
-     * manually typed entry or a file. The CASE that used to send the two kinds to different
-     * tables is gone rather than rewritten, because a manual entry and a file now answer the
-     * question the same way: a manual entry is a Task with no content, a file is a Task with an
-     * Asset, and both have state.
+     * A membership row holds no decision of its own. What is true of the thing judged lives on its
+     * Task, and this joins it back in — one path for every row, whether it is a manually typed
+     * entry or a file. The CASE that used to send the two kinds to different tables is gone rather
+     * than rewritten, because a manual entry and a file now answer the question the same way: a
+     * manual entry is a Task with no content, a file is a Task with an Asset, and both have state.
      *
-     * The join is inner, and that is safe for a reason worth stating: every Task is created with
-     * its state in the same breath, and the migration test asserts over a realistic fixture that
-     * migrated data holds the same. A left join here would not be more robust — it would turn a
-     * violated invariant into a row that silently disappears from somebody's list.
+     * **Two joins since v0.5.1**, because the row reports both halves a list row is asked for:
+     * completion off `task_state`, the tags off the Task's pairs. A row that carries both speaks
+     * [ReviewDecisions] — see [AssetDecisions] — so this is where the two are put back together.
      *
-     * Room sees `task_state` in the query and invalidates this flow when it changes, which is what
-     * makes a decision taken in a folder's Quick Review appear on this list immediately.
+     * The tags are the union over the Task's Assets, and it is taken in SQL: `★` as a `MAX`, every
+     * tag as a `GROUP_CONCAT` of the per-pair columns, which decodes to the union because
+     * [decodeActionIds] splits and de-duplicates. A row is one line on a list and a Task can be
+     * several files, so the alternative — reporting one Asset's tags — would show a mark the user
+     * cannot find on the files they open, or hide one they can. The comma is safe to concatenate
+     * because an id is generated rather than typed; see [newActionId].
+     *
+     * The `assets` join is left, unlike `task_state`'s. Both are on a Task, but only one of them is
+     * an invariant: every Task is created with its state in the same breath — the migration test
+     * asserts over a realistic fixture that migrated data holds the same — while a Task with no
+     * Asset is an ordinary thing, a manual entry, and its row must not vanish for having no pair to
+     * fold. A missing pair reads as nothing marked, which is what it is.
+     *
+     * Room sees `task_state`, `assets` and `task_asset_state` in the query and invalidates this flow
+     * when any of them changes, which is what makes a decision taken in a folder's Quick Review
+     * appear on this list immediately — a chip ticked on one file included, since a pair is one row
+     * of the table that invalidates it.
      */
     @Query(
         """
@@ -101,11 +114,14 @@ abstract class ListsDao {
                i.sourceMissing AS sourceMissing,
                i.sourceSizeBytes AS sourceSizeBytes,
                i.sourceModifiedAt AS sourceModifiedAt,
-               ts.isFavorite AS isFavorite,
-               ts.customActions AS customActions
+               COALESCE(MAX(tas.isFavorite), 0) AS isFavorite,
+               COALESCE(GROUP_CONCAT(tas.customActions), '') AS customActions
         FROM list_items i
         JOIN task_state ts ON ts.taskId = i.taskId
+        LEFT JOIN assets a ON a.taskId = i.taskId
+        LEFT JOIN task_asset_state tas ON tas.assetId = a.id
         WHERE i.listId = :listId
+        GROUP BY i.id
         ORDER BY i.sortOrder ASC, i.id ASC
         """
     )
@@ -125,6 +141,25 @@ abstract class ListsDao {
         """
     )
     abstract fun observeAssetsForList(listId: Long): Flow<List<AssetEntity>>
+
+    /**
+     * The pair records of a List's Tasks, read beside the Assets rather than joined onto them.
+     *
+     * The same move [observeAssetControlsForList] makes and for the same reason: the record is not
+     * a column of `assets` and must not become one, so the surface that needs both reads both and
+     * pairs them in Kotlin. Joined through `list_items` so it stays one Room query that re-emits
+     * when a record changes — which is what makes a chip tapped on the review surface move the
+     * List's own row behind it.
+     */
+    @Query(
+        """
+        SELECT tas.* FROM task_asset_state tas
+        JOIN assets a ON a.id = tas.assetId
+        JOIN list_items i ON i.taskId = a.taskId
+        WHERE i.listId = :listId
+        """
+    )
+    abstract fun observeAssetStatesForList(listId: Long): Flow<List<AssetStateEntity>>
 
     /**
      * The asset control each of a List's Tasks was imported under.
@@ -257,7 +292,7 @@ abstract class ListsDao {
         val affected = listsContainingTask(taskId)
         val wasComplete = affected.filter { isComplete(it) == true }.toSet()
 
-        writeTaskState(taskId, now) { it.copy(isCompleted = completed) }
+        writeTaskState(taskId, now) { completed }
 
         return refreshAffected(affected, wasComplete, now)
     }
@@ -303,7 +338,7 @@ abstract class ListsDao {
         val affected = listsContainingTask(taskId)
         val wasComplete = affected.filter { isComplete(it) == true }.toSet()
 
-        val written = writeTaskState(taskId, now) { it.copy(isCompleted = response.completesTask) }
+        val written = writeTaskState(taskId, now) { response.completesTask }
 
         // A write that found no state row is a submission about a Task that no longer exists, and
         // nothing is recorded against it: an event naming a Task nobody can reach would be a
@@ -636,11 +671,14 @@ abstract class ListsDao {
                i.sourceMissing AS sourceMissing,
                i.sourceSizeBytes AS sourceSizeBytes,
                i.sourceModifiedAt AS sourceModifiedAt,
-               ts.isFavorite AS isFavorite,
-               ts.customActions AS customActions
+               COALESCE(MAX(tas.isFavorite), 0) AS isFavorite,
+               COALESCE(GROUP_CONCAT(tas.customActions), '') AS customActions
         FROM list_items i
         JOIN task_state ts ON ts.taskId = i.taskId
+        LEFT JOIN assets a ON a.taskId = i.taskId
+        LEFT JOIN task_asset_state tas ON tas.assetId = a.id
         WHERE i.listId = :listId
+        GROUP BY i.id
         ORDER BY i.sortOrder ASC, i.id ASC
         """
     )
@@ -921,23 +959,36 @@ abstract class ListsDao {
     }
 
     /**
-     * Sets one review action on a Task. Action metadata only: it deliberately does not call
-     * [refreshCompletion] and returns nothing, so it can never report a completion transition and
-     * therefore can never cause a webhook to be delivered.
+     * Sets one review action on one **Task–Asset pair**. Action metadata only: it deliberately does
+     * not call [refreshCompletion] and returns nothing, so it can never report a completion
+     * transition and therefore can never cause a webhook to be delivered.
      *
-     * Both kinds of action are one read-modify-write of the Task's set now. Favourite is no longer
-     * a column of its own — [ItemAction.Favourite] and a configured action differ in who decides
-     * what they mean, not in where they are kept — and the read stays inside the transaction so
-     * two actions toggled at once cannot each write a set that never saw the other.
+     * The address is the pair, because that is what a control is applied to: the tags a file is
+     * offered are the Task's control resolved for that file's kind, so the answer belongs to that
+     * file and not to the Task's other pages. v0.5.1 is the release that made the write say so —
+     * before it, this took a `taskId` alone and a mark landed on every file the Task presented.
+     *
+     * [taskId] is carried beside the Asset even though the record is keyed by the Asset alone. It
+     * is what the callers have, it is what makes the write legible in a log, and it is the half of
+     * the pair the transaction is scoped to — the record is the Task's, filed under the file.
+     *
+     * Both kinds of action are one read-modify-write. Favourite is not a column of its own —
+     * [ItemAction.Favourite] and a configured action differ in who decides what they mean, not in
+     * where they are kept — and the read stays inside the transaction so two actions toggled at
+     * once cannot each write a set that never saw the other.
+     *
+     * A pair whose Asset has gone is a silent no-op, like a write at a vanished Task and for the
+     * same reason: nothing on a write path conjures a record for a file nobody can reach.
      */
     @Transaction
-    open suspend fun setTaskAction(
+    open suspend fun setAssetAction(
         taskId: String,
+        assetId: String,
         action: ItemAction,
         enabled: Boolean,
         now: Long
     ) {
-        writeTaskState(taskId, now) { action.setOn(it, enabled) }
+        writeAssetState(assetId, now) { action.setOn(it, enabled) }
     }
 
     /**
@@ -1061,6 +1112,15 @@ abstract class ListsDao {
      * browser's mark raises: *which* Todos, and do they agree. Deliberately per file rather than
      * for the whole screen — a folder of shared files would answer with a row per Task over every
      * one of them, and nothing shows that until something is expanded.
+     *
+     * The tags come from `task_asset_state` since v0.5.1, and this is the place they are most
+     * visibly *not* the Task's: the file is the same file in every row, and two Tasks over it can
+     * disagree, which is exactly the disagreement this drill-in exists to show. Completion stays
+     * the Task's, so one row can read `completed` and unmarked while the next reads the reverse.
+     *
+     * Left-joined, where `task_state` is inner: a Task with no state row is not a Task this app can
+     * describe, but a pair with no record is simply a file nobody has tagged, and the row about it
+     * is still worth showing — the file is claimed by the Task either way.
      */
     @Query(
         """
@@ -1070,13 +1130,14 @@ abstract class ListsDao {
                ti.displayName AS taskName,
                COALESCE(ti.groupPath = a.relativePath, 0) AS isOwnTask,
                ts.isCompleted AS isCompleted,
-               ts.isFavorite AS isFavorite,
-               ts.customActions AS customActions,
+               COALESCE(tas.isFavorite, 0) AS isFavorite,
+               COALESCE(tas.customActions, '') AS customActions,
                ti.assetControls AS assetControls
         FROM assets a
         JOIN task_imports ti ON ti.taskId = a.taskId
         JOIN sources s ON s.id = ti.sourceId
         JOIN task_state ts ON ts.taskId = ti.taskId
+        LEFT JOIN task_asset_state tas ON tas.assetId = a.id
         WHERE a.rootUri = :rootUri AND a.relativePath = :relativePath
         ORDER BY s.createdAt, s.id
         """
@@ -1110,14 +1171,15 @@ abstract class ListsDao {
                frs.rootUri AS rootUri,
                frs.relativePath AS relativePath,
                COALESCE(MAX(ts.isCompleted), 0) AS isCompleted,
-               COALESCE(MAX(ts.isFavorite), 0) AS isFavorite,
-               COALESCE(MAX(ts.customActions), '') AS customActions,
+               COALESCE(MAX(tas.isFavorite), 0) AS isFavorite,
+               COALESCE(MAX(tas.customActions), '') AS customActions,
                COALESCE(MAX(a.sourceMissing), 0) AS sourceMissing,
                frs.updatedAt AS updatedAt
         FROM file_review_state frs
         LEFT JOIN assets a ON a.rootUri = frs.rootUri AND a.relativePath = frs.relativePath
         LEFT JOIN legacy_item_ids li ON li.assetId = a.id
         LEFT JOIN task_state ts ON ts.taskId = a.taskId
+        LEFT JOIN task_asset_state tas ON tas.assetId = a.id
         WHERE frs.rootUri = :rootUri AND frs.relativePath IN (:relativePaths)
         GROUP BY frs.relativePath
         """
@@ -1143,14 +1205,15 @@ abstract class ListsDao {
                frs.rootUri AS rootUri,
                frs.relativePath AS relativePath,
                COALESCE(MAX(ts.isCompleted), 0) AS isCompleted,
-               COALESCE(MAX(ts.isFavorite), 0) AS isFavorite,
-               COALESCE(MAX(ts.customActions), '') AS customActions,
+               COALESCE(MAX(tas.isFavorite), 0) AS isFavorite,
+               COALESCE(MAX(tas.customActions), '') AS customActions,
                COALESCE(MAX(a.sourceMissing), 0) AS sourceMissing,
                frs.updatedAt AS updatedAt
         FROM file_review_state frs
         LEFT JOIN assets a ON a.rootUri = frs.rootUri AND a.relativePath = frs.relativePath
         LEFT JOIN legacy_item_ids li ON li.assetId = a.id
         LEFT JOIN task_state ts ON ts.taskId = a.taskId
+        LEFT JOIN task_asset_state tas ON tas.assetId = a.id
         WHERE frs.rootUri = :rootUri AND frs.relativePath IN (:relativePaths)
         GROUP BY frs.relativePath
         """
@@ -1331,6 +1394,24 @@ abstract class ListsDao {
     @Insert
     protected abstract suspend fun insertAsset(asset: AssetEntity)
 
+    /**
+     * An Asset and its pair record, together, which is the only way an Asset is ever written.
+     *
+     * The two tables are one fact about a Task's file — what it is, and what the control governing
+     * it records — and they are written in one statement pair inside the import run's transaction so
+     * that a reader never sees an Asset with no record. That is what lets every read path take the
+     * record without a `COALESCE`, the same property `task_state` has had since v0.2 and for the
+     * same reason.
+     *
+     * Defaults, deliberately. A new Asset has had nothing recorded about it, and the import run is
+     * not entitled to assert a decision on a file it has just discovered — the same rule
+     * [registerFiles] gives for a folder it has just opened.
+     */
+    protected suspend fun insertAssetWithState(asset: AssetEntity, now: Long) {
+        insertAsset(asset)
+        insertAssetState(AssetStateEntity(assetId = asset.id, updatedAt = now))
+    }
+
     @Insert
     protected abstract suspend fun insertTaskState(state: TaskStateEntity)
 
@@ -1405,12 +1486,77 @@ abstract class ListsDao {
     @Query("SELECT * FROM task_state WHERE taskId = :taskId")
     protected abstract suspend fun getTaskState(taskId: String): TaskStateEntity?
 
+    // --- the v21 pair records ----------------------------------------------------------------------
+    //
+    // `task_asset_state` is where the template's instance lives, and `assets` is how one is found:
+    // the pair's primary key is the Asset, and the Task is reached through it. Nothing here is
+    // addressed by Task alone, because nothing in this table is about a Task alone — a caller that
+    // has only a Task wants [getTaskAssetStates] or [unionOf], both of which are the fold rather
+    // than a decision.
+
+    @Insert
+    protected abstract suspend fun insertAssetState(state: AssetStateEntity)
+
+    @Query("SELECT * FROM task_asset_state WHERE assetId = :assetId")
+    protected abstract suspend fun getAssetState(assetId: String): AssetStateEntity?
+
+    @Query(
+        """
+        UPDATE task_asset_state
+        SET isFavorite = :isFavorite,
+            customActions = :customActions,
+            updatedAt = :updatedAt
+        WHERE assetId = :assetId
+        """
+    )
+    protected abstract suspend fun updateAssetState(
+        assetId: String,
+        isFavorite: Boolean,
+        customActions: String,
+        updatedAt: Long
+    )
+
+    /**
+     * Every pair record of these Tasks.
+     *
+     * Scoped by Task through `assets`, which is the join decision 2 chose over a duplicated
+     * `taskId` column: `assets` is indexed on `taskId` and the Asset's key is what the record hangs
+     * off, so the Task's own rows reach their records without a second copy of a fact that could
+     * drift.
+     *
+     * A Task with no Asset contributes nothing, which is the no-middle-band rule rather than a gap:
+     * there is no pair to have a record.
+     */
+    @Query(
+        """
+        SELECT tas.* FROM task_asset_state tas
+        JOIN assets a ON a.id = tas.assetId
+        WHERE a.taskId IN (:taskIds)
+        """
+    )
+    abstract suspend fun getTaskAssetStates(taskIds: List<String>): List<AssetStateEntity>
+
+    /**
+     * The same, as a live read: what a review round draws while it is open.
+     *
+     * [observeTaskStates]' twin and watched for the same reason — a chip tapped on the file the user
+     * is looking at is the normal way through a round, and a surface that drew its controls from the
+     * queue it built on entry would write every tap to the database and show nothing. Both flows are
+     * watched by the same round, because a round draws completion and the marks together.
+     */
+    @Query(
+        """
+        SELECT tas.* FROM task_asset_state tas
+        JOIN assets a ON a.id = tas.assetId
+        WHERE a.taskId IN (:taskIds)
+        """
+    )
+    abstract fun observeTaskAssetStates(taskIds: List<String>): Flow<List<AssetStateEntity>>
+
     @Query(
         """
         UPDATE task_state
         SET isCompleted = :isCompleted,
-            isFavorite = :isFavorite,
-            customActions = :customActions,
             updatedAt = :updatedAt
         WHERE taskId = :taskId
         """
@@ -1418,19 +1564,22 @@ abstract class ListsDao {
     protected abstract suspend fun updateTaskState(
         taskId: String,
         isCompleted: Boolean,
-        isFavorite: Boolean,
-        customActions: String,
         updatedAt: Long
     )
 
     /**
-     * Read-modify-write of one Task's current state, and the only way it is ever changed.
+     * Read-modify-write of one Task's current completion, and the only way it is ever changed.
      *
-     * Every decision in the app funnels through here — a checkbox on a List, a swipe in Quick
-     * Review, a favourite toggled from either — which is what makes "the state of a Task" a single
-     * fact rather than a value that four writes agree to keep in step. The read is inside the
-     * caller's transaction, so two actions toggled at once cannot each write a set that never saw
-     * the other.
+     * The completion half of what used to be the whole of a Task's state. Every write that moves a
+     * checkbox — a List's own row, a swipe in Quick Review, a submission — funnels through here,
+     * which is what makes "is this Task done" a single fact rather than a value that four writes
+     * agree to keep in step. The read is inside the caller's transaction, so two writes that race
+     * cannot each land a value that never saw the other.
+     *
+     * It used to carry `isFavorite` and `customActions` too. Those are the pair's now — see
+     * [writeAssetState] — and this method deliberately does not touch the two columns they left
+     * behind, so what the migration copied out of them stays readable for a Task that has no Asset
+     * to have copied it to.
      *
      * Update-only, deliberately. A Task's state row is created with the Task — the import run
      * inserts it, the migration inserts it — so an absent row does not mean "this is the first
@@ -1444,13 +1593,34 @@ abstract class ListsDao {
     protected open suspend fun writeTaskState(
         taskId: String,
         now: Long,
-        change: (ReviewDecisions) -> ReviewDecisions
-    ): ReviewDecisions? {
+        change: (Boolean) -> Boolean
+    ): Boolean? {
         val existing = getTaskState(taskId) ?: return null
+        val next = change(existing.isCompleted)
+        updateTaskState(taskId = taskId, isCompleted = next, updatedAt = now)
+        return next
+    }
+
+    /**
+     * Read-modify-write of one Task–Asset pair's record, and the only way it is ever changed.
+     *
+     * [writeTaskState]'s sibling, and every one of its rules for the same reasons — the read inside
+     * the caller's transaction, update-only, and null when there was no row rather than a mint. The
+     * difference is the address: this one is a *pair*, so a write that names an Asset the import run
+     * has taken away no-ops instead of resurrecting a record for a file nobody can see.
+     *
+     * Two actions toggled at once on one file cannot each write a set that never saw the other for
+     * exactly the reason the completion funnel gives: the read-modify-write is one transaction.
+     */
+    protected open suspend fun writeAssetState(
+        assetId: String,
+        now: Long,
+        change: (AssetDecisions) -> AssetDecisions
+    ): AssetDecisions? {
+        val existing = getAssetState(assetId) ?: return null
         val next = change(existing.decisions)
-        updateTaskState(
-            taskId = taskId,
-            isCompleted = next.isCompleted,
+        updateAssetState(
+            assetId = assetId,
             isFavorite = next.isFavorite,
             customActions = encodeActionIds(next.customActions),
             updatedAt = now
@@ -2574,6 +2744,11 @@ abstract class ListsDao {
      * The catalog's SQL half: a Task's state and Asset measurements, aggregated per Task. The
      * viewability flag is resolved in [getCatalogTasks], because the classification is Kotlin, not
      * SQL.
+     *
+     * It carries `isCompleted` and nothing else of the Task's decisions, since v0.5.1. It used to
+     * bring `isFavorite` and `customActions` too, and both were already read by nobody on this
+     * screen — the tags a catalog row would want are its pairs', and the fold for those is Kotlin.
+     * Rather than select two columns and overwrite them, the projection stopped asking.
      */
     @Query(
         """
@@ -2581,8 +2756,6 @@ abstract class ListsDao {
                ti.groupPath AS groupPath,
                ti.displayName AS displayName,
                ts.isCompleted AS isCompleted,
-               ts.isFavorite AS isFavorite,
-               ts.customActions AS customActions,
                ti.assetControls AS assetControls,
                COUNT(a.id) AS assetCount,
                COALESCE(SUM(a.sourceMissing), 0) AS missingAssets,
@@ -2597,18 +2770,26 @@ abstract class ListsDao {
     )
     protected abstract suspend fun catalogProjections(sourceId: String): List<CatalogProjection>
 
-    /** The catalog for one Source, with its viewability and its Assets resolved from the Task. */
+    /**
+     * The catalog for one Source, with its viewability and its Assets resolved from the Task.
+     *
+     * The pair records are read once for the whole catalog rather than per Task — a Source has many
+     * Tasks and a pair record is one small row per Asset, so the round trip is the cost worth
+     * avoiding — and each is hung back on the Asset it belongs to rather than folded onto the row.
+     * A catalog row is a Task with no file on screen and so has no tags of its own to carry; the
+     * Assets below it each know what was said about them, under this Task's control.
+     */
     @Transaction
-    open suspend fun getCatalogTasks(sourceId: String): List<CatalogRow> =
-        catalogProjections(sourceId).map { projection ->
+    open suspend fun getCatalogTasks(sourceId: String): List<CatalogRow> {
+        val projections = catalogProjections(sourceId)
+        val pairs = getTaskAssetStates(projections.map { it.taskId }).associateBy { it.assetId }
+        return projections.map { projection ->
             val assets = assetsForTask(projection.taskId).sortedBy { it.sortOrder }
             CatalogRow(
                 taskId = projection.taskId,
                 groupPath = projection.groupPath,
                 displayName = projection.displayName,
                 isCompleted = projection.isCompleted,
-                isFavorite = projection.isFavorite,
-                customActions = projection.customActions,
                 assetControls = projection.assetControls,
                 assetCount = projection.assetCount,
                 missingAssets = projection.missingAssets,
@@ -2617,9 +2798,10 @@ abstract class ListsDao {
                 hasUnviewableAsset = assets.any { asset ->
                     !assetViewerAvailable(asset.relativePath?.substringAfterLast('/').orEmpty())
                 },
-                assets = assets.map { it.toReviewAsset() }
+                assets = assets.map { it.toReviewAsset(pairs[it.id]?.decisions ?: AssetDecisions()) }
             )
         }
+    }
 
     /**
      * Whether a Task's content can currently be presented: every required Asset resolves and has a
@@ -2673,7 +2855,7 @@ abstract class ListsDao {
         for (asset in task.assets) {
             val current = existing[asset.rootRelativePath]
             if (current == null) {
-                insertAsset(
+                insertAssetWithState(
                     AssetEntity(
                         id = UUID.randomUUID().toString(),
                         taskId = taskId,
@@ -2683,7 +2865,8 @@ abstract class ListsDao {
                         sourceUri = asset.uri,
                         sizeBytes = asset.sizeBytes,
                         lastModified = asset.lastModified
-                    )
+                    ),
+                    now
                 )
                 created++
             } else {
@@ -2794,7 +2977,7 @@ abstract class ListsDao {
             )
         )
         for (asset in task.assets) {
-            insertAsset(
+            insertAssetWithState(
                 AssetEntity(
                     id = UUID.randomUUID().toString(),
                     taskId = taskId,
@@ -2804,7 +2987,8 @@ abstract class ListsDao {
                     sourceUri = asset.uri,
                     sizeBytes = asset.sizeBytes,
                     lastModified = asset.lastModified
-                )
+                ),
+                now
             )
         }
         return NewTaskDelta(assetsCreated = task.assets.size)

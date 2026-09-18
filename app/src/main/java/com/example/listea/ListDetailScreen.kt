@@ -70,6 +70,7 @@ import com.example.listea.data.ItemAction
 import com.example.listea.data.ListDetail
 import com.example.listea.data.ListEntity
 import com.example.listea.data.ReviewItem
+import com.example.listea.data.taskDecisions
 
 @Composable
 fun ListDetailScreen(
@@ -738,7 +739,7 @@ private fun ItemRow(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Checkbox(checked = item.decisions.isCompleted, onCheckedChange = onToggle)
+        Checkbox(checked = item.isCompleted, onCheckedChange = onToggle)
         Column(
             modifier = Modifier
                 .weight(1f)
@@ -750,8 +751,8 @@ private fun ItemRow(
                 text = item.title,
                 style = MaterialTheme.typography.bodyMedium,
                 textDecoration =
-                    if (item.decisions.isCompleted) TextDecoration.LineThrough else null,
-                color = if (item.decisions.isCompleted) {
+                    if (item.isCompleted) TextDecoration.LineThrough else null,
+                color = if (item.isCompleted) {
                     MaterialTheme.colorScheme.onSurfaceVariant
                 } else {
                     MaterialTheme.colorScheme.onSurface
@@ -764,7 +765,7 @@ private fun ItemRow(
             item.relativePath?.takeIf { it != item.title }?.let { path ->
                 StatusLine(path)
             }
-            ItemActionTags(item, control)
+            ItemActionTags(item.taskDecisions, control)
             // Subtle: the item stays checkable and is never hidden or removed.
             if (item.sourceMissing) {
                 StatusLine(
