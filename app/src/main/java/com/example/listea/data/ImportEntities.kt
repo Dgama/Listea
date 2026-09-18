@@ -236,6 +236,12 @@ data class TaskImportEntity(
  * recovery is a *copy into the new Todo*, so what is stored is the judgment and the path it was
  * about, and nothing that could be mistaken for a live Task.
  *
+ * **The judgments are inside [records], not in columns.** They are per *file* — the rule v0.5.1
+ * established — while this row is per Task, so a column per field could not hold them without
+ * flattening the Task's files into one answer, which is the bug both releases exist to fix. Keeping
+ * them as a payload also keeps this table from being a second model of the record: a field added to
+ * a pair's record is carried by the encoding, not by a migration here.
+ *
  * **There is no foreign key to `sources`.** [sourceId] names the whole point: the row exists to
  * outlive the `sources` row it came from, and [sourceName] and [importerKind] are copied rather than
  * joined for the same reason — after the delete there is nothing left to join to, and a picker that
@@ -258,9 +264,32 @@ data class DissolvedTaskStateEntity(
     /** The dissolved Task's `groupPath`: what a later import's Task is matched against. */
     val groupPath: String,
     val importerKind: String,
+
+    /**
+     * Whether the dissolved Task was checked. The one thing about it that is the Task's rather than
+     * a file's — see the three-band rule — and therefore the one thing this row records as a column
+     * rather than inside [records].
+     */
     val isCompleted: Boolean,
-    val isFavorite: Boolean,
-    val customActions: String,
+
+    /**
+     * The version of the encoding [records] holds. See [DISSOLVED_RECORDS_VERSION].
+     *
+     * Stored rather than assumed, because a payload is read by a build that may be later than the
+     * one that wrote it, and a reader that does not recognise a version must say so instead of
+     * guessing at a shape it has never seen. `review_events` keeps `templateId` and
+     * `templateVersion` beside its payload for the same reason.
+     */
+    val recordVersion: Int,
+
+    /**
+     * The Task's files and what was marked on each, as [encodeDissolvedRecords] writes them.
+     *
+     * `''` for a Task that had no file — a manual item has no Asset, so it has no pair and nothing
+     * to carry — and for a history written before v0.5.2, whose marks were the Task's and have no
+     * honest per-file answer. See [decodeDissolvedRecords] for what a reader does with either.
+     */
+    val records: String,
     val dissolvedAt: Long
 )
 
@@ -322,12 +351,39 @@ data class DissolvedHistory(
  * One new Task a history has something to say about, and what it has to say. Query result, not a
  * table — see `ListsDao.recoveryMatches`.
  *
- * Carries `taskId` because the write that follows is addressed by id, and the three state columns
- * because they are the whole of what crosses the boundary: a recovery moves judgments, never Tasks.
+ * Carries `taskId` because the write that follows is addressed by id, and the state because it is
+ * the whole of what crosses the boundary: a recovery moves judgments, never Tasks.
+ *
+ * The judgments are [records] — the encoded per-file payload of v0.5.2 — beside the [recordVersion]
+ * that says how to read them, and the completion, which is the Task's own. A reader that does not
+ * recognise the version restores the completion and no marks; see [decodeDissolvedRecords].
  */
 data class RecoveredTaskState(
     val taskId: String,
     val isCompleted: Boolean,
+    val recordVersion: Int,
+    val records: String
+)
+
+/**
+ * One dissolved Task and one of its files, as the snapshot reads them before encoding. Query result,
+ * not a table — see `ListsDao.dissolvedSnapshotRows`.
+ *
+ * One row per Asset, with the Task's own facts repeated on each of them, because that is the shape
+ * the payload is built from: the grouping is what turns these into one row per Task in
+ * `dissolved_task_state`. A Task with no Asset yields a single row whose [assetPath] is null and
+ * which contributes no record: it has no middle band to have recorded, which is a fact rather than
+ * a gap.
+ */
+data class DissolvedSnapshotRow(
+    val taskId: String,
+    val groupPath: String,
+    val sourceName: String,
+    val rootUri: String,
+    val sourcePath: String,
+    val importerKind: String,
+    val isCompleted: Boolean,
+    val assetPath: String?,
     val isFavorite: Boolean,
     val customActions: String
 )

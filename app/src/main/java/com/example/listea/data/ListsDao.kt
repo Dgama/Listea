@@ -1856,32 +1856,97 @@ abstract class ListsDao {
     abstract suspend fun listsHolding(sourceId: String): List<ListLosingItems>
 
     /**
-     * The snapshot itself: one row per Task this Todo holds, keyed by the path the Task was made
-     * over.
+     * Every Task of the Todo, with one row per file it holds and the Task's own facts repeated on
+     * each. Read, grouped and encoded by [snapshotDissolvedState] into one row per Task.
      *
-     * A `LEFT JOIN` to `task_state` with `COALESCE`, because a judgment that was never made is a
-     * fact worth keeping — an unchecked Task's history is what lets a recovery put the *unchecked*
-     * file back to unchecked without touching it, and an inner join would silently drop those rows
-     * and leave a recovery half-applied.
+     * `LEFT JOIN` on both sides with `COALESCE`, because a judgment that was never made is a fact
+     * worth keeping — an unmarked file's history is what lets a recovery put *that* file back to
+     * unmarked without touching its neighbour, and an inner join would silently drop those rows.
+     * `LEFT JOIN assets` is the other half of the same rule: a manual item has no file, and it still
+     * has a completion to record. [DissolvedSnapshotRow.assetPath] being null is exactly that case.
      *
      * `s.relativePath` — the Todo's own folder — is copied rather than left to be inferred from the
      * group paths, because it is what decides which folder offers this history back.
+     *
+     * Ordered by Task and then by `a.sortOrder`, which is the order the review surface pages the
+     * files in: the payload is read back as a Task's files, so a snapshot that reordered them would
+     * reorder the pages behind a restore.
      */
     @Query(
         """
-        INSERT INTO dissolved_task_state
-            (sourceId, sourceName, rootUri, sourcePath, groupPath, importerKind,
-             isCompleted, isFavorite, customActions, dissolvedAt)
-        SELECT ti.sourceId, s.displayName, s.rootUri, s.relativePath, ti.groupPath,
-               s.importerKind, COALESCE(ts.isCompleted, 0), COALESCE(ts.isFavorite, 0),
-               COALESCE(ts.customActions, ''), :now
+        SELECT ti.taskId AS taskId, ti.groupPath AS groupPath, s.displayName AS sourceName,
+               s.rootUri AS rootUri, s.relativePath AS sourcePath, s.importerKind AS importerKind,
+               COALESCE(ts.isCompleted, 0) AS isCompleted,
+               a.relativePath AS assetPath,
+               COALESCE(tas.isFavorite, 0) AS isFavorite,
+               COALESCE(tas.customActions, '') AS customActions
         FROM task_imports ti
         JOIN sources s ON s.id = ti.sourceId
         LEFT JOIN task_state ts ON ts.taskId = ti.taskId
+        LEFT JOIN assets a ON a.taskId = ti.taskId
+        LEFT JOIN task_asset_state tas ON tas.assetId = a.id
         WHERE ti.sourceId = :sourceId
+        ORDER BY ti.taskId, a.sortOrder
         """
     )
-    protected abstract suspend fun snapshotDissolvedState(sourceId: String, now: Long)
+    protected abstract suspend fun dissolvedSnapshotRows(sourceId: String): List<DissolvedSnapshotRow>
+
+    @Insert
+    protected abstract suspend fun insertDissolvedState(row: DissolvedTaskStateEntity)
+
+    /**
+     * The snapshot itself: one row per Task this Todo holds, keyed by the path the Task was made
+     * over.
+     *
+     * Read, encoded, written — three steps rather than one `INSERT … SELECT`, because the judgments
+     * are per *file* and belong to the Assets while the row is per Task. Nothing before SQLite 3.33
+     * can fold a group's rows into one ordered string, and the encoding is [encodeDissolvedRecords]'
+     * business rather than SQL's. `recoverStateFrom` makes the same move in the other direction, for
+     * the same reason.
+     *
+     * [DissolvedSnapshotRow.assetPath] is nullable and stays that way here: a file that cannot be
+     * named cannot be matched on the way back, so it is left out of the payload rather than spelled
+     * as a name a recovery would look for and never find. Its Task's completion is recorded either
+     * way — a Task with no file is a Task, and its history is not empty.
+     *
+     * Runs inside [deleteTodo]'s transaction, **before** anything is removed: the ordering the
+     * comment above already gives as the whole of the safety. A read that happened afterwards would
+     * have nothing left to copy.
+     */
+    @Transaction
+    open suspend fun snapshotDissolvedState(sourceId: String, now: Long) {
+        dissolvedSnapshotRows(sourceId)
+            .groupBy { it.taskId }
+            .forEach { (_, rows) ->
+                val task = rows.first()
+                insertDissolvedState(
+                    DissolvedTaskStateEntity(
+                        sourceId = sourceId,
+                        sourceName = task.sourceName,
+                        rootUri = task.rootUri,
+                        sourcePath = task.sourcePath,
+                        groupPath = task.groupPath,
+                        importerKind = task.importerKind,
+                        isCompleted = task.isCompleted,
+                        recordVersion = DISSOLVED_RECORDS_VERSION,
+                        records = encodeDissolvedRecords(
+                            rows.mapNotNull { row ->
+                                row.assetPath?.let { path ->
+                                    DissolvedFileRecord(
+                                        relativePath = path,
+                                        decisions = AssetDecisions(
+                                            isFavorite = row.isFavorite,
+                                            customActions = decodeActionIds(row.customActions)
+                                        )
+                                    )
+                                }
+                            }
+                        ),
+                        dissolvedAt = now
+                    )
+                )
+            }
+    }
 
     /**
      * The same removal, for one Task rather than a whole Todo — what `drop` does to a Task whose
@@ -2059,6 +2124,12 @@ abstract class ListsDao {
      *
      * Read then write, rather than one `UPDATE … FROM`: SQLite gained `UPDATE … FROM` in 3.33 and
      * `minSdk = 24` ships 3.9, so the join is done here and the writes are addressed by id.
+     *
+     * **The files come back the same way the judgments do** — matched by path onto the new Task's
+     * Assets, through [writeAssetState], which is already the only way a pair is ever written. So a
+     * file the new import did not produce recovers nothing while its neighbour recovers what it had,
+     * and a Task with no file recovers its completion alone. Nothing is spread across a Task's files
+     * because nothing here knows better than the payload which file a mark was made on.
      */
     @Transaction
     open suspend fun recoverStateFrom(
@@ -2068,7 +2139,22 @@ abstract class ListsDao {
     ): Int {
         val matches = recoveryMatches(dissolvedSourceId, newSourceId)
         for (row in matches) {
-            writeRecoveredState(row.taskId, row.isCompleted, row.isFavorite, row.customActions, now)
+            writeRecoveredState(row.taskId, row.isCompleted, now)
+            // An unknown version, or a payload this build did not write, ends this Task here:
+            // completion is restored and nothing is guessed at. That is also the whole answer a
+            // history written before v0.5.2 gets, its payload being empty by construction.
+            val records = decodeDissolvedRecords(row.records, row.recordVersion) ?: continue
+            // And `''` is an answer rather than a gap — the Task had no file to record — so there is
+            // nothing to look up and nothing to write.
+            if (records.isEmpty()) continue
+            val byPath = assetsForTask(row.taskId).associateBy { it.relativePath }
+            for (record in records) {
+                // A file the new import did not produce matches no Asset and writes nothing. That is
+                // the rule a recovery has always applied per Task — a path the Todo no longer holds
+                // recovers nothing — now applied per file, which is what it was always about.
+                val asset = byPath[record.relativePath] ?: continue
+                writeAssetState(asset.id, now) { record.decisions }
+            }
         }
         return matches.size
     }
@@ -2079,13 +2165,16 @@ abstract class ListsDao {
      * `JOIN sources` rather than trusting `task_imports` for the root, because provenance rows carry
      * no `rootUri` of their own — the grant lives on the Todo — and a match across two grants would
      * be a match between two different folders that happen to share a relative path.
+     *
+     * The judgments come back as the encoded payload and its version, not as columns: they are the
+     * files', and there is one of this row per Task. See [decodeDissolvedRecords].
      */
     @Query(
         """
         SELECT ti.taskId AS taskId,
                d.isCompleted AS isCompleted,
-               d.isFavorite AS isFavorite,
-               d.customActions AS customActions
+               d.recordVersion AS recordVersion,
+               d.records AS records
         FROM task_imports ti
         JOIN sources s ON s.id = ti.sourceId
         JOIN dissolved_task_state d
@@ -2098,12 +2187,19 @@ abstract class ListsDao {
         newSourceId: String
     ): List<RecoveredTaskState>
 
+    /**
+     * Completion, and only completion. The marks are restored per file — see [recoverStateFrom] —
+     * because they are the pair's and this row is the Task's.
+     *
+     * The two columns a recovery used to land them in are the ones v0.5.1 retired, which is exactly
+     * the defect this release repairs: a Task-level mark written here would be read by nobody, and
+     * a recovery that left one behind would be one migration away from marking every file at once.
+     * They are left untouched, as [writeTaskState] leaves them.
+     */
     @Query(
         """
         UPDATE task_state
            SET isCompleted = :isCompleted,
-               isFavorite = :isFavorite,
-               customActions = :customActions,
                updatedAt = :now
          WHERE taskId = :taskId
         """
@@ -2111,8 +2207,6 @@ abstract class ListsDao {
     protected abstract suspend fun writeRecoveredState(
         taskId: String,
         isCompleted: Boolean,
-        isFavorite: Boolean,
-        customActions: String,
         now: Long
     )
 

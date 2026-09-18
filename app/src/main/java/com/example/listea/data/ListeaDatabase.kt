@@ -30,7 +30,7 @@ import java.util.UUID
         UpstreamEntity::class,
         DissolvedTaskStateEntity::class
     ],
-    version = 21,
+    version = 22,
     exportSchema = true
 )
 abstract class ListeaDatabase : RoomDatabase() {
@@ -944,6 +944,62 @@ abstract class ListeaDatabase : RoomDatabase() {
         }
 
         /**
+         * v0.5.2: a dissolved history carries its files' records, not a Task-level summary of them.
+         *
+         * v0.5.1 moved the record to the Task–Asset pair and left this table reading `task_state`'s
+         * retired columns, so a dissolution recorded a value frozen at the migration and a recovery
+         * wrote into a column no surface reads. The repair is not a repoint: one row per Task keyed
+         * by `groupPath` has no way to say *which* file a mark was on, and the Assets are gone by the
+         * time a recovery runs. So the records move into a payload — `records`, with `recordVersion`
+         * beside it — and the two retired columns come off.
+         *
+         * **A full rebuild, because there is no `DROP COLUMN` to use.** SQLite gained it in 3.35 and
+         * `minSdk = 24` ships 3.9. The standard shape: create the new table, copy, drop, rename, and
+         * **recreate both indices** — Room compares what it finds against `22.json` on open, and an
+         * index left behind is a migration that fails there rather than on the first query.
+         *
+         * **Existing rows keep their completion and get no file records.** Their marks were
+         * Task-level, and there is no honest per-file answer to give them: applying the Task's to
+         * every file of the recovered Task would be v0.5.1's bug arriving through the recovery door.
+         * An empty payload is the admission that the old table never knew which file a mark was on,
+         * and the recovery restores what it can rather than inventing what it cannot.
+         */
+        internal val MIGRATION_21_22 = object : Migration(21, 22) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS dissolved_task_state_new (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "sourceId TEXT NOT NULL, sourceName TEXT NOT NULL, " +
+                        "rootUri TEXT NOT NULL, sourcePath TEXT NOT NULL, " +
+                        "groupPath TEXT NOT NULL, importerKind TEXT NOT NULL, " +
+                        "isCompleted INTEGER NOT NULL, recordVersion INTEGER NOT NULL, " +
+                        "records TEXT NOT NULL, dissolvedAt INTEGER NOT NULL)"
+                )
+                connection.execSQL(
+                    "INSERT INTO dissolved_task_state_new " +
+                        "(id, sourceId, sourceName, rootUri, sourcePath, groupPath, " +
+                        " importerKind, isCompleted, recordVersion, records, dissolvedAt) " +
+                        "SELECT id, sourceId, sourceName, rootUri, sourcePath, groupPath, " +
+                        " importerKind, isCompleted, $DISSOLVED_RECORDS_VERSION, '', dissolvedAt " +
+                        "FROM dissolved_task_state"
+                )
+                connection.execSQL("DROP TABLE dissolved_task_state")
+                connection.execSQL(
+                    "ALTER TABLE dissolved_task_state_new RENAME TO dissolved_task_state"
+                )
+                connection.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_dissolved_task_state_sourceId " +
+                        "ON dissolved_task_state (sourceId)"
+                )
+                connection.execSQL(
+                    "CREATE INDEX IF NOT EXISTS " +
+                        "index_dissolved_task_state_rootUri_sourcePath " +
+                        "ON dissolved_task_state (rootUri, sourcePath)"
+                )
+            }
+        }
+
+        /**
          * The four tables V14 introduces, in the shape the entities declare and `14.json` records.
          *
          * Written out one statement at a time, for the same reason [createTaskTables] is: a column
@@ -1247,7 +1303,8 @@ abstract class ListeaDatabase : RoomDatabase() {
                     MIGRATION_17_18,
                     MIGRATION_18_19,
                     MIGRATION_19_20,
-                    MIGRATION_20_21
+                    MIGRATION_20_21,
+                    MIGRATION_21_22
                 )
                     .build()
                     .also { instance = it }
