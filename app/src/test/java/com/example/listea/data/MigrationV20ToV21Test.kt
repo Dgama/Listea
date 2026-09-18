@@ -496,9 +496,14 @@ class MigrationV20ToV21Test {
 
     private fun migrate(): ListeaDatabase =
         Room.databaseBuilder(context, ListeaDatabase::class.java, V20_DB)
-            // Opened at 21, so only this step runs. The chain up to it is exercised by the parent
-            // fixtures; what is under test here is one step's effect on v20 data.
-            .addMigrations(ListeaDatabase.MIGRATION_20_21)
+            // This step, and the ones after it that the entity set now requires — Room opens at the
+            // current version whatever the fixture was. What is under test here is one step's effect
+            // on v20 data; the steps above it are [MigrationV21ToV22Test]'s subject, and their
+            // effect on *this* fixture is asserted by the row counts and the column lists below.
+            .addMigrations(
+                ListeaDatabase.MIGRATION_20_21,
+                ListeaDatabase.MIGRATION_21_22
+            )
             .build()
 
     private fun ListeaDatabase.count(sql: String): Int =

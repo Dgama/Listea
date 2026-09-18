@@ -34,14 +34,11 @@ import org.robolectric.annotation.Config
  *
  * Everything here is real SQL through Room, for the reason [ListsDaoTest] gives.
  *
- * **What this file stopped covering in v0.5.1, and does not pretend to.** The feature reads and
- * writes `task_state.isFavorite` / `customActions`, which v0.5.1 retired — the marks live on the
- * Task–Asset pairs now. So [judge] and [stateOf] are the *dead* columns at both ends, and every
- * `favorite` and `actions` assertion below still passes while the app would show neither. The
- * `completed` half is honest, because completion stayed on `task_state`. This is recorded rather
- * than repaired: the fix is a per-file history and a schema step, and it is `v0.5.1-plan.md` §9.
- * Until then, read these tests as covering *scope* — which Todo a judgment reaches — and not the
- * marks themselves.
+ * **What a judgment is, at both ends.** The fixture writes a completion to the Task and the marks to
+ * the *file's* own pair row, and reads them back the same way — which is the seam the app has used
+ * since v0.5.1, and since v0.5.2 the seam the history carries too. So the `favorite` and `actions`
+ * triples below are marks a user would see on the file, not columns nobody reads; [HistoryRecordsTest]
+ * is where the per-file half of that is put under pressure.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -110,9 +107,8 @@ class HistoryRecoveryTest {
 
         assertEquals(2, result.tasksRecovered)
         val fresh = sourceOf("photos")
-        // `completed` is the half of this that is still true of the app. The `favorite` and `urgent`
-        // in the same triple are read off the retired columns — see the class note — so this test
-        // says the judgment *reaches* the right Task and not that a user would see it.
+        // All three parts of the judgment, which is what the file was judged with: the Task came
+        // back checked, and its file came back with its `★` and its action id on it.
         assertEquals(Judgment(true, true, "urgent"), stateOf(fresh, "photos/a.jpg"))
         // Untouched stays untouched. Recovering a Task that was never judged writes the absence of a
         // judgment rather than inventing one, which is why the snapshot records the absence too.
@@ -305,13 +301,14 @@ class HistoryRecoveryTest {
     )
 
     /**
-     * Writes a judgment straight to the row rather than through `submitReview`.
+     * Writes a judgment straight to the two rows it lives in rather than through `submitReview`.
      *
      * The judgment is the fixture here and the recovery is the subject; going through the review
-     * path would also record an event and refresh completion, which are other tests' business.
+     * path would also record an event and refresh completion, which are other tests' business. The
+     * split is the app's, though: completion on the Task, the marks on the file's own pair row.
      *
-     * `isFavorite` and `customActions` are the columns v0.5.1 retired, so this seam writes what the
-     * feature writes and nothing a user can see. See the class note, and `v0.5.1-plan.md` §9.
+     * `groupPath` names the file as well as the Task, which is true of every Task this fixture makes
+     * — file-as-Task puts one file at each group path.
      */
     private fun judge(
         sourceId: String,
@@ -321,17 +318,25 @@ class HistoryRecoveryTest {
         actions: String
     ) {
         rawExec(
-            "UPDATE task_state SET isCompleted = ${if (completed) 1 else 0}, " +
-                "isFavorite = ${if (favorite) 1 else 0}, customActions = '$actions' " +
+            "UPDATE task_state SET isCompleted = ${if (completed) 1 else 0} " +
                 "WHERE taskId = (SELECT taskId FROM task_imports WHERE sourceId = '$sourceId' " +
                 "AND groupPath = '$groupPath')"
         )
+        rawExec(
+            "UPDATE task_asset_state SET isFavorite = ${if (favorite) 1 else 0}, " +
+                "customActions = '$actions' WHERE assetId = " +
+                "(SELECT a.id FROM assets a JOIN task_imports ti ON ti.taskId = a.taskId " +
+                "WHERE ti.sourceId = '$sourceId' AND ti.groupPath = '$groupPath')"
+        )
     }
 
+    /** The same two rows, read back as one answer: the Task's completion and the file's marks. */
     private fun stateOf(sourceId: String, groupPath: String): Judgment =
         database.openHelper.writableDatabase.query(
-            "SELECT ts.isCompleted, ts.isFavorite, ts.customActions FROM task_imports ti " +
+            "SELECT ts.isCompleted, tas.isFavorite, tas.customActions FROM task_imports ti " +
                 "JOIN task_state ts ON ts.taskId = ti.taskId " +
+                "JOIN assets a ON a.taskId = ti.taskId " +
+                "JOIN task_asset_state tas ON tas.assetId = a.id " +
                 "WHERE ti.sourceId = '$sourceId' AND ti.groupPath = '$groupPath'"
         ).use { cursor ->
             assertTrue("no Task at $groupPath in $sourceId", cursor.moveToFirst())

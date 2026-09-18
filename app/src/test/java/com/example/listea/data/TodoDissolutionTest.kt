@@ -219,33 +219,48 @@ class TodoDissolutionTest {
         }
 
     @Test
-    fun `the snapshot carries the judgment that was there, including the absence of one`() = runTest {
+    fun `the snapshot carries each file's own record, including the absence of one`() = runTest {
         val todo = importFiles("a.jpg", "b.jpg")
         val taskId = dao.getCatalogTasks(todo).first { it.groupPath == "photos/a.jpg" }.taskId
-        // Written straight to the row rather than through `submitReview`: the judgment is the
-        // fixture here and the dissolution is the subject, and going through the review path would
-        // also record an event, which is a different test's business.
+        val assetId = rawText("SELECT id FROM assets WHERE taskId = '$taskId'")
+        // Written straight to the pair's row rather than through `setAssetAction`: the record is the
+        // fixture here and the dissolution is the subject. A `★` and an action id together, because
+        // the payload spells them as one file's line and only a record holding both says so.
         rawExec(
-            "UPDATE task_state SET isCompleted = 1, isFavorite = 1, customActions = 'urgent' " +
-                "WHERE taskId = '$taskId'"
+            "UPDATE task_asset_state SET isFavorite = 1, customActions = 'urgent' " +
+                "WHERE assetId = '$assetId'"
         )
+        rawExec("UPDATE task_state SET isCompleted = 1 WHERE taskId = '$taskId'")
 
         dao.deleteTodo(todo, keepState = true, now = 5000)
 
-        // Judged.
-        assertEquals(1, rawInt("SELECT isCompleted FROM dissolved_task_state WHERE groupPath='photos/a.jpg'"))
-        assertEquals(1, rawInt("SELECT isFavorite FROM dissolved_task_state WHERE groupPath='photos/a.jpg'"))
+        // Judged, and the record is the file's: its path, its `★`, its action ids, on one line. The
+        // literal is the format contract read from the write side — [DissolvedRecordsTest] pins the
+        // rest of it — so a snapshot that dropped the file, or wrote the Task's answer once for the
+        // whole Todo, fails here.
         assertEquals(
-            "urgent",
-            rawText("SELECT customActions FROM dissolved_task_state WHERE groupPath = 'photos/a.jpg'")
+            "photos/a.jpg\t1\turgent",
+            rawText("SELECT records FROM dissolved_task_state WHERE groupPath = 'photos/a.jpg'")
+        )
+        assertEquals(
+            DISSOLVED_RECORDS_VERSION,
+            rawInt("SELECT recordVersion FROM dissolved_task_state WHERE groupPath='photos/a.jpg'")
         )
         // Never judged, which is a fact worth recording rather than an absence to fill in: a
-        // recovery that invented `false` here would be indistinguishable from one that copied a
-        // real "no".
-        assertEquals(0, rawInt("SELECT isCompleted FROM dissolved_task_state WHERE groupPath='photos/b.jpg'"))
+        // recovery that invented `false` here would be indistinguishable from one that copied a real
+        // "no". The file is still a line — it existed, and this is what it had.
         assertEquals(
-            "",
-            rawText("SELECT customActions FROM dissolved_task_state WHERE groupPath = 'photos/b.jpg'")
+            "photos/b.jpg\t0\t",
+            rawText("SELECT records FROM dissolved_task_state WHERE groupPath = 'photos/b.jpg'")
+        )
+        // Completion is the Task's, so it stays a column and belongs to the Task that was checked.
+        assertEquals(
+            1,
+            rawInt("SELECT isCompleted FROM dissolved_task_state WHERE groupPath='photos/a.jpg'")
+        )
+        assertEquals(
+            0,
+            rawInt("SELECT isCompleted FROM dissolved_task_state WHERE groupPath='photos/b.jpg'")
         )
     }
 

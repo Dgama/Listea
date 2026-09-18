@@ -432,7 +432,8 @@ class MigrationV19ToV20Test {
         Room.databaseBuilder(context, ListeaDatabase::class.java, V19_DB)
             .addMigrations(
                 ListeaDatabase.MIGRATION_19_20,
-                ListeaDatabase.MIGRATION_20_21
+                ListeaDatabase.MIGRATION_20_21,
+                ListeaDatabase.MIGRATION_21_22
             )
             .build()
 
