@@ -17,16 +17,25 @@ Everything Listea does that touches storage.
 ## What Listea does not do
 
 Listea **never moves, renames or overwrites** anything in the folder you granted. Browsing a
-folder, creating a List, reviewing files, checking them, tagging them and sending a webhook are all
-read-only as far as your storage is concerned.
+folder, creating a List, reviewing files, checking them, tagging them and exporting a round are all
+read-only as far as the material you granted is concerned.
 
-Exactly three things write to storage, and every one of them is something you asked for explicitly:
+Four things write to storage:
 
 | | What it writes | Touches the original? |
 |---|---|---|
 | [Delete checked files](#delete-checked-files) | Deletes files under the chosen Upstream, permanently | Yes — deletes it |
 | [Save to Listea](#save-to-listea) | Copies a file into `DCIM/Listea` | No |
 | [Share](#share) | Copies a file into Listea's own cache | No |
+| A **txt export** | Writes one file per round into `Download/Listea/txt/` | No |
+
+The first three are each something you asked for explicitly, at the moment you asked for it. The
+fourth happens by itself when a round ends, but only for a Todo or a List already set to export by
+txt — and it writes **outside** the folder you granted, so it cannot disturb anything you are
+reviewing. Its destination is not the album: a `text/plain` file has to go through
+`MediaStore.Files`, which accepts a non-media row under `Download` or `Documents` and nowhere else,
+so `DCIM/Listea/txt/` is not reachable at any API level. See
+[Exports](exports.md#the-two-methods) for what each method does and what is in the file.
 
 <p align="center">
   <img src="assets/screenshots/settings-file-management.jpg" width="300" alt="The File management section of Settings: the shared filter and sort switch, the Ask to delete after webhook switch with its explanatory text, and the Checked files row with a red Delete checked files button">
@@ -93,33 +102,41 @@ repoint every Task and List that resolves through that grant. Nothing is rebound
 
 **Settings → File management → Ask to delete after webhook.** Off by default.
 
-With it on, a webhook that has **actually been delivered** is followed by an offer: the files that
-delivery carried as checked are still on the device — should they stay there?
+With it on, an export that has **actually gone out** is followed by an offer: the files that export
+carried as checked are still on the device — should they stay there?
 
-**The offer follows the webhook, not the review**, and that is the whole of its semantics. Every
+**The offer follows the export, not the review**, and that is the whole of its semantics. Every
 other switch has already had its say by the time it appears: *Review unchecked items only* decided
-what the round walked, *Send checked items only* decided what the payload carried. What is offered
-is exactly the checked items in the payload that went out, and nothing else.
+what the round walked, *Export checked items only* decided what the payload carried. What is offered
+is exactly the checked items in the export that went out, and nothing else.
+
+**The label names the webhook and the offer does not.** *Ask to delete after webhook* is the
+switch's stored name and its wording on this screen, and it was not renamed when the mechanism
+became a choice. What the offer actually follows is a **successful export of any method**: a txt
+export that wrote its file offers exactly as a POST that was accepted does. The label is a recorded
+open item, named here rather than left to be discovered.
 
 That makes it **narrower** than *Delete checked files* above, which covers every checked file under
 the chosen Upstream however and whenever it was checked. The dialog says which of the two it is
 rather than leaving them to be confused, and lists every file by name, grouped by folder, exactly as
 the other one does.
 
-**A delivery that did not go out deletes nothing and offers nothing.** Instead it says so, and says
-where the round went: it is kept in [Webhook history](webhooks.md#webhook-history), to be resent
+**An export that did not go out deletes nothing and offers nothing.** Instead it says so, and says
+where the round went: it is kept in [the export history](exports.md#the-record), to be sent again
 from there, or the files can be cleared from File management by hand. Deleting the files a round
-described before anybody has received it would destroy the only copy of what the round was about.
+described before anybody has received it would destroy the only copy of what the round was about. A
+round that [split across two methods](exports.md#how-a-round-resolves) and had one of them fail is
+the same case: it reports rather than offers, because one group of it never arrived.
 
 Declining is free either way — the files stay, the items keep their decisions, and nothing about
 the round changes.
 
-**It fires for any delivery Listea decided to make on your behalf**: a review being left, a Quick
-Review queue running out, a List going complete. **Not** for the *Test webhook* button, and **not**
-for a resend from the history — neither is a round you just finished, and offering to delete files
-off the back of a button labelled *Test* would be indefensible.
+**It fires for any export Listea decided to make on your behalf**: a review being left, a Quick
+Review queue running out, a List going complete. **Not** for the *Send a test payload* button, and
+**not** for a resend from the history — neither is a round you just finished, and offering to delete
+files off the back of a button labelled *Test* would be indefensible.
 
-It is also silent when the payload came from a List with no folder behind it, which has no files to
+It is also silent when the export came from a List with no folder behind it, which has no files to
 delete, and when nothing in it was both checked and still on the device.
 
 Deleting from the offer is the same permanent operation as above, with the same
@@ -134,7 +151,7 @@ at into a `DCIM/Listea` album, which your phone's gallery app shows as an album 
 - Offered on **all four viewing surfaces** — full Review, Quick Review, the plain file viewer and
   the list-item viewer.
 - **It is not a tag and not an action.** It takes effect immediately, is not stored on the item, and
-  no webhook hears about it.
+  no export hears about it.
 - **Saving the same file twice says so** instead of making a second copy.
 - **Images and video only.** An album has nothing to do with anything else.
 - The original is not touched.
@@ -164,7 +181,7 @@ Listea declares two, and neither is asked for at launch.
 
 | Permission | What for |
 |---|---|
-| `INTERNET` | Webhook delivery, and nothing else. Not a runtime permission. |
+| `INTERNET` | The webhook method's delivery, and nothing else. Not a runtime permission — a txt export needs no network at all. |
 | `WRITE_EXTERNAL_STORAGE`, capped at API 28 | Asked for the first time you **Save to Listea** on Android 9 or below. On Android 10 and up an app writes its own media through MediaStore with no permission at all, so newer devices are never asked. |
 
 **Folder access is not a runtime permission.** You grant it by picking a folder in the system
@@ -192,5 +209,5 @@ Two consequences:
 
 ---
 
-Next: [Settings](settings.md) for where these switches live, or [Webhooks](webhooks.md) for what
-the delete offer follows.
+Next: [Settings](settings.md) for where these switches live, or [Exports](exports.md) for what the
+delete offer follows.

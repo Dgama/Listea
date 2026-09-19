@@ -34,7 +34,7 @@ Listea removes that. It turns a body of review work into a sequential feed:
 
 Your place, what you have finished, and what you decided are all remembered, so a queue can be put
 down and picked up. When a queue is done, Listea can hand the decisions to whatever acts on them
-next, over a webhook.
+next — over a webhook, or by writing them to a file.
 
 The idea generalises past files — see the [Roadmap](#roadmap) — but **today Listea reviews images
 and videos on your device, and that is all it reviews.**
@@ -42,7 +42,7 @@ and videos on your device, and that is all it reviews.**
 ## How it works
 
 ```
-Upstream  →  Create Tasks  →  Todo  →  Quick Review  or  List  →  Review items  →  (optional) webhook
+Upstream  →  Create Tasks  →  Todo  →  Quick Review  or  List  →  Review items  →  (optional) export
 ```
 
 1. Add a folder on your device, through Android's own folder picker, in Settings. That folder is
@@ -52,7 +52,7 @@ Upstream  →  Create Tasks  →  Todo  →  Quick Review  or  List  →  Review
    is a **Todo**.
 3. Work through a Todo one item at a time — as a Quick Review, or as a List that persists.
 4. Mark each item done, and optionally tag it with an action that says what should happen to it.
-5. Send the result somewhere, if you have somewhere to send it.
+5. Export the result somewhere, if you have somewhere for it to go — a POST, or a file.
 
 Nothing is moved or renamed. [Three explicit actions](docs/file-management.md) write to storage,
 and you confirm every one of them.
@@ -68,7 +68,7 @@ covers them.
 ### Lists
 
 For work that outlives one sitting. A List keeps its own progress and can be reopened and wired to
-a webhook. There are two kinds:
+an export method. There are two kinds:
 
 - **Built from a folder**, the way v0.2.x made them: the List covers that folder and everything
   beneath it, and can be re-synced against it when the folder changes.
@@ -84,21 +84,29 @@ Either way the decisions are the same decisions: checking a Task in Quick Review
 from a List are one act, because state belongs to the Task rather than to the queue you reached it
 from. See [Core concepts](docs/core-concepts.md).
 
-## Custom actions
+## Actions and templates
 
 Review is not a yes/no machine. Checking something off says *"I have dealt with this"* — it does
 not say what dealing with it meant.
 
-So the Review bar carries your own action chips alongside the completion checkbox. You define what
-each one is called and what it sends. Listea does not decide what they mean: it captures the
-decision quickly, and [webhooks](docs/webhooks.md) carry it to whatever acts on it.
+So the Review bar carries action chips alongside the completion checkbox, and **a template** decides
+which ones a file gets. A template has a name, a **scope** saying which files it governs, and a list
+of **buttons**; each button has a name you read and a value that goes on the wire. Listea does not
+decide what they mean: it captures the decision quickly, and [exports](docs/exports.md) carry it to
+whatever acts on it.
 
-<p align="center">
-  <img src="docs/assets/screenshots/settings-custom-actions.jpg" width="300" alt="Settings showing configurable custom actions, each with a display name and a webhook value">
-</p>
+Templates live at **Settings → Templates**, and a Todo attaches exactly one of them — chosen in the
+**Create Tasks** dialog, which will not create a run with none attached. Editing a template — its
+scope or its buttons — appends a version rather than rewriting it, so a Task you finished under the
+old buttons goes on meaning what it meant. Renaming it does not: a name is a label, and a label that
+changes is the same template. See [the Templates page](docs/templates.md).
 
-Two chips are configured out of the box; add, rename, retag or remove them freely. A favourite (★)
-is built in.
+<!-- screenshot: settings-templates — the Templates list on the Settings screen, and one template's
+page showing its scope line and its button list -->
+
+Two chips and a favourite (★) come configured on the built-in template; add, rename, retag or remove
+them freely. ★ is a button rather than a fixture — a template that does not carry it gives you no
+star on the files it governs.
 
 ## Example workflow
 
@@ -112,12 +120,13 @@ at yet.
    go back. Pinch to look closer; video plays in place.
 3. As you go, tap ★ or one of your own chips on anything that needs more than "done" — the ones
    worth keeping, the ones to deal with later, whatever your chips mean to you.
-4. When the queue runs out, Listea offers to POST the round to a webhook. The body says which
-   files you processed and which chips you gave each one.
+4. When the queue runs out, Listea offers to export the round: a POST to your webhook, or a text
+   file under `Download/Listea/txt/`. Either body says which files you processed and which chips you
+   gave each one.
 5. Something on the other end does the actual work — a script, an automation tool, anything that
-   accepts an HTTP POST. Listea never touches your files to make it happen.
+   accepts an HTTP POST or reads a file. Listea never touches your files to make it happen.
 
-If you have nowhere to send it, skip steps 4 and 5. Listea is a perfectly good "get through this
+If you have nowhere for it to go, skip steps 4 and 5. Listea is a perfectly good "get through this
 folder" tool on its own.
 
 ## Current capabilities
@@ -137,12 +146,14 @@ Everything in this table works today.
 | **Quick Review** | Any folder holding Tasks, instantly, without creating anything. |
 | **Lists** | Persistent queues, either over a folder and its subfolders — with progress, source-change detection and manual re-sync — or over Tasks you picked out of a Todo, which have no folder behind them. |
 | **Checked state** | Belongs to the Task, not to the queue. Shared by every List and Quick Review that reaches the same Task. |
-| **Custom actions** | User-defined chips with their own display names and wire values, plus a built-in favourite. |
+| **Templates** | Named, scoped, versioned definitions of the action chips a Todo offers: a scope saying which files it governs, and buttons each with a name and a wire value. Editing one appends a version, so completed work goes on meaning what it meant. |
+| **Custom actions** | The buttons a template carries, with their own display names and wire values, plus a favourite (★) on the built-in one. |
 | **Filter and sort** | By media type, checked status and freshness; sort by name, time, size, type or unchecked-first. Applies to browsing *and* to the review queue. Shared globally or kept per folder. |
 | **Review rounds** | Optionally queue only unchecked items, so each pass through a folder is its own round. |
 | **Resume** | Full Review remembers where it got to. |
-| **Webhooks** | Per-List and app-default endpoints, four events, a fixed JSON payload, stable public item ids, a test button, and a confirmation before anything leaves the device. |
-| **Webhook history** | Every payload Listea builds is kept with its outcome, and can be inspected, resent or deleted. |
+| **Exports** | Two methods — **Webhook** and **Txt** — one chosen per Todo, overridable per List. A List that has not chosen follows its Todos, so a round can split and export more than once. |
+| **Webhooks** | One app-wide URL, four events, a fixed JSON payload, stable public item ids, a test button, and a confirmation before anything leaves the device. |
+| **Export history** | Every export Listea performs is kept with its method and its outcome, and can be inspected, resent (a webhook) or deleted. |
 | **File management** | Opt-in deletion of checked files, always behind a full named listing and an explicit confirmation. Save a viewed file to a gallery album, or share it out. |
 
 Details for each of these live in the [documentation](#documentation).
@@ -178,7 +189,9 @@ does. The full version is in [docs/roadmap.md](docs/roadmap.md).
 | [Getting started](docs/getting-started.md) | Build it, add an Upstream in Settings, run your first review |
 | [Core concepts](docs/core-concepts.md) | Upstreams, Todos, Lists, items, rounds, and where state lives |
 | [Review and actions](docs/review-and-actions.md) | Every gesture, control and behaviour in Review |
-| [Webhooks](docs/webhooks.md) | Events, payload format, history, resending |
+| [Templates](docs/templates.md) | Names, scopes, buttons, versions, and attaching one |
+| [Exports](docs/exports.md) | The two methods, where the choice lives, and how a round resolves |
+| [Webhooks](docs/webhooks.md) | Events, payload format, the txt body, history, resending |
 | [File management](docs/file-management.md) | Everything that touches your files |
 | [Settings](docs/settings.md) | Every switch, and what it changes |
 | [Development](docs/development.md) | Environment, build, tests, project layout |
@@ -192,7 +205,8 @@ Listea is under active development and is not stable.
   place is expected to keep your data — but the schema is not settled, and no version of it is
   promised to survive.
 - Settings, defaults and interface details move around.
-- The webhook payload has changed shape before and may again; see [Webhooks](docs/webhooks.md) for
+- The wire vocabulary and the webhook payload have changed before and may again — v0.5.6 renamed
+  the test event from `list.webhook.test` to `export.test`. See [Webhooks](docs/webhooks.md) for
   what is currently on the wire.
 
 Listea reads the folder you grant it and changes nothing there on its own. Even so, it is not yet a

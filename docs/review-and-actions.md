@@ -6,7 +6,7 @@ The Review screen: every gesture, control and behaviour, and the actions that go
 - [Gestures](#gestures)
 - [The frame: what belongs to the item](#the-frame-what-belongs-to-the-item)
 - [The file's controls](#the-files-controls)
-- [Custom actions](#custom-actions)
+- [Buttons](#buttons)
 - [The Info sheet](#the-info-sheet)
 - [Zoom](#zoom)
 - [Video](#video)
@@ -78,14 +78,16 @@ whatsapp                    xxxx.mp4              << ‹ 3(3/3)/3 › >>
 | **Right** | The queue position, bracketed by its arrows. |
 
 The item's name carries a second line when the item has tags: one badge per action set on it — ★,
-and each custom action by its display name. It is the same row a List's item shows under its title,
-drawn by the same code from the same configured actions, so an item reads the same inside a round as
-it does on the page it was queued from. It carries no tap of its own: the chips over the media are
+and each tag by its display name. It is the same row a List's item shows under its title, drawn by
+the same code from the same template's buttons, so an item reads the same inside a round as it does
+on the page it was queued from. It carries no tap of its own: the chips over the media are
 where a tag is set, and this is the line it is read back on.
 
 It sits on the frame rather than with those chips because it says something about the *item* and not
-about the file. A tag belongs to the whole item, whichever of its files is showing, and a tap on the
-media — which puts the file's own controls away — must not take the item's answer with it.
+about the file. The chips set the record of the file on screen; this line reports the item's whole
+answer, which is the fold of every file it presents — so a tag set on its video is legible while its
+photograph is on screen, and a tap on the media, which puts the file's own controls away, must not
+take that answer with it.
 
 The position reads `3(3/3)/3` on an item with several files: you are on item 3 of 3, showing file 3
 of its 3. On an item holding one file — still the overwhelming majority — there is no file level to
@@ -117,12 +119,14 @@ The bottom band holds the completion checkbox, centred and alone.
 
 Laid over the bottom of the media, in order:
 
-- **★ Favourite** — the built-in action.
-- **Your custom actions** — however many you have configured, in the order you configured them.
+- **★ Favourite** — the built-in button, drawn when the template governing this file carries it.
+- **Your buttons** — whatever that template version offers, in that version's own order.
 - **Info** — opens the [Info sheet](#the-info-sheet).
 
-A video adds its own transport above them: play/pause, elapsed time, a progress bar and mute. That
-transport is lifted clear of the chips rather than stacked on top of them, so both stay usable.
+A file no attached template admits gets **no chips at all** rather than a default bar — see
+[Templates](core-concepts.md#templates) for why. A video adds its own transport above them:
+play/pause, elapsed time, a progress bar and mute. That transport is lifted clear of the chips
+rather than stacked on top of them, so both stay usable.
 
 Tapping the media puts this whole layer away and brings it back. The navigator and the checkbox do
 not go with it — they are the item's, and a round cannot be finished by a tap that hid the control
@@ -131,38 +135,53 @@ that finishes it.
 Checking and tagging are independent. Tapping ★ does not check an item; checking an item does not
 tag it. Nothing on this layer implies anything about the checkbox.
 
-## Custom actions
+## Buttons
 
-Custom actions are the answer to "review is not a yes/no decision". Checking something off says you
-dealt with it. An action says **what dealing with it meant** — and what should happen to it next.
+The action chips are the answer to "review is not a yes/no decision". Checking something off says
+you dealt with it. A chip says **what dealing with it meant** — and what should happen to it next.
+
+Every chip is a **button** on a template version.
 
 <p align="center">
-  <img src="assets/screenshots/settings-custom-actions.jpg" width="300" alt="The Settings screen showing two custom actions, each with a display name field and a webhook value field, and an Add custom action button">
+  <img src="assets/screenshots/settings-custom-actions.jpg" width="300" alt="The Settings page as it drew custom actions before v0.5.4: a Review card holding the Quick Review switch and three custom actions, each with a display name field and a webhook value field, and an Add custom action button">
 </p>
 
-Each one has two fields, configured in **Settings → Review**:
+They are **buttons on a template version**, and that page is where they are edited now: **Settings →
+Templates → <template>**, in its *Buttons* section. Each button has three fields:
 
 | Field | What it is |
 |---|---|
 | **Display name** | What you see on the chip. Keep it short — the bar is narrow. |
-| **Webhook value** | The string the payload sends for this action. |
+| **Webhook value** | The string an export sends for this button. A txt export carries it exactly as the payload does. |
+| **Records** | *On / off* or *Tag*. An on/off button means itself, like ★; a tag's meaning is decided by whatever reads the export. |
 
-Listea attaches no meaning to either. Whether a chip means *archive*, *upload*, *delete later* or
-*ask me again tomorrow* is decided entirely by whatever receives the
-[webhook](webhooks.md#the-payload).
+The two types store identically — a tag is a boolean whose meaning is downstream — so the field
+describes what a button *means* rather than what it holds.
 
-There can be none, or many. Two are configured out of the box.
+Nothing here decides what a chip means. Whether one means *archive*, *upload*, *delete later* or
+*ask me again tomorrow* is decided entirely by whatever receives the [export](exports.md).
+
+There can be none, or many: a button can be added, renamed, retyped and removed, and a template with
+no buttons draws an empty bar. The built-in template arrives with ★ and two tags.
+
+**A Todo inherits the buttons of the template version it is attached to.** Which of them a given
+file offers is resolved per file — the first attached template whose scope admits the file's kind is
+the one whose buttons it gets — so one Todo can govern two kinds of file through two templates. See
+[Actions](core-concepts.md#actions) for the bar this draws and what a file nothing admits looks
+like.
 
 Three properties worth knowing, all of which follow from an item storing the action's **id** and
 nothing else:
 
-- **Renaming is free.** Changing a display name or a webhook value changes future payloads and
-  touches no stored item. Wire values are resolved at delivery time, not at the moment you tapped
-  the chip.
-- **Removing an action takes it off the bar only.** Items already marked with it keep the mark —
+- **Renaming is free.** Changing a display name or a record value changes future exports and touches
+  no stored item. Record values are resolved at delivery time, not at the moment you tapped the
+  chip.
+- **Removing a button takes it off the bar only.** Items already marked with it keep the mark —
   invisible and unsent, but not rewritten. Listea does not quietly revise decisions you made.
-- **Order is one decision.** The bar, the Info sheet and the payload all use the same order:
-  favourite first, then your actions as configured.
+- **Order is the template's.** The bar, the Info sheet and the payload all read the buttons in the
+  order the version lists them, and that order changes only by editing the template. ★ first is a
+  convention of the built-in rather than a rule of the model: a template may put it anywhere, or
+  drop it.
 
 ## The Info sheet
 
@@ -188,7 +207,7 @@ At the bottom, two controls that act on the **file** rather than on the item:
 - **Save to Listea** — copies what you are looking at into a `DCIM/Listea` album.
 - **Share** — hands the file to another app through Android's own chooser.
 
-Neither is a tag, an action or a check. Neither is stored on the item, and no webhook hears about
+Neither is a tag, an action or a check. Neither is stored on the item, and no export hears about
 either. Full details, including the permission and caching behaviour, are in
 [File management](file-management.md#save-to-listea).
 
@@ -350,7 +369,7 @@ through several folders and turning it back off returns each to what it had. Up 
 arrangements are remembered; past that the least recently set is dropped.
 
 Filtering and sorting change **what is shown and what a review walks**, and nothing else. Progress,
-completion and webhooks always count the whole folder or the whole List — see
+completion and exports always count the whole folder or the whole List — see
 [Rounds and queues](core-concepts.md#rounds-and-queues).
 
 ## Rounds
@@ -359,7 +378,7 @@ With **Review unchecked items only** on, opening either review queues only the i
 unchecked at that moment, and keeps that queue for the round: an item you check stays in front of
 you and stays swipeable backwards. Leaving and re-entering starts the next round.
 
-Pair it with **Send checked items only** and each round's webhook carries exactly the decisions you
+Pair it with **Export checked items only** and each round's export carries exactly the decisions you
 just made, however many rounds it takes to get through a folder.
 
 When a queue comes out empty, the screen says which of the three reasons emptied it — the List has
@@ -387,12 +406,20 @@ finished the List, and the page it returns to will still say so.
 
 From there you can review again — which starts a new round — or leave.
 
-If webhooks are configured, this is where a delivery happens. The round is reported the moment the
-queue is done rather than when you leave the completion screen, so a report that has already left
-the device cannot be lost to the app being killed while that screen sits there. What is sent, and
-what you are asked first, is in [Webhooks](webhooks.md).
+If anything is configured to export, this is where it happens. The round is reported the moment the
+queue is done rather than when you leave the completion screen, so an export that has already left
+the device cannot be lost to the app being killed while that screen sits there.
+
+Finishing can produce more than one export. A round whose List leaves each Todo to answer for its
+own Tasks is split — one payload per source Todo, each by that Todo's own method — so one swipe can
+post a webhook and write a text file. Only the webhook asks first: a txt export writes and then
+reports, because asking every round would train you to tap through the one dialog that matters. The
+notice names what happened — *Webhook sent*, *Txt written*, *Txt not written*, *Nothing exported* —
+and every payload the round builds is kept in the history, sent or not. See
+[Exports](exports.md#how-a-round-resolves) for how a round resolves and [Webhooks](webhooks.md) for
+the webhook body and its failures.
 
 ---
 
-Next: [Webhooks](webhooks.md) for what happens to the decisions, or [Settings](settings.md) for the
+Next: [Exports](exports.md) for what happens to the decisions, or [Settings](settings.md) for the
 switches mentioned above.

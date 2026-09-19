@@ -11,7 +11,7 @@ Getting Listea onto a device, pointed at a folder, and through its first review.
 - [Start a Quick Review](#start-a-quick-review)
 - [Create a List](#create-a-list)
 - [Reviewing](#reviewing)
-- [Optional: wire up a webhook](#optional-wire-up-a-webhook)
+- [Optional: wire up an export](#optional-wire-up-an-export)
 - [Keeping a List in sync](#keeping-a-list-in-sync)
 
 ## Install a build
@@ -94,9 +94,10 @@ parts of its tree, and a folder you never import produces none.
 > and then goes ahead.
 
 <!-- screenshot: create-tasks-dialog — the Create tasks? dialog open on a folder, showing the Name
-     field, both grouping rows, the keep-folder-tree box and the three content-policy rows -->
+     field, both grouping rows, the keep-folder-tree box, the three content-policy rows, the export
+     chooser and the template attach step -->
 
-The dialog asks four things, in this order:
+The dialog asks six things, in this order:
 
 | Field | What it decides |
 |---|---|
@@ -104,6 +105,8 @@ The dialog asks four things, in this order:
 | **Importer** | Whether each **file** becomes a Task, or each **folder** does |
 | **Keep folder tree** | Whether the Todo shows the folder structure, or one flat list of Tasks |
 | **When a Task's content changes** | What later happens to a Task whose files changed or disappeared outside Listea — see [What a changed Task means](core-concepts.md#what-a-changed-task-means) |
+| **When a round over this Todo finishes** | Where this Todo's decisions go when a round ends: **Don't export**, **Webhook** or **Txt**. A new Todo starts at *Don't export* |
+| **Templates** | Which templates govern the files this run creates. **At least one is required** — see below |
 
 **One Task per folder** forces the tree off: a folder-as-Task run builds Tasks from the folders
 themselves and they are flat by construction, so the control is hidden rather than offered and then
@@ -114,10 +117,19 @@ is the only one whose third option removes anything. It defaults to **Keep it**,
 nothing, and Settings holds the same chooser as the default a new Todo starts with — see
 [Settings → Todos](settings.md#todos).
 
+The export question is the other one about *later*: where this Todo's decisions go when a round over
+it finishes. It defaults to **Don't export**, so a Todo nobody has configured sends nothing
+anywhere — see [Optional: wire up an export](#optional-wire-up-an-export).
+
+**The template step is the one gate in the dialog.** **Create** stays disabled until at least one
+template is attached, because a run with none produces a Todo whose every file draws an empty chip
+row and whose Tasks can carry no mark at all. Attaching a template decides which action chips the
+run's files will offer — see [Templates](templates.md).
+
 <!-- screenshot: history-recovery — the "Decisions left behind" block in the Create tasks? dialog,
      with a Start fresh row and one kept history under it -->
 
-**A fifth question appears only sometimes.** If a Todo was deleted at this folder and chose to keep
+**One more question appears only sometimes.** If a Todo was deleted at this folder and chose to keep
 its decisions, the dialog offers them under **Decisions left behind**, with a **Start fresh** row
 beside them. Loading one is optional and is a copy, not a resurrection — see
 [Deleting a Todo](core-concepts.md#deleting-a-todo).
@@ -205,7 +217,8 @@ its own, no second copy of anything. What a Task is checked and tagged as, it is
 as in every List that shows it, because both Lists are showing the same Task.
 
 A List appears on the **Lists** tab, with its progress, and can be opened, reviewed, re-synced and
-wired to a webhook from its detail page. There is still no way to type an item into a List by hand:
+given its own export method from its detail page. There is still no way to type an item into a List
+by hand:
 a List holds Tasks, and every Task comes from an import run. Lists you made from a folder in an
 earlier version are still there, with their items.
 
@@ -246,18 +259,35 @@ does not check it. Checking and tagging are separate decisions and neither impli
 
 The full behaviour of every control is in [Review and actions](review-and-actions.md).
 
-## Optional: wire up a webhook
+## Optional: wire up an export
 
 If you have something that should act on your decisions — a script, an automation tool, anything
-that accepts an HTTP POST — Listea can send it the results of a round.
+that accepts an HTTP POST — Listea can send it the results of a round. Or, if you only want a record
+of what you did, it can write the same round to a text file. Either way the act is an **export**, and
+these are the two **methods** a round can leave by:
 
-1. Open the List's detail page and expand **Webhook**.
-2. Switch it on and paste a URL.
-3. Tap **Test webhook** to check the receiver before relying on it.
+| Method | What it does | Asks first |
+|---|---|---|
+| **Webhook** | POSTs a JSON body describing the round to a URL you configure | Yes |
+| **Txt** | Writes one tab-separated text file per round under `Download/Listea/txt/` | No |
 
-The real delivery fires when the List transitions from incomplete to complete, and asks you first.
-There are three other events you can switch on, an app-wide default endpoint used by Quick Review,
-and a history of every payload Listea has ever built. All of it is in [Webhooks](webhooks.md).
+**Nothing exports by default, and a new Todo exports nothing.** Three steps turn it on:
+
+1. **Point the webhook somewhere.** **Settings → Exports → Webhook** holds *Default enabled* and
+   *Default URL*; paste a URL and tap **Send a test payload** to check the receiver before relying on
+   it. The Txt method has nothing to configure.
+2. **Pick a method for a Todo.** The Create Tasks dialog asks *When a round over this Todo finishes*,
+   offering **Don't export**, **Webhook** or **Txt**. A new Todo starts at *Don't export*.
+3. **Leave a List on *Same as the Todos*, or override it.** A List's detail page carries an **Export**
+   card whose **Method** row offers *Same as the Todos*, *Export nothing*, *Webhook* or *Txt*, plus a
+   switch for exporting when the List completes.
+
+A round then exports when you leave a review, when a Quick Review queue runs out, or when a List goes
+complete. The webhook method asks before it posts; the txt method writes and then reports. Three
+switches in **Settings → Exports** decide when and what anything exports: **Export from Quick
+Review**, **Export when leaving a review** and **Export checked items only**. Every export of every
+method is kept in one history — **Settings → Exports → History** — so a round is never lost and can
+be sent again later. All of it is in [Exports](exports.md).
 
 ## Keeping a List in sync
 

@@ -25,11 +25,13 @@ Concretely, and as a baseline for everything below:
   inferred from the extension.
 - Review **is a media screen**. One renderer, one swipe gesture, one action bar, one zoom
   implementation, one video transport.
-- State **is checked plus actions**, keyed by the Task's own id.
+- State **is checked plus actions** — the tick keyed by the Task's own id, the chips by the
+  Task–Asset pair they were given on.
 - A queue **comes from a Todo** — the Tasks one Create Tasks run produced — or from a List built
   out of Tasks picked from one.
-- The output **is a webhook**, describing a List and its items. A Quick Review round posts the same
-  shape with no List behind it, standing the folder in as the subject.
+- The output **is an export**, describing a List and its items. Since v0.5.6 that is one of two
+  methods — a webhook or a file — and a Quick Review round uses the same shape with no List behind
+  it, standing the folder in as the subject.
 
 That is a coherent product and it works. The limitation is not quality; it is that every one of
 those five sentences still ends at *file*, *media* or *folder*. A Task has an identity of its own
@@ -64,9 +66,17 @@ image/video experience becoming one media-oriented template among others. A temp
   the user-configured set.
 
 What would stay shared is the part that is genuinely general: the queue, the round semantics,
-position and resume, progress, and the path out to a webhook.
+position and resume, progress, and the path out to an export.
 
-**Status: not implemented. There is no template abstraction in the code today.**
+**Status: not implemented *for the Review page*, which is what this section asks for.**
+[v0.5.4](iterations/v0.5.4.md) built a template abstraction for a different band — the **asset
+control**, the chip row a Task's files offer — so the sentence "there is no template abstraction in
+the code today" stopped being true of the whole app: a template is now a stored row with an id, a
+name, a version, a scope and buttons, and an edit appends a version. None of that reaches the three
+things listed above. **Presentation**, **Controls** and **Actions** are still code-defined, and
+`lists.taskReviewTemplateId` still points at the single `builtin.media.rapid-review@1`. What §1 asks
+for is a template that decides how the *page* behaves, and this release deliberately does not touch
+it.
 
 ### 2. Cross-platform-ready structure
 
@@ -106,7 +116,7 @@ something broader — content that does not have to be bytes on disk, and an ori
 to be a folder.
 
 This is the deepest of the three. It reaches the database schema, the identity scheme, the queue
-builders and the webhook payload, and it is the one that makes the other two worth doing.
+builders and the export payload, and it is the one that makes the other two worth doing.
 
 **Status: the identity half is done; the content half is untouched.**
 

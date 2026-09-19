@@ -14,6 +14,7 @@ The vocabulary Listea uses, and the one rule that explains most of its behaviour
 - [Rounds and queues](#rounds-and-queues)
 - [Checked state](#checked-state)
 - [Actions](#actions)
+- [Templates](#templates)
 - [Where state lives](#where-state-lives)
 - [Item identity](#item-identity)
 
@@ -96,8 +97,8 @@ means. The answer is a **content policy**, chosen per Todo, and there are three:
 **Keep it** is the default and the answer that changes nothing: material that has gone is flagged
 missing, and the Task, its ticks and every List holding it are untouched.
 
-**Start it over** keeps the Task's identity — so its history, its List memberships and every id a
-webhook would carry are unchanged — and clears its *decisions*. A Task whose content moved is not
+**Start it over** keeps the Task's identity — so its history, its List memberships and every id an
+export would carry are unchanged — and clears its *decisions*. A Task whose content moved is not
 the same thing to judge, so carrying the old tick forward is the mistake this tier exists to avoid.
 
 **Replace the Task** is the only tier that reaches lifetime, and it is the only one that removes
@@ -136,7 +137,7 @@ ways of honouring it is available.
 
 Deleting a Todo is **a dissolution**: deleting an intention is abandoning what it meant, so the
 Tasks go with it, and so do their decisions. Lists that held those Tasks keep their titles, their
-order and their webhooks, and lose the memberships — a List is an order over Tasks, and an order
+order and how they export, and lose the memberships — a List is an order over Tasks, and an order
 nothing satisfies is empty rather than gone. Each List that lost rows says so, and when.
 
 What does not go is the file's own identity. A file deleted and re-imported is the same file to the
@@ -205,7 +206,7 @@ that can.
 
 A List made this way has **no folder behind it**. It holds the Tasks you chose and nothing else, so
 there is no disk for it to drift from and no **Source** card on its detail page — its items, its
-progress and its webhook are the whole of it.
+progress and its export choice are the whole of it.
 
 **Lists made from a folder** — the ones v0.2.x built by scanning a folder — still work exactly as
 they did, and they are the only ones with a Source card. That card reports whether the folder has
@@ -240,8 +241,10 @@ Every folder in the browser shows its relationship to a List:
 | **List** | This exact folder owns a List. |
 | **Sublist** | An ancestor folder's List already covers this folder's files. |
 
-A **Sublist** folder shows the progress of *its own subtree*, not the owning List's overall total —
-but the webhook shown alongside it belongs to the owning List, because that is whose webhook it is.
+A **Sublist** folder shows the progress of *its own subtree*, not the owning List's overall total,
+and it shows no export state at all: the export belongs to the ancestor List, and repeating it on
+every folder underneath would suggest each one could deliver something of its own. One folder, one
+export, shown where it is configured.
 
 This type is **about Lists only**. It says nothing about whether a folder's material has been turned
 into Tasks, and a Todo exists whatever its Upstream's relationship to a List.
@@ -266,12 +269,14 @@ It appears once the folder you are looking at has Tasks in it, and it reviews th
 A Todo holds nothing but Tasks, so unlike a browsed folder there is no listing to reconcile against
 the catalog: what is reviewed is exactly what the run put there.
 
-**A Todo round has no List behind it**, which has two visible consequences. On the wire, the round
-posts through the app-default webhook rather than a List's own, with `list.id` set to `0` and the
-folder's name standing in as the title — see [Webhooks](webhooks.md#the-payload). And its Tasks have
-no registration row of their own, so an item arrives with no public id until the payload builder
-mints one on the first delivery. Decisions are saved either way, and are visible everywhere else,
-because of [where state lives](#where-state-lives).
+**A Todo round has no List behind it**, which has two visible consequences. It always takes the
+*Same as the Todos* path, because there is no List card to have chosen otherwise: each item leaves
+by its own Todo's method, and an item with no source Todo goes by webhook — see
+[Exports](exports.md#how-a-round-resolves). What a receiver sees is still one shape, with `list.id`
+set to `0` and the folder's name standing in as the title. And its Tasks have no registration row of
+their own, so an item arrives with no public id until the payload builder mints one on the first
+delivery. Decisions are saved either way, and are visible everywhere else, because of
+[where state lives](#where-state-lives).
 
 Quick Review can be switched off in Settings. Off takes the action out of a Todo and stops the
 Upstreams browser drawing what has already been decided. Switching it off is presentation only:
@@ -304,7 +309,7 @@ the database and drew nothing back.
 Two consequences worth knowing:
 
 - An item added to the List mid-round joins the *next* round, not this one.
-- Narrowing changes what is *reviewed* and nothing else. Progress, completion and webhook
+- Narrowing changes what is *reviewed* and nothing else. Progress, completion and export
   behaviour always count the whole List or the whole folder. A hundred-item List filtered down to
   fifty and reviewed to the end reads *fifty of a hundred*, never *fifty of fifty*.
 
@@ -323,31 +328,86 @@ item row.
 
 An **action** is a tag you put on an item to say what should happen to it downstream.
 
-- **★ Favourite** is built in.
-- **Custom actions** are yours: any number of them, each with a **display name** (what you see on
-  the chip) and a **webhook value** (what the payload sends). Two are configured out of the box.
+Actions are **buttons on a template version** — see [Templates](#templates) — and each has a name,
+a type and a **record value** (what an export sends for it; the editor still labels that field
+*Webhook value*, and a txt export carries it exactly as the payload does).
+
+- **★ Favourite** is the button with the fixed id `favorite`. It is a button like any other —
+  selected, stored and sent exactly as a minted one is — and only conventionally first. Whether a
+  star is drawn at all is the template's business: the built-in carries it, and a template that
+  does not leaves rows with no star.
+- **A tag** is a button somebody configured. The built-in template arrives with two of them, `C1`
+  and `C2`.
+- **A file no attached template admits gets no chips at all.** An empty bar rather than a default
+  one, and deliberately: a bar nobody chose is worse than a bar that is empty, because the empty
+  one is legible.
+
+The type is what the button *means* rather than what it holds — an on/off button like ★ records
+that it was pressed, and a tag records that it is on and leaves the meaning to whatever reads the
+export. Both store identically, which is honest: a tag is a boolean whose meaning is decided
+downstream.
 
 Actions and checked state are independent. Tapping a chip does not check an item; checking an item
 does not tag it. Neither implies the other, on screen or on the wire.
 
-An item stores the *id* of each action it carries, never the display name or wire value. That is
-what makes renaming an action free: future payloads change, no stored item is touched, and nothing
-already marked is reinterpreted. Removing an action takes it off the bar and leaves the items that
-carry it alone — invisible and unsent, but not rewritten.
+An item stores the *id* of each action it carries, never the name or the record value. That is what
+makes renaming a button free: future exports change, no stored item is touched, and nothing already
+marked is reinterpreted. Removing a button takes it off the bar and leaves the items that carry it
+alone — invisible and unsent, but not rewritten.
+
+## Templates
+
+A **template** is what decides which buttons a file offers. It is a thing with a name, a version and
+a scope, and each of those answers a different question.
+
+A template is a **lineage** — an id and the name a person gave it — plus its **versions**. A version
+is immutable: what it governs and what buttons it offers, written down once and never revised.
+Editing a template appends version *n + 1* beside the version it changes, so a Task judged under
+version 1 goes on meaning version 1 after the template has moved on, and a completed review stays
+interpretable by the definition it was made under. Renaming is the one edit that appends nothing,
+because a name is not part of identity.
+
+A **scope** says which files a version governs, and it is a conjunction of rules: every rule has to
+admit a file, so adding a rule narrows rather than widens. The only rule shipping is the file's kind
+— image or video, read off the name without opening the file — and an **empty scope admits
+nothing**, so a template saved before its scope was filled in governs no file rather than every
+file. A rule this build cannot read admits nothing too, for the same reason: a rule silently
+skipped would make the template match *more* than it was written for.
+
+**A Todo is attached to one version of each template it names**, and the attachment is a reference —
+a template id and a version number — never a copy. That is why editing a template cannot leave the
+Todos that chose it holding an old label: there is nothing to hold. A Task records the attachment
+its own run was made under, so the two can disagree after an edit, and that disagreement is the
+point: the Todo is what the next run will get, the Task is what this one did.
+
+What follows from that — the buttons a version carries, the four rules that decide which of several
+attached templates governs a file, where a template is edited, and what the built-in one starts with
+— is [Templates](templates.md).
 
 ## Where state lives
 
-**A decision belongs to the Task, not to the file.** Checked, ★ and whichever custom actions a Task
-carries are stored against the Task's own id in `task_state`, a table keyed by `taskId` and
-cascading from `tasks`. A List stores **membership**: which Tasks it covers, in what order. It
-*projects* the shared state rather than owning a copy, and the same is true of a catalog, a folder
-listing and a review queue.
+**A decision belongs to the Task, not to the file — and a mark belongs to one of its files.**
+Checked is stored against the Task's own id in `task_state`, a table keyed by `taskId` and cascading
+from `tasks`. ★ and every configured action are stored in `task_asset_state.selections`, keyed by the
+**Asset**: one row per Task–Asset pair, holding the set of button ids that pair carries. A surface
+that speaks about the whole Task — a List's row, a catalog card, one entry in an export — reads the
+union of its pairs, which is what lets a button set on a video be nameable while a photograph is on
+screen.
 
-That one rule is what makes all of these true at once:
+The two levels are not a complication for its own sake. A Task holding three files is one thing to
+judge and three things to mark, and a mark made on the second of them has to be read back on the
+second of them — while completion is one answer whichever file is in front of you. So the pair is
+the judgment target for a mark and the Task is the judgment target for a tick, and neither is
+derived from the other.
+
+A List stores **membership**: which Tasks it covers, in what order. It *projects* the shared state
+rather than owning a copy, and the same is true of a catalog, a folder listing and a review queue.
+
+Between them, those two rules are what make all of these true at once:
 
 - Quick Review needs no List, because it has somewhere to put a decision either way.
-- Checking a Task in a Quick Review completes the List that covers it, and fires that List's
-  webhook, without Quick Review knowing the List exists.
+- Checking a Task in a Quick Review completes the List that covers it, and runs that List's export,
+  without Quick Review knowing the List exists.
 - The same Task reachable from two Lists shows the same tick in both. Nothing is copied, so nothing
   can diverge.
 - The same *file* behind two Todos is two Tasks with two independent decisions — the case
@@ -362,12 +422,18 @@ That one rule is what makes all of these true at once:
   "start fresh" would have to be its own explicit action — *Start it over* is exactly that action,
   made explicit and scoped to one Todo.
 
-**Two exceptions, both deliberate.** A **manual item** has no file behind it and no Task, so its
-decision belongs to the item alone and goes when the item does. And a **folder listing** — the
-Upstreams browser — has no Tasks in it at all, so the tick it draws comes from somewhere else: a
-separate `file_review_state` row, written only by the folder-Quick-Review path, keyed by the grant
-and the path rather than by any Task. That is why the browser can show a file as checked when no
-List has ever heard of it.
+**Two things are worth saying separately, and neither is an exception to the rule.** A **manual
+item** has no file behind it, so it has no Asset — and the pair table is keyed by one, which is why
+a manual item carries no marks and draws no chip band. It is checked like any other Task, because
+completion lives on the Task. The Tasks that were manual entries are named in `legacy_manual_tasks`
+so that a cleanup can delete them outright when their List's lifecycle removes them, which is the
+one thing no other Task may be. And a **folder listing** — the Upstreams browser — is the surface
+where the rule is easiest to misread. `file_review_state` still holds one row per file reviewed from
+a folder, keyed by the grant and the path, but it is **registration only**: its decision columns are
+dead, and the tick the browser draws is projected from `task_state` through the assets join, so a
+file reads as checked exactly when a Task over it says so. That is why the browser can show a file
+as checked when no List has ever heard of it — and why a file no Task covers is registered and drawn
+with an empty tick rather than not drawn at all.
 
 A file's identity to the rest of the app is **the Upstream it is under plus its path beneath it** —
 which is what a folder listing, a scan and a re-import all match on. It is not what a decision hangs
@@ -377,7 +443,7 @@ the Task's tick, because the Task is the judgment target and it did not change.
 ## Item identity
 
 Every item carries a 24-character **public id**, assigned when the row is created and never changed
-afterwards. It is what goes onto the webhook, and it is safe to use as a primary key on the
+afterwards. It is what goes onto the wire, and it is safe to use as a primary key on the
 receiving side.
 
 ```
@@ -404,4 +470,5 @@ file are recognisable by their matching middle field, or by `relativePath` + `ti
 ---
 
 Next: [Review and actions](review-and-actions.md) for what happens inside a queue, or
-[Webhooks](webhooks.md) for what leaves the device.
+[Exports](exports.md) for how the decisions leave the device — and [Webhooks](webhooks.md) for the
+webhook method's own body and failures.
