@@ -62,17 +62,24 @@ class MigrationV19ToV20Test {
         // here, and the only permitted difference is one column on each of two tables. An ALTER
         // that landed on the wrong table, a table rebuilt along the way, or a column quietly added
         // to a table this step does not own shows up as a count that is not what the delta predicts.
+        //
+        // Two deltas, and they are different claims. [TABLES_THAT_GAINED_A_COLUMN] is this step's
+        // own work; [ColumnsFromLaterSteps] is everything the walk does after it, which the fixture
+        // cannot avoid running because Room opens at the version the app ships. Keeping them apart
+        // is what lets the second grow without the first silently meaning something else.
         V19_COLUMNS.forEach { (table, before) ->
-            assertEquals(
-                "columns of $table",
-                before + if (table in TABLES_THAT_GAINED_A_COLUMN) 1 else 0,
-                database.columns(table).size
-            )
+            val step = if (table in TABLES_THAT_GAINED_A_COLUMN) 1 else 0
+            val later = if (table in ColumnsFromLaterSteps) 1 else 0
+            assertEquals("columns of $table", before + step + later, database.columns(table).size)
         }
         // And the two that did change, by name and position — the count alone would not say *which*
-        // column arrived, and `ALTER TABLE ADD COLUMN` appending it is what says the table was not
-        // rebuilt around it.
-        assertEquals("assetControls", database.columns("sources").last())
+        // column arrived, and `ALTER TABLE ADD COLUMN` putting it at the end of what was already
+        // there is what says the table was not rebuilt around it.
+        //
+        // For `sources` that position is read as *immediately after the columns v19 found*, rather
+        // than as `.last()`: a release after this one appends its own column and the last one stops
+        // being this step's. The index is what this step claimed, and it is what stays true.
+        assertEquals("assetControls", database.columns("sources")[V19_COLUMNS.getValue("sources")])
         assertEquals("assetControls", database.columns("task_imports").last())
         database.close()
     }
@@ -434,7 +441,9 @@ class MigrationV19ToV20Test {
                 ListeaDatabase.MIGRATION_19_20,
                 ListeaDatabase.MIGRATION_20_21,
                 ListeaDatabase.MIGRATION_21_22,
-                ListeaDatabase.MIGRATION_22_23
+                ListeaDatabase.MIGRATION_22_23,
+                ListeaDatabase.MIGRATION_23_24,
+                ListeaDatabase.MIGRATION_24_25
             )
             .build()
 

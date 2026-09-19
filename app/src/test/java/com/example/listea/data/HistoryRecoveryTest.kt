@@ -6,6 +6,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.listea.FolderSnapshot
 import com.example.listea.ImporterKind
 import com.example.listea.plan
+import com.example.listea.domain.Templates
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -36,9 +37,12 @@ import org.robolectric.annotation.Config
  *
  * **What a judgment is, at both ends.** The fixture writes a completion to the Task and the marks to
  * the *file's* own pair row, and reads them back the same way — which is the seam the app has used
- * since v0.5.1, and since v0.5.2 the seam the history carries too. So the `favorite` and `actions`
- * triples below are marks a user would see on the file, not columns nobody reads; [HistoryRecordsTest]
- * is where the per-file half of that is put under pressure.
+ * since v0.5.1, and since v0.5.2 the seam the history carries too. Since v0.5.4 those marks live in
+ * `task_asset_state.selections`, which is one set of button ids rather than a boolean beside a list,
+ * because `★` became a button like any other. The fixture keeps the `favorite` and `actions` triple
+ * as its *vocabulary* — a mark either is the star or is one of the named ids — and does the folding
+ * at both ends so the tests below still read as "checked, starred, urgent" rather than as an
+ * encoding. [HistoryRecordsTest] is where the per-file half of that is put under pressure.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -309,6 +313,11 @@ class HistoryRecoveryTest {
      *
      * `groupPath` names the file as well as the Task, which is true of every Task this fixture makes
      * — file-as-Task puts one file at each group path.
+     *
+     * `favorite` and `actions` are folded into the one `selections` column by [marks] on the way in,
+     * so the call sites keep saying "checked, starred, urgent" — the three things a user did — while
+     * the row they write is the one set the app reads. Writing them to the retired `isFavorite` and
+     * `customActions` columns would be a fixture that agrees with itself and with nothing else.
      */
     private fun judge(
         sourceId: String,
@@ -323,24 +332,39 @@ class HistoryRecoveryTest {
                 "AND groupPath = '$groupPath')"
         )
         rawExec(
-            "UPDATE task_asset_state SET isFavorite = ${if (favorite) 1 else 0}, " +
-                "customActions = '$actions' WHERE assetId = " +
+            "UPDATE task_asset_state SET selections = '${encodeActionIds(marks(favorite, actions))}' " +
+                "WHERE assetId = " +
                 "(SELECT a.id FROM assets a JOIN task_imports ti ON ti.taskId = a.taskId " +
                 "WHERE ti.sourceId = '$sourceId' AND ti.groupPath = '$groupPath')"
         )
     }
 
+    /**
+     * The star and the named ids as the one set the pair's row holds.
+     *
+     * The star is folded in rather than written to a column of its own, because there is no such
+     * column any more — see the class note. Sorted on the way in by [encodeActionIds], so the
+     * round trip below is the encoding's and not a fixture that happens to agree with itself.
+     */
+    private fun marks(favorite: Boolean, actions: String): Set<String> =
+        decodeActionIds(actions) + if (favorite) setOf(Templates.FAVOURITE_BUTTON_ID) else emptySet()
+
     /** The same two rows, read back as one answer: the Task's completion and the file's marks. */
     private fun stateOf(sourceId: String, groupPath: String): Judgment =
         database.openHelper.writableDatabase.query(
-            "SELECT ts.isCompleted, tas.isFavorite, tas.customActions FROM task_imports ti " +
+            "SELECT ts.isCompleted, tas.selections FROM task_imports ti " +
                 "JOIN task_state ts ON ts.taskId = ti.taskId " +
                 "JOIN assets a ON a.taskId = ti.taskId " +
                 "JOIN task_asset_state tas ON tas.assetId = a.id " +
                 "WHERE ti.sourceId = '$sourceId' AND ti.groupPath = '$groupPath'"
         ).use { cursor ->
             assertTrue("no Task at $groupPath in $sourceId", cursor.moveToFirst())
-            Judgment(cursor.getInt(0) != 0, cursor.getInt(1) != 0, cursor.getString(2))
+            val selections = decodeActionIds(cursor.getString(1))
+            Judgment(
+                completed = cursor.getInt(0) != 0,
+                favorite = Templates.FAVOURITE_BUTTON_ID in selections,
+                actions = (selections - Templates.FAVOURITE_BUTTON_ID).sorted().joinToString(",")
+            )
         }
 
     /**

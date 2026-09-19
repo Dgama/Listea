@@ -58,11 +58,20 @@ class MigrationV20ToV21Test {
         // This step adds a *table* and alters nothing. A rebuild of `task_state` that quietly
         // dropped the two columns it stopped reading would show up here as a count that went down,
         // which is exactly the shape of change this release is not allowed to make.
+        //
+        // The counts are v20's, and the walk does not stop there: Room opens at the version the app
+        // ships, so every step after this one runs too and [ColumnsFromLaterSteps] is what they add.
+        // The permitted difference is a named column on a named table rather than a bare `+ 1`, so
+        // an `ALTER` landing somewhere it has no business still shows up as a count that is wrong.
         V20_COLUMNS.forEach { (table, columns) ->
-            assertEquals("columns of $table", columns, database.columns(table).size)
+            val later = if (table in ColumnsFromLaterSteps) 1 else 0
+            assertEquals("columns of $table", columns + later, database.columns(table).size)
         }
+        // `selections` is on the end because a later step appends it, and appended is where SQLite
+        // puts a column an `ALTER` adds whatever order the entity declares it in. The four this
+        // step wrote are still here, in this order, which is what the assertion is about.
         assertEquals(
-            listOf("assetId", "isFavorite", "customActions", "updatedAt"),
+            listOf("assetId", "isFavorite", "customActions", "updatedAt", "selections"),
             database.columns("task_asset_state")
         )
         database.close()
@@ -89,15 +98,30 @@ class MigrationV20ToV21Test {
         writeFixture()
         val database = migrate()
 
-        // Non-default in the fixture on purpose, so a step that rebuilt either table from the
-        // entity would be caught rather than hidden behind a matching default.
-        assertEquals(
-            "image\tbuiltin.media.asset-control\t1\t★",
+        // The `sources` half is untouched, on both of the rows this fixture gives it: neither ever
+        // named a control, and no step between here and the current version has anything to say
+        // about an empty one. Non-default elsewhere in the row on purpose, for the reason the
+        // column counts above are read as a delta — a step that rebuilt the table from the entity
+        // would put these back to a default rather than to what the fixture wrote.
+        assertEquals("", database.text("SELECT assetControls FROM sources WHERE id = 'todo-1'"))
+        assertEquals("", database.text("SELECT assetControls FROM sources WHERE id = 'todo-2'"))
+
+        // The `task_imports` half is *not* untouched, and the literal the fixture wrote is exactly
+        // what must not be here: a later step translates this column, from the old per-kind text
+        // into a template reference, which is v0.5.4's subject and is pinned in
+        // [MigrationV23ToV24Test]. So what this test keeps is the part no later step has any
+        // business with — the column arrived on the row that named a control and on the row that
+        // did not, and the first still carries a value of its own rather than one invented for it.
+        // Read as "carried through", not as "equal to what went in": only the first is still true.
+        assertEquals(2, database.count("SELECT COUNT(*) FROM task_imports"))
+        assertTrue(
+            "task-a named a control and no step here may blank it",
             database.text("SELECT assetControls FROM task_imports WHERE taskId = 'task-a'")
+                .isNotEmpty()
         )
         assertEquals(
             "",
-            database.text("SELECT assetControls FROM sources WHERE id = 'todo-2'")
+            database.text("SELECT assetControls FROM task_imports WHERE taskId = 'task-b'")
         )
         database.close()
     }
@@ -247,9 +271,13 @@ class MigrationV20ToV21Test {
         // Named in full rather than counted: a migration that created a second table, or that
         // replaced one of these with a rebuilt copy under a different name, is a change to the
         // schema nobody agreed to, and the list is short enough to just say.
+        //
+        // The walk runs past this step, so a later release's tables are there as well and are
+        // subtracted rather than named — see [TablesFromLaterSteps]. The claim is unchanged: nothing
+        // but `task_asset_state` appeared *because of this step*, and nothing at all was rebuilt.
         assertEquals(
             (V20_TABLES + "task_asset_state").sorted(),
-            database.tables()
+            database.tables() - TablesFromLaterSteps
         )
         database.close()
     }
@@ -503,7 +531,9 @@ class MigrationV20ToV21Test {
             .addMigrations(
                 ListeaDatabase.MIGRATION_20_21,
                 ListeaDatabase.MIGRATION_21_22,
-                ListeaDatabase.MIGRATION_22_23
+                ListeaDatabase.MIGRATION_22_23,
+                ListeaDatabase.MIGRATION_23_24,
+                ListeaDatabase.MIGRATION_24_25
             )
             .build()
 

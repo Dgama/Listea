@@ -104,10 +104,10 @@ class SharedTaskTest {
 
         // Addressed by the pair, which is the whole point of the test: the file is one file, and
         // the two records about it are the two Tasks' own.
-        dao.setAssetAction(first, assetOf(first), ItemAction.Custom("custom1"), enabled = true, now = 3000)
+        dao.setAssetAction(first, assetOf(first), ItemAction("custom1"), enabled = true, now = 3000)
 
-        assertEquals("custom1", rawText("SELECT customActions FROM task_asset_state WHERE assetId = '${assetOf(first)}'"))
-        assertEquals("", rawText("SELECT customActions FROM task_asset_state WHERE assetId = '${assetOf(second)}'"))
+        assertEquals("custom1", rawText("SELECT selections FROM task_asset_state WHERE assetId = '${assetOf(first)}'"))
+        assertEquals("", rawText("SELECT selections FROM task_asset_state WHERE assetId = '${assetOf(second)}'"))
     }
 
     // --- the reads that had to stop emitting a row per Asset ---------------------------------------
@@ -250,7 +250,7 @@ class SharedTaskTest {
         val first = importFile(chilli, "a.jpg", now = 1000)
         val second = importFile(tomato, "a.jpg", now = 2000)
         dao.setTaskCompleted(first, completed = true, now = 3000)
-        dao.setAssetAction(second, assetOf(second), ItemAction.Custom("custom1"), enabled = true, now = 3000)
+        dao.setAssetAction(second, assetOf(second), ItemAction("custom1"), enabled = true, now = 3000)
 
         val states = dao.getSharedFileStates(ROOT, "a.jpg")
 
@@ -259,7 +259,7 @@ class SharedTaskTest {
         // Read per Task, so the disagreement is legible as one — which is the whole reason the
         // browser shows the mark rather than picking a winner for the tick beside it.
         assertEquals(listOf(true, false), states.map { it.isCompleted })
-        assertEquals(listOf("", "custom1"), states.map { it.customActions })
+        assertEquals(listOf("", "custom1"), states.map { it.selections })
         // Both Todos made a Task of this file rather than of a folder above it, which is what the
         // drill-in's sentence now has to be able to say.
         assertEquals(listOf(true, true), states.map { it.isOwnTask })
@@ -304,7 +304,7 @@ class SharedTaskTest {
         val first = importFile(chilli, "egg.jpg", now = 1000)
         val second = importFile(tomato, "tomato.jpg", now = 2000)
 
-        val listId = dao.createListFromTasks("Shopping", listOf(first, second), false, "", now = 3000)
+        val listId = dao.createListFromTasks("Shopping", listOf(first, second), false,now = 3000)
         dao.setTaskCompleted(first, completed = true, now = 4000)
 
         // The shopping list the cook reads: both markets' Tasks, one of them already bought. The
@@ -320,7 +320,7 @@ class SharedTaskTest {
         val tomato = todo("Tomato and egg", now = 2000)
         val first = importFile(chilli, "egg.jpg", now = 1000)
         val second = importFile(tomato, "tomato.jpg", now = 2000)
-        val listId = dao.createListFromTasks("Shopping", listOf(first), false, "", now = 3000)
+        val listId = dao.createListFromTasks("Shopping", listOf(first), false,now = 3000)
 
         val added = dao.addTasksToList(listId, listOf(second), now = 4000)
 
@@ -332,7 +332,7 @@ class SharedTaskTest {
     fun `adding a Task the List already holds adds nothing and says so`() = runTest {
         val chilli = todo("Chilli fried egg", now = 1000)
         val first = importFile(chilli, "egg.jpg", now = 1000)
-        val listId = dao.createListFromTasks("Shopping", listOf(first), false, "", now = 3000)
+        val listId = dao.createListFromTasks("Shopping", listOf(first), false,now = 3000)
 
         val added = dao.addTasksToList(listId, listOf(first), now = 4000)
 
@@ -346,8 +346,8 @@ class SharedTaskTest {
     fun `the same Task in two Lists is one decision, seen from both`() = runTest {
         val chilli = todo("Chilli fried egg", now = 1000)
         val first = importFile(chilli, "egg.jpg", now = 1000)
-        val shopping = dao.createListFromTasks("Shopping", listOf(first), false, "", now = 3000)
-        val dinner = dao.createListFromTasks("Dinner", listOf(first), false, "", now = 3100)
+        val shopping = dao.createListFromTasks("Shopping", listOf(first), false,now = 3000)
+        val dinner = dao.createListFromTasks("Dinner", listOf(first), false,now = 3100)
 
         dao.setTaskCompleted(first, completed = true, now = 4000)
 
@@ -361,7 +361,7 @@ class SharedTaskTest {
     fun `adding a Task the catalog cannot reach writes nothing at all`() = runTest {
         val chilli = todo("Chilli fried egg", now = 1000)
         val first = importFile(chilli, "egg.jpg", now = 1000)
-        val listId = dao.createListFromTasks("Shopping", listOf(first), false, "", now = 3000)
+        val listId = dao.createListFromTasks("Shopping", listOf(first), false,now = 3000)
 
         val added = runCatching { dao.addTasksToList(listId, listOf("no-such-task"), now = 4000) }
 

@@ -103,7 +103,10 @@ class ReviewSubmissionTest {
         dao.submitReview(
             taskId = taskId,
             // What the review surface was showing when the person committed.
-            response = media(completed = true, favorite = true, actions = setOf("custom1")),
+            response = media(
+                completed = true,
+                selections = setOf("custom1", Templates.FAVOURITE_BUTTON_ID)
+            ),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InFolder(ROOT, ""),
             now = 2000
@@ -111,9 +114,10 @@ class ReviewSubmissionTest {
 
         // The snapshot is the point of keeping history at all: a template's marks ride along with
         // the next judgment about the Task, so a record that held only "completed" could not say
-        // what somebody was actually looking at when they said so.
+        // what somebody was actually looking at when they said so. One set of ids, sorted, so `★`
+        // and the configured tag are spelled the same way the item row spells them.
         assertEquals(
-            "completed=true;favorite=true;actions=custom1",
+            "completed=true;selections=custom1,favorite",
             rawString("SELECT response FROM review_events")
         )
     }
@@ -140,7 +144,7 @@ class ReviewSubmissionTest {
         // Still recorded: somebody was shown the Task and committed an answer to it.
         assertEquals(1, rawInt("SELECT COUNT(*) FROM review_events"))
         assertEquals(
-            "completed=false;favorite=false;actions=",
+            "completed=false;selections=",
             rawString("SELECT response FROM review_events")
         )
     }
@@ -265,9 +269,11 @@ class ReviewSubmissionTest {
 
         val assetId = fileAsset("a.jpg")
         dao.setAssetAction(taskId, assetId, ItemAction.Favourite, enabled = true, now = 2000)
-        dao.setAssetAction(taskId, assetId, ItemAction.Custom("custom1"), enabled = true, now = 2100)
+        dao.setAssetAction(taskId, assetId, ItemAction("custom1"), enabled = true, now = 2100)
 
-        assertEquals(1, rawInt("SELECT isFavorite FROM task_asset_state"))
+        // Both marks on the one set, in `encodeActionIds`' spelling: `★` is a button like any other
+        // and is stored beside the tag rather than in a column of its own.
+        assertEquals("custom1,favorite", rawString("SELECT selections FROM task_asset_state"))
         // A mark is metadata a submission carries a snapshot of, never a submission in itself.
         assertEquals(0, rawInt("SELECT COUNT(*) FROM review_events"))
     }
@@ -282,7 +288,10 @@ class ReviewSubmissionTest {
         dao.setAssetAction(taskId, fileAsset("a.jpg"), ItemAction.Favourite, enabled = true, now = 1500)
         dao.submitReview(
             taskId = taskId,
-            response = media(completed = true, favorite = true),
+            response = media(
+                completed = true,
+                selections = setOf(Templates.FAVOURITE_BUTTON_ID)
+            ),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InFolder(ROOT, ""),
             now = 2000
@@ -290,7 +299,10 @@ class ReviewSubmissionTest {
 
         val second = dao.submitReview(
             taskId = taskId,
-            response = media(completed = true, favorite = true),
+            response = media(
+                completed = true,
+                selections = setOf(Templates.FAVOURITE_BUTTON_ID)
+            ),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InFolder(ROOT, ""),
             now = 3000
@@ -301,7 +313,7 @@ class ReviewSubmissionTest {
         // And the state did not move for the second one, which is the whole reason these are two
         // facts: a review count derived from completions could never have seen the second.
         assertEquals(1, rawInt("SELECT isCompleted FROM task_state"))
-        assertEquals(1, rawInt("SELECT isFavorite FROM task_asset_state"))
+        assertEquals("favorite", rawString("SELECT selections FROM task_asset_state"))
         // Re-reviewing a list that was already complete is not a second completion, so nothing
         // downstream is told to deliver again.
         assertEquals(emptyList<Long>(), second)
@@ -338,22 +350,22 @@ class ReviewSubmissionTest {
     // --- the snapshot contract ----------------------------------------------------------------------
 
     @Test
-    fun `a submission snapshots favourite and actions without mutating them`() = runTest {
-        // The submission's own contract: `completed` is written to state, while `favorite` and
-        // `customActions` ride along as a snapshot of what was true at the moment of judgment. A
-        // submission that wrote those back would turn a record of a judgment into a second way to
-        // make one — and a caller that passes a snapshot disagreeing with current state must get
-        // the disagreement on the record, not have it silently corrected.
+    fun `a submission snapshots the marks without mutating them`() = runTest {
+        // The submission's own contract: `completed` is written to state, while the selection set
+        // rides along as a snapshot of what was true at the moment of judgment. A submission that
+        // wrote it back would turn a record of a judgment into a second way to make one — and a
+        // caller that passes a snapshot disagreeing with current state must get the disagreement on
+        // the record, not have it silently corrected.
         val listId = folderList(folderPath = "", files = listOf("a.jpg"))
         registerFiles("a.jpg")
         val taskId = dao.getItems(listId).single().taskId
         val assetId = fileAsset("a.jpg")
         dao.setAssetAction(taskId, assetId, ItemAction.Favourite, enabled = true, now = 1500)
-        dao.setAssetAction(taskId, assetId, ItemAction.Custom("kept"), enabled = true, now = 1500)
+        dao.setAssetAction(taskId, assetId, ItemAction("kept"), enabled = true, now = 1500)
 
         dao.submitReview(
             taskId = taskId,
-            response = media(completed = true, favorite = false, actions = setOf("stale")),
+            response = media(completed = true, selections = setOf("stale")),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InFolder(ROOT, ""),
             now = 2000
@@ -361,22 +373,21 @@ class ReviewSubmissionTest {
 
         // The event holds exactly what was passed — the snapshot, not a recomputed state.
         assertEquals(
-            "completed=true;favorite=false;actions=stale",
+            "completed=true;selections=stale",
             rawString("SELECT response FROM review_events")
         )
-        // The write moved completion and nothing else: the marks on the pair are untouched.
+        // The write moved completion and nothing else: the marks on the pair are untouched, both
+        // the `★` and the tag the snapshot said nothing about.
         assertEquals(1, rawInt("SELECT isCompleted FROM task_state"))
-        assertEquals(1, rawInt("SELECT isFavorite FROM task_asset_state"))
-        assertEquals("kept", rawString("SELECT customActions FROM task_asset_state"))
+        assertEquals("favorite,kept", rawString("SELECT selections FROM task_asset_state"))
     }
 
     // --- helpers -----------------------------------------------------------------------------------
 
     private fun media(
         completed: Boolean,
-        favorite: Boolean = false,
-        actions: Set<String> = emptySet()
-    ) = ReviewResponse.MediaReview(completed = completed, favorite = favorite, customActions = actions)
+        selections: Set<String> = emptySet()
+    ) = ReviewResponse.MediaReview(completed = completed, selections = selections)
 
     private suspend fun folderList(
         folderPath: String,
@@ -390,8 +401,7 @@ class ReviewSubmissionTest {
             ScannedFile(name = it, relativePath = it, uri = "$ROOT/$folderPath/$it")
         },
         replacedListIds = emptyList(),
-        webhookEnabled = false,
-        webhookUrl = "",
+        exportOnCompletion = false,
         now = 1000
     )
 

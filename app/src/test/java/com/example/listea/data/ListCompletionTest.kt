@@ -72,7 +72,7 @@ class ListCompletionTest {
             dao.setTaskCompleted(taskId, completed = true, now = 3000L + index)
         }
 
-        val listId = dao.createListFromTasks("Trip", tasks, false, "", 4000)
+        val listId = dao.createListFromTasks("Trip", tasks, false, 4000)
 
         val summary = summaryOf(listId)
         assertEquals(3, summary.totalItems)
@@ -89,7 +89,7 @@ class ListCompletionTest {
         dao.setTaskCompleted(tasks[0], completed = true, now = 3000)
         dao.setTaskCompleted(tasks[1], completed = true, now = 3001)
 
-        val listId = dao.createListFromTasks("Trip", tasks, false, "", 4000)
+        val listId = dao.createListFromTasks("Trip", tasks, false, 4000)
 
         val summary = summaryOf(listId)
         assertEquals(2, summary.completedItems)
@@ -104,7 +104,7 @@ class ListCompletionTest {
             // completion is, and `addTasksToList` is the write that does it.
             val source = folder("photos", listOf("a.jpg", "b.jpg"))
             val tasks = taskIds(source)
-            val first = dao.createListFromTasks("Trip", listOf(tasks[0]), false, "", 4000)
+            val first = dao.createListFromTasks("Trip", listOf(tasks[0]), false, 4000)
             dao.setTaskCompleted(tasks[0], completed = true, now = 3000)
             // Built from one finished Task, so it is complete — and the second addition is about to
             // make it *not* complete, which is the same flag being asked the same question.
@@ -131,7 +131,6 @@ class ListCompletionTest {
             "Trip",
             taskIds(done) + taskIds(pending),
             false,
-            "",
             4000
         )
         for ((index, taskId) in taskIds(done).withIndex()) {
@@ -158,7 +157,7 @@ class ListCompletionTest {
             // `applyReconcile` and `removeMissingSourceItems` give, so a dissolution agreeing with
             // them is consistency rather than a new rule.
             val source = folder("photos", listOf("a.jpg"))
-            val listId = dao.createListFromTasks("Trip", taskIds(source), false, "", 4000)
+            val listId = dao.createListFromTasks("Trip", taskIds(source), false, 4000)
             dao.setTaskCompleted(taskIds(source).single(), completed = true, now = 3000)
             assertTrue(summaryOf(listId).isComplete)
 

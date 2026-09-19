@@ -2,8 +2,21 @@ package com.example.listea
 
 import com.example.listea.data.ListEntity
 import com.example.listea.data.ListItemEntity
+import com.example.listea.data.TemplateEntity
+import com.example.listea.data.TemplateVersionEntity
+import com.example.listea.data.decodeActionIds
+import com.example.listea.data.encodeActionIds
 import org.json.JSONArray
 import com.example.listea.domain.AssetKind
+import com.example.listea.domain.ButtonType
+import com.example.listea.domain.TEMPLATE_BUTTONS_VERSION
+import com.example.listea.domain.TemplateButton
+import com.example.listea.domain.TemplateId
+import com.example.listea.domain.TemplateScope
+import com.example.listea.domain.TemplateVersionRef
+import com.example.listea.domain.Templates
+import com.example.listea.domain.encodeTemplateButtons
+import com.example.listea.domain.encodeTemplateScope
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -35,7 +48,8 @@ class WebhookBodyTest {
             event = EVENT_LIST_COMPLETED,
             list = list(folder = "2026-07-11"),
             items = listOf(item(completed = true, favourite = true, actions = "custom1")),
-            settings = AppSettings()
+            assetControls = mapOf(TASK_ID to ATTACHMENT),
+            resolver = resolver()
         )
 
         assertEquals(
@@ -51,7 +65,7 @@ class WebhookBodyTest {
     fun `a solidus in a path is escaped on the wire`() {
         val list = list(folder = "2026-07-11/bilibili")
 
-        val payload = buildWebhookPayload(EVENT_LIST_COMPLETED, list, listOf(item()), AppSettings())
+        val payload = buildWebhookPayload(EVENT_LIST_COMPLETED, list, listOf(item()))
 
         // Android's org.json escapes "/" as "\/". It has always shipped that way, so receivers
         // already accept it, and "tidying" the escaping would be a wire change however legal.
@@ -67,8 +81,7 @@ class WebhookBodyTest {
                 buildWebhookPayload(
                     EVENT_LIST_COMPLETED,
                     list().copy(completedAt = completedAt),
-                    emptyList(),
-                    AppSettings()
+                    emptyList()
                 )
             ).getJSONObject("list")
         }
@@ -81,7 +94,7 @@ class WebhookBodyTest {
 
     @Test
     fun `an item goes out under its public id, and the row id is not on the wire at all`() {
-        val json = firstItem(buildWebhookPayload(EVENT_LIST_COMPLETED, list(), listOf(item()), AppSettings()))
+        val json = firstItem(buildWebhookPayload(EVENT_LIST_COMPLETED, list(), listOf(item())))
 
         assertEquals("PUBLIC-1", json.getString("id"))
         assertFalse(json.has("listId"))
@@ -102,7 +115,7 @@ class WebhookBodyTest {
         )
 
         val json = firstItem(
-            buildWebhookPayload(EVENT_QUICK_REVIEW_COMPLETED, list(), listOf(folderItem), AppSettings())
+            buildWebhookPayload(EVENT_QUICK_REVIEW_COMPLETED, list(), listOf(folderItem))
         )
 
         assertEquals("FILE-1", json.getString("id"))
@@ -119,7 +132,7 @@ class WebhookBodyTest {
             createdAt = 1000
         )
 
-        val json = firstItem(buildWebhookPayload(EVENT_LIST_COMPLETED, list(), listOf(manual), AppSettings()))
+        val json = firstItem(buildWebhookPayload(EVENT_LIST_COMPLETED, list(), listOf(manual)))
 
         // A fake path would be worse than none for a downstream tool, but the key still has to be
         // there so a receiver can distinguish "no file" from "this payload never says".
@@ -128,19 +141,16 @@ class WebhookBodyTest {
     }
 
     @Test
-    fun `actions come from settings as they stand at delivery time`() {
-        val renamed = AppSettings(
-            assetControlTags = mapOf(
-                AssetKind.IMAGE to listOf(DefaultCustomActions[0].copy(webhookValue = "keep"))
-            )
-        )
+    fun `actions resolve to the wire values the template carries at delivery time`() {
+        val renamed = resolver(custom1Value = "keep")
         // The row still holds the id it was marked with; only the wire value moved.
         val json = firstItem(
             buildWebhookPayload(
                 EVENT_LIST_COMPLETED,
                 list(),
                 listOf(item(actions = "custom1")),
-                renamed
+                assetControls = mapOf(TASK_ID to ATTACHMENT),
+                resolver = renamed
             )
         )
 
@@ -148,13 +158,16 @@ class WebhookBodyTest {
     }
 
     @Test
-    fun `actions are emitted in settings order, not the order they were tapped`() {
+    fun `actions are emitted in the template's button order, not the order they were tapped`() {
+        // The order is the version's own list — the order the chip row draws — and not the order
+        // the ids happen to sit in on the item, which a user decided by tapping.
         val json = firstItem(
             buildWebhookPayload(
                 EVENT_LIST_COMPLETED,
                 list(),
                 listOf(item(favourite = true, actions = "custom2,custom1")),
-                AppSettings()
+                assetControls = mapOf(TASK_ID to ATTACHMENT),
+                resolver = resolver()
             )
         )
 
@@ -163,7 +176,17 @@ class WebhookBodyTest {
 
     @Test
     fun `an item carrying nothing sends an empty action array`() {
-        val json = firstItem(buildWebhookPayload(EVENT_LIST_COMPLETED, list(), listOf(item()), AppSettings()))
+        // The Task's control offers three buttons and the item is marked with none of them, so the
+        // empty array is the answer about the item rather than about the control.
+        val json = firstItem(
+            buildWebhookPayload(
+                EVENT_LIST_COMPLETED,
+                list(),
+                listOf(item()),
+                assetControls = mapOf(TASK_ID to ATTACHMENT),
+                resolver = resolver()
+            )
+        )
 
         assertEquals(0, json.getJSONArray("actions").length())
     }
@@ -172,7 +195,13 @@ class WebhookBodyTest {
     fun `checking an item is not an action`() {
         // Completion and actions are independent on the wire; neither implies the other.
         val json = firstItem(
-            buildWebhookPayload(EVENT_LIST_COMPLETED, list(), listOf(item(completed = true)), AppSettings())
+            buildWebhookPayload(
+                EVENT_LIST_COMPLETED,
+                list(),
+                listOf(item(completed = true)),
+                assetControls = mapOf(TASK_ID to ATTACHMENT),
+                resolver = resolver()
+            )
         )
 
         assertEquals(true, json.getBoolean("isCompleted"))
@@ -186,7 +215,7 @@ class WebhookBodyTest {
             AppSettings(webhookCompletedItemsOnly = true)
         )
 
-        val body = JSONObject(buildWebhookPayload(EVENT_LIST_COMPLETED, list(), kept, AppSettings()))
+        val body = JSONObject(buildWebhookPayload(EVENT_LIST_COMPLETED, list(), kept))
 
         // A receiver being told "nothing was checked" is not the same as being told nothing.
         assertTrue(body.has("items"))
@@ -216,7 +245,7 @@ class WebhookBodyTest {
         id = 99,
         publicId = "PUBLIC-1",
         listId = 7,
-        taskId = "task-99",
+        taskId = TASK_ID,
         title = "a.jpg",
         isCompleted = completed,
         sortOrder = 0,
@@ -224,7 +253,54 @@ class WebhookBodyTest {
         sourceUri = "content://root/a.jpg",
         sourceRelativePath = "a.jpg",
         rootRelativePath = "a.jpg",
-        isFavorite = favourite,
-        customActions = actions
+        selections = encodeActionIds(
+            decodeActionIds(actions) +
+                if (favourite) setOf(Templates.FAVOURITE_BUTTON_ID) else emptySet()
+        )
     )
+
+    /**
+     * The template version the actions in these tests resolve against: `★` and the two
+     * out-of-the-box tags, with whatever wire value a test is about.
+     *
+     * A template rather than a settings page since v0.5.4. What a button is called and what it
+     * sends belong to the version an id came from, so a wire value is changed by resolving against
+     * a different version rather than by editing the app's settings.
+     */
+    private fun resolver(custom1Value: String = "cust1"): TemplateResolver = TemplateResolver.of(
+        listOf(TemplateEntity(id = LINEAGE, name = "Test control", createdAt = 0)),
+        listOf(
+            TemplateVersionEntity(
+                templateId = LINEAGE,
+                version = 1,
+                scope = encodeTemplateScope(TemplateScope.ofKinds(setOf(AssetKind.IMAGE))),
+                buttons = encodeTemplateButtons(
+                    listOf(
+                        TemplateButton(
+                            id = Templates.FAVOURITE_BUTTON_ID,
+                            name = "★",
+                            type = ButtonType.BOOLEAN,
+                            recordValue = Templates.FAVOURITE_BUTTON_ID
+                        ),
+                        TemplateButton("custom1", "C1", ButtonType.TAG, custom1Value),
+                        TemplateButton("custom2", "C2", ButtonType.TAG, "cust2")
+                    )
+                ),
+                buttonsVersion = TEMPLATE_BUTTONS_VERSION,
+                createdAt = 0
+            )
+        )
+    )
+
+    private companion object {
+        /** The Task every fixture item belongs to, so the payload's lookup can name it. */
+        const val TASK_ID = "task-99"
+
+        /** The one lineage these tests resolve against. */
+        const val LINEAGE = "test.control"
+
+        /** A Task attached to it at version 1, as `task_imports.assetControls` holds it. */
+        val ATTACHMENT =
+            encodeTemplateAttachments(listOf(TemplateVersionRef(TemplateId(LINEAGE), 1)))
+    }
 }

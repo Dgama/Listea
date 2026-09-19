@@ -3,6 +3,7 @@ package com.example.listea.data
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.example.listea.domain.Templates
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -247,7 +248,12 @@ class CurrentStateTest {
         // something the screen never showed.
         assertEquals(observed, oneShot)
         assertEquals(ReviewDecisions(isCompleted = true), observed.getValue("a.jpg"))
-        assertEquals(ReviewDecisions(isFavorite = true), observed.getValue("b.jpg"))
+        // `★` is a button like any other since v0.5.4, so a mark on it is the id `favorite` in the
+        // set rather than a field beside it.
+        assertEquals(
+            ReviewDecisions(selections = setOf(Templates.FAVOURITE_BUTTON_ID)),
+            observed.getValue("b.jpg")
+        )
     }
 
     // --- the state is read from one place, and the others are not consulted -----------------------
@@ -366,7 +372,7 @@ class CurrentStateTest {
         // recorded — the middle band is not drawn for it at all. Completion is the Task's own half
         // and is untouched by that: see `v0.5.1.md`, *A Task with no Asset loses the middle band*.
         val after = dao.getItems(listId).single().decisions
-        assertFalse(after.isFavorite)
+        assertEquals(emptySet<String>(), after.selections)
         assertTrue(after.isCompleted)
     }
 
@@ -384,8 +390,7 @@ class CurrentStateTest {
             ScannedFile(name = it, relativePath = it, uri = "$ROOT/$folderPath/$it")
         },
         replacedListIds = emptyList(),
-        webhookEnabled = false,
-        webhookUrl = "",
+        exportOnCompletion = false,
         now = 1000
     )
 

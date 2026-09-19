@@ -192,6 +192,21 @@ class MigrationChainTest {
             )
         )
 
+        // --- V24: the marks become a set, and the set agrees with the columns beside it -----------
+        //
+        // The step is additive, so the two columns it copied from are still here to be read: a file
+        // that carried `★` and `custom1` carries both as ids now, and the file that carried `★`
+        // alone carries exactly one. Read against the pairs V20 wrote, which is what makes this a
+        // check on the merge rather than a restatement of it.
+        assertEquals("custom1,favorite", selections(database, "2026-07-11/a.jpg"))
+        assertEquals("custom2", selections(database, "2026-07-11/b.jpg"))
+        assertEquals("custom1,favorite", selections(database, "c.jpg"))
+        assertEquals(1, int(database, "SELECT COUNT(*) FROM templates"))
+        assertEquals(
+            "builtin.media.asset-control",
+            text(database, "SELECT id FROM templates")
+        )
+
         database.close()
     }
 
@@ -235,6 +250,24 @@ class MigrationChainTest {
         // An empty failure log is the ordinary case, and V11 has to survive it: no rows to classify
         // and nothing to carry over, but the table it becomes still has to be the one V12 declares.
         assertEquals(0, int(database, "SELECT COUNT(*) FROM webhook_history"))
+
+        // V24 runs on this path too, and the seed it writes is the same one whatever came before it
+        // — a database that never had a `list_items` decision column still needs something to
+        // review under. What the pair at the end of this path holds is not asserted as a literal,
+        // because which of the two v9 rows V13 preferred for the marks is a question this walk is
+        // not about; the merge is checked instead, and checked on every row: the set must be the two
+        // columns beside it, with `★` folded in and the result sorted.
+        assertEquals(1, int(database, "SELECT COUNT(*) FROM template_versions"))
+        assertEquals(
+            0,
+            int(
+                database,
+                "SELECT COUNT(*) FROM task_asset_state WHERE selections <> CASE " +
+                    "WHEN isFavorite = 0 THEN customActions " +
+                    "WHEN customActions = '' THEN 'favorite' " +
+                    "ELSE customActions || ',favorite' END"
+            )
+        )
 
         database.close()
     }
@@ -393,6 +426,19 @@ class MigrationChainTest {
         "SELECT ts.$column FROM task_state ts JOIN assets a ON a.taskId = ts.taskId " +
             "WHERE a.relativePath = '$relativePath'"
 
+    /**
+     * One file's pair record, by the path the file is located at.
+     *
+     * Keyed on the Asset rather than the Task, because that is where the marks live now: a Task with
+     * two Assets has two answers and this asks about one of them.
+     */
+    private fun selections(database: ListeaDatabase, relativePath: String): String =
+        text(
+            database,
+            "SELECT s.selections FROM task_asset_state s JOIN assets a ON a.id = s.assetId " +
+                "WHERE a.relativePath = '$relativePath'"
+        )
+
     private fun text(database: ListeaDatabase, sql: String): String =
         database.openHelper.writableDatabase.query(sql).use { cursor ->
             assertTrue("no row for: $sql", cursor.moveToFirst())
@@ -437,7 +483,9 @@ class MigrationChainTest {
             ListeaDatabase.MIGRATION_19_20,
             ListeaDatabase.MIGRATION_20_21,
             ListeaDatabase.MIGRATION_21_22,
-            ListeaDatabase.MIGRATION_22_23
+            ListeaDatabase.MIGRATION_22_23,
+            ListeaDatabase.MIGRATION_23_24,
+            ListeaDatabase.MIGRATION_24_25
         )
 
         val CHAIN_FROM_9 = arrayOf(
@@ -454,7 +502,9 @@ class MigrationChainTest {
             ListeaDatabase.MIGRATION_19_20,
             ListeaDatabase.MIGRATION_20_21,
             ListeaDatabase.MIGRATION_21_22,
-            ListeaDatabase.MIGRATION_22_23
+            ListeaDatabase.MIGRATION_22_23,
+            ListeaDatabase.MIGRATION_23_24,
+            ListeaDatabase.MIGRATION_24_25
         )
     }
 }

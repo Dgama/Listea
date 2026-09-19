@@ -2,6 +2,7 @@ package com.example.listea.domain
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -227,5 +228,68 @@ class TemplateRegistryTest {
         assertEquals("builtin.media.rapid-review", Templates.MediaRapidReview.ref.templateId.value)
         assertEquals(1, Templates.MediaRapidReview.ref.version)
         assertEquals("builtin.media.viewer", Templates.MediaViewer.ref.templateId.value)
+    }
+
+    // --- the definition and the stored seed are held together here ----------------------------------
+
+    @Test
+    fun `the seeded version is the built-in definition's own reference and name`() {
+        // Two halves of one template, and the pair that must not drift: the reference is what a
+        // record written under this control names forever, and the name is what a person reads in
+        // Settings. A seed that minted its own id would make every mark made before this release
+        // name a button that no longer exists.
+        assertEquals(Templates.MediaAssetControl.ref, Templates.AssetControlSeed.ref)
+        assertEquals(Templates.MediaAssetControl.displayName, Templates.AssetControlSeed.name)
+    }
+
+    @Test
+    fun `the seed carries the favourite exactly when the definition offers it`() {
+        // An equivalence, asserted in both directions rather than as "the button is there". A
+        // definition that stopped offering `★` while the seed kept offering it is a template drawing
+        // a star nothing can record; the other way round is a control that silently lost the one
+        // action no user configured, and which nothing would report until somebody looked for it.
+        val definition = Templates.MediaAssetControl.definition as TemplateDefinition.AssetControl
+        val seeded = Templates.AssetControlSeed.buttons
+            .firstOrNull { it.id == Templates.FAVOURITE_BUTTON_ID }
+
+        assertEquals(definition.favourite, seeded != null)
+        assertNotNull("the seeded ★", seeded)
+        assertEquals(ButtonType.BOOLEAN, seeded!!.type)
+        assertEquals(Templates.FAVOURITE_BUTTON_ID, seeded.recordValue)
+    }
+
+    @Test
+    fun `the seed's scope is exactly the kinds the definition is compatible with`() {
+        // The scope is what the resolver will admit a file by, so the claim worth pinning is the one
+        // a file is actually matched against rather than the rule's text. `OTHER` is the telling
+        // case: it is in the enum, no definition claims it, and a scope built from a wrong field
+        // would admit it.
+        val definition = Templates.MediaAssetControl.definition as TemplateDefinition.AssetControl
+        val scope = Templates.AssetControlSeed.scope
+
+        assertEquals(TemplateScope.ofKinds(definition.compatibleKinds), scope)
+        assertTrue(scope.admits(AssetKind.IMAGE))
+        assertTrue(scope.admits(AssetKind.VIDEO))
+        assertTrue(!scope.admits(AssetKind.OTHER))
+    }
+
+    @Test
+    fun `the seeded tags are the two slots the app has always offered`() {
+        // The ids are the ones `newActionId` reserves and the ones every mark made before this
+        // release already names. Read through the seed rather than restated, because Settings now
+        // derives its default actions from here — a tag whose id moved would make every existing
+        // mark point at a button that is no longer offered.
+        assertEquals(
+            listOf("custom1", "custom2"),
+            Templates.DefaultTagButtons.map { it.id }
+        )
+        assertEquals(
+            listOf(ButtonType.TAG, ButtonType.TAG),
+            Templates.DefaultTagButtons.map { it.type }
+        )
+        assertEquals(
+            Templates.DefaultTagButtons,
+            Templates.AssetControlSeed.buttons.filter { it.id != Templates.FAVOURITE_BUTTON_ID }
+        )
     }
 }

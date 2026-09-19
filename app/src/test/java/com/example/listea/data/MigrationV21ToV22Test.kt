@@ -119,6 +119,12 @@ class MigrationV21ToV22Test {
         // them across — so the payload is empty and the version says which emptiness it is. A step
         // that wrote them into the payload would be v0.5.1's bug through the migration door, and one
         // that wrote a version this build does not know would make the history unreadable instead.
+        //
+        // `1` is written out here rather than read off the constant, because the two are no longer
+        // the same number and the step is what this test is about. **This step writes version 1 and
+        // v0.5.4's build writes 2**, which is the distinction a migration's frozen literal exists to
+        // keep — see the note in `MIGRATION_21_22`. Asserted against the constant as well, so that a
+        // later release bumping it fails here rather than silently changing what this step claims.
         assertEquals(
             listOf(1, 1),
             database.ints("SELECT recordVersion FROM dissolved_task_state ORDER BY id")
@@ -127,7 +133,13 @@ class MigrationV21ToV22Test {
             listOf("", ""),
             database.texts("SELECT records FROM dissolved_task_state ORDER BY id")
         )
-        assertEquals(DISSOLVED_RECORDS_VERSION, 1)
+        // And the reason the literal above has to be one: the encoding has moved on since, so this
+        // step's version and the build's are already two different numbers. True of any bump, which
+        // is why it is written as the comparison rather than as the second number.
+        assertTrue(
+            "the build writes a later version than this step",
+            DISSOLVED_RECORDS_VERSION > 1
+        )
         database.close()
     }
 
@@ -222,7 +234,10 @@ class MigrationV21ToV22Test {
         // Every other table, by name and by row count. A step that rebuilt one of them on its way
         // past would be a change to the schema nobody agreed to, and the counts are what would catch
         // a rebuild that lost the rows it was supposed to carry over.
-        assertEquals(V21_TABLES.sorted(), database.tables())
+        //
+        // The tables a later release adds are subtracted rather than named — see
+        // [TablesFromLaterSteps] — so this stays an assertion about this step as the chain grows.
+        assertEquals(V21_TABLES.sorted(), database.tables() - TablesFromLaterSteps)
         V21_ROWS.forEach { (table, rows) ->
             assertEquals("row count for $table", rows, database.count("SELECT COUNT(*) FROM $table"))
         }
@@ -485,10 +500,17 @@ class MigrationV21ToV22Test {
 
     private fun migrate(): ListeaDatabase =
         Room.databaseBuilder(context, ListeaDatabase::class.java, V21_DB)
-            // Opened at 23, so this step and the one after it run. The chain up to it is exercised
-            // by the parent fixtures; what is under test here is one step's effect on v21 data, and
-            // 22 → 23 changes no table so it cannot disturb what is asserted below.
-            .addMigrations(ListeaDatabase.MIGRATION_21_22, ListeaDatabase.MIGRATION_22_23)
+            // Opened at the current version, so this step and every one after it run. The chain up
+            // to it is exercised by the parent fixtures; what is under test here is one step's
+            // effect on v21 data, and the steps after it leave that data alone — 22 → 23 changes no
+            // table, and 23 → 24 only adds the template store and fills a new column from the two
+            // beside it — so neither can disturb what is asserted below.
+            .addMigrations(
+                ListeaDatabase.MIGRATION_21_22,
+                ListeaDatabase.MIGRATION_22_23,
+                ListeaDatabase.MIGRATION_23_24,
+                ListeaDatabase.MIGRATION_24_25
+            )
             .build()
 
     private fun ListeaDatabase.count(sql: String): Int =

@@ -4,6 +4,8 @@ import com.example.listea.data.FileClaim
 import com.example.listea.data.FolderListScope
 import com.example.listea.data.SharedFileState
 import com.example.listea.data.SourceItemRef
+import com.example.listea.domain.EXPORT_CHOICE_INHERIT
+import com.example.listea.domain.ExportKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -20,7 +22,8 @@ class FolderTypeTest {
         path: String,
         total: Int = 4,
         completed: Int = 2,
-        webhookEnabled: Boolean = true
+        exportOnCompletion: Boolean = true,
+        exportKind: String = EXPORT_CHOICE_INHERIT
     ) = FolderListScope(
         id = id,
         title = "list-$id",
@@ -28,7 +31,8 @@ class FolderTypeTest {
         completedAt = if (total > 0 && completed == total) 1L else null,
         totalItems = total,
         completedItems = completed,
-        webhookEnabled = webhookEnabled,
+        exportOnCompletion = exportOnCompletion,
+        exportKind = exportKind,
         lastDeliveryStatus = null,
         lastDeliveryCode = null
     )
@@ -84,13 +88,13 @@ class FolderTypeTest {
         val status = folderListStatus(own, "parent-folder")
         assertEquals(FolderType.NONE, folderTypeOf(status))
         assertNull(folderProgressLabel(status))
-        assertNull(statusWebhookLabel(status))
+        assertNull(statusExportLabel(status))
     }
 
     @Test
     fun `only a List may show webhook status`() {
         val own = ownership(
-            listOf(scope(1, "2026-07-11")),
+            listOf(scope(1, "2026-07-11", exportKind = ExportKind.WEBHOOK.key)),
             listOf(SourceItemRef(1, "bilibili/a.jpg", true))
         )
         val direct = folderListStatus(own, "2026-07-11")
@@ -99,8 +103,8 @@ class FolderTypeTest {
         assertEquals(FolderType.LIST, folderTypeOf(direct))
         assertEquals(FolderType.SUBLIST, folderTypeOf(sub))
         // The webhook belongs to the owning list and is shown only where it is configured.
-        assertNull(statusWebhookLabel(sub))
-        assertEquals("Webhook · On · Never sent", statusWebhookLabel(direct))
+        assertNull(statusExportLabel(sub))
+        assertEquals("Webhook · On · Never exported", statusExportLabel(direct))
     }
 
     @Test
@@ -245,8 +249,7 @@ class FolderTypeTest {
             taskName = name,
             isOwnTask = isOwnTask,
             isCompleted = false,
-            isFavorite = false,
-            customActions = ""
+            selections = ""
         )
 
         // Three sentences and not one, because "each has a Task of its own" is false for a Todo

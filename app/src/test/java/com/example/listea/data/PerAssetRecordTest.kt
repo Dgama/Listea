@@ -6,11 +6,13 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.listea.FolderSnapshot
 import com.example.listea.ImporterKind
 import com.example.listea.childRelativePath
+import com.example.listea.domain.Templates
 import com.example.listea.plan
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -74,8 +76,8 @@ class PerAssetRecordTest {
         val first = pair.assets.getValue("alice/a.jpg")
         val second = pair.assets.getValue("alice/b.jpg")
 
-        dao.setAssetAction(pair.taskId, first, ItemAction.Custom("p2"), enabled = true, now = 2000)
-        dao.setAssetAction(pair.taskId, first, ItemAction.Custom("p5"), enabled = true, now = 2001)
+        dao.setAssetAction(pair.taskId, first, ItemAction("p2"), enabled = true, now = 2000)
+        dao.setAssetAction(pair.taskId, first, ItemAction("p5"), enabled = true, now = 2001)
 
         // The report, verbatim: two pictures, two tags on the first, and the second exactly as it
         // was. Both halves are asserted because the bug showed in both — the chips drew them and
@@ -83,7 +85,7 @@ class PerAssetRecordTest {
         val row = catalogRow(pair.sourceId).single()
         assertEquals(
             setOf("p2", "p5"),
-            row.assets.first { it.assetId == first }.decisions.customActions
+            row.assets.first { it.assetId == first }.decisions.selections
         )
         assertEquals(
             AssetDecisions(),
@@ -97,8 +99,8 @@ class PerAssetRecordTest {
         val first = pair.assets.getValue("alice/a.jpg")
         val second = pair.assets.getValue("alice/b.jpg")
 
-        dao.setAssetAction(pair.taskId, first, ItemAction.Custom("p2"), enabled = true, now = 2000)
-        dao.setAssetAction(pair.taskId, second, ItemAction.Custom("p7"), enabled = true, now = 2001)
+        dao.setAssetAction(pair.taskId, first, ItemAction("p2"), enabled = true, now = 2000)
+        dao.setAssetAction(pair.taskId, second, ItemAction("p7"), enabled = true, now = 2001)
         dao.setAssetAction(pair.taskId, first, ItemAction.Favourite, enabled = true, now = 2002)
 
         val row = catalogRow(pair.sourceId).single()
@@ -107,10 +109,17 @@ class PerAssetRecordTest {
         // The positive half of the test above: not only does a tag fail to spread, two files under
         // one Task can be marked differently at the same moment — the thing the old storage made
         // impossible rather than merely unlikely.
-        assertEquals(setOf("p2"), byId.getValue(first).decisions.customActions)
-        assertEquals(setOf("p7"), byId.getValue(second).decisions.customActions)
-        assertEquals(true, byId.getValue(first).decisions.isFavorite)
-        assertEquals(false, byId.getValue(second).decisions.isFavorite)
+        //
+        // The first file holds both of its marks in the one set, because `★` is a button like any
+        // other since v0.5.4: what used to be a boolean beside the ids is now an id among them, and
+        // a set that named only `p2` would be describing a storage this build no longer has.
+        assertEquals(
+            setOf("p2", Templates.FAVOURITE_BUTTON_ID),
+            byId.getValue(first).decisions.selections
+        )
+        assertEquals(setOf("p7"), byId.getValue(second).decisions.selections)
+        assertTrue(Templates.FAVOURITE_BUTTON_ID in byId.getValue(first).decisions.selections)
+        assertFalse(Templates.FAVOURITE_BUTTON_ID in byId.getValue(second).decisions.selections)
     }
 
     @Test
@@ -145,7 +154,9 @@ class PerAssetRecordTest {
         assertTrue(states.all { it.decisions.isCompleted })
         assertEquals(
             mapOf("alice/a.jpg" to true, "alice/b.jpg" to false),
-            states.associate { it.relativePath to it.decisions.isFavorite }
+            states.associate {
+                it.relativePath to (Templates.FAVOURITE_BUTTON_ID in it.decisions.selections)
+            }
         )
     }
 
@@ -153,7 +164,7 @@ class PerAssetRecordTest {
     fun `re-importing the folder leaves each file's tag where it was`() = runTest {
         val pair = twoFileTask()
         val first = pair.assets.getValue("alice/a.jpg")
-        dao.setAssetAction(pair.taskId, first, ItemAction.Custom("p2"), enabled = true, now = 2000)
+        dao.setAssetAction(pair.taskId, first, ItemAction("p2"), enabled = true, now = 2000)
 
         val result = dao.runImport(
             pair.sourceId, "", folderPlan("", FILES, listOf("alice")), 3000
@@ -169,7 +180,7 @@ class PerAssetRecordTest {
         assertEquals(
             setOf("p2"),
             catalogRow(pair.sourceId).single().assets
-                .first { it.assetId == first }.decisions.customActions
+                .first { it.assetId == first }.decisions.selections
         )
     }
 
@@ -177,18 +188,18 @@ class PerAssetRecordTest {
     fun `a List row over a multi-file Task shows the union of its files' marks`() = runTest {
         val pair = twoFileTask()
         dao.setAssetAction(
-            pair.taskId, pair.assets.getValue("alice/a.jpg"), ItemAction.Custom("p2"),
+            pair.taskId, pair.assets.getValue("alice/a.jpg"), ItemAction("p2"),
             enabled = true, now = 2000
         )
         dao.setAssetAction(
-            pair.taskId, pair.assets.getValue("alice/b.jpg"), ItemAction.Custom("p7"),
+            pair.taskId, pair.assets.getValue("alice/b.jpg"), ItemAction("p7"),
             enabled = true, now = 2001
         )
         dao.setAssetAction(
             pair.taskId, pair.assets.getValue("alice/b.jpg"), ItemAction.Favourite,
             enabled = true, now = 2002
         )
-        val listId = dao.createListFromTasks("Holiday", listOf(pair.taskId), false, "", 3000)
+        val listId = dao.createListFromTasks("Holiday", listOf(pair.taskId), false,3000)
 
         // A List row has no single file on screen, so there is no one pair to show. It folds
         // instead, and the fold is the union: a Task's own reading is everything marked on any of
@@ -198,7 +209,13 @@ class PerAssetRecordTest {
         val live = dao.observeItems(listId).first().single().decisions
         val oneShot = dao.getItems(listId).single().decisions
 
-        assertEquals(ReviewDecisions(isCompleted = false, isFavorite = true, customActions = setOf("p2", "p7")), live)
+        assertEquals(
+            ReviewDecisions(
+                isCompleted = false,
+                selections = setOf("p2", "p7", Templates.FAVOURITE_BUTTON_ID)
+            ),
+            live
+        )
         assertEquals(live, oneShot)
     }
 
@@ -222,15 +239,15 @@ class PerAssetRecordTest {
         assertNotEquals(eastPair.assetId, westPair.assetId)
 
         dao.setAssetAction(
-            eastPair.taskId, eastPair.assetId, ItemAction.Custom("cust1"), enabled = true, now = 2000
+            eastPair.taskId, eastPair.assetId, ItemAction("cust1"), enabled = true, now = 2000
         )
         dao.setAssetAction(
-            eastPair.taskId, eastPair.assetId, ItemAction.Custom("cust2"), enabled = true, now = 2001
+            eastPair.taskId, eastPair.assetId, ItemAction("cust2"), enabled = true, now = 2001
         )
 
         assertEquals(
             setOf("cust1", "cust2"),
-            catalogRow(east.id).single().assets.single().decisions.customActions
+            catalogRow(east.id).single().assets.single().decisions.selections
         )
         // The other Todo's record is untouched — not copied, not shared, not a rival copy of the
         // same answer. Two Todos over one file are two intentions and are allowed to disagree.
@@ -245,7 +262,7 @@ class PerAssetRecordTest {
         val east = todo("East")
         val eastPair = filePair(east)
         dao.setAssetAction(
-            eastPair.taskId, eastPair.assetId, ItemAction.Custom("cust1"), enabled = true, now = 2000
+            eastPair.taskId, eastPair.assetId, ItemAction("cust1"), enabled = true, now = 2000
         )
 
         val west = todo("West")
@@ -255,8 +272,11 @@ class PerAssetRecordTest {
         // Task and an Asset and no opinion, even though the very same path is already marked
         // twice over elsewhere.
         assertEquals(AssetDecisions(), catalogRow(west.id).single().assets.single().decisions)
-        assertEquals(setOf("cust1"), catalogRow(east.id).single().assets.single().decisions.customActions)
-        assertEquals(1, rawInt("SELECT COUNT(*) FROM task_asset_state WHERE isFavorite = 0 AND customActions = ''"))
+        assertEquals(
+            setOf("cust1"),
+            catalogRow(east.id).single().assets.single().decisions.selections
+        )
+        assertEquals(1, rawInt("SELECT COUNT(*) FROM task_asset_state WHERE selections = ''"))
         assertEquals(2, rawInt("SELECT COUNT(*) FROM task_asset_state"))
         assertNotEquals(westPair.assetId, eastPair.assetId)
     }
@@ -268,14 +288,14 @@ class PerAssetRecordTest {
         val west = todo("West")
         val westPair = filePair(west)
         dao.setAssetAction(
-            eastPair.taskId, eastPair.assetId, ItemAction.Custom("cust1"), enabled = true, now = 2000
+            eastPair.taskId, eastPair.assetId, ItemAction("cust1"), enabled = true, now = 2000
         )
         dao.setAssetAction(
-            westPair.taskId, westPair.assetId, ItemAction.Custom("cust3"), enabled = true, now = 2001
+            westPair.taskId, westPair.assetId, ItemAction("cust3"), enabled = true, now = 2001
         )
 
         dao.setAssetAction(
-            eastPair.taskId, eastPair.assetId, ItemAction.Custom("cust1"), enabled = false, now = 3000
+            eastPair.taskId, eastPair.assetId, ItemAction("cust1"), enabled = false, now = 3000
         )
 
         // The undo is addressed the same way the mark was, so it lands on one pair. A write that
@@ -284,7 +304,7 @@ class PerAssetRecordTest {
         assertEquals(AssetDecisions(), catalogRow(east.id).single().assets.single().decisions)
         assertEquals(
             setOf("cust3"),
-            catalogRow(west.id).single().assets.single().decisions.customActions
+            catalogRow(west.id).single().assets.single().decisions.selections
         )
     }
 

@@ -217,8 +217,7 @@ class LegacyItemIdTest {
         relativePath = "",
         files = files.map { ScannedFile(name = it, relativePath = it, uri = "$ROOT/$it") },
         replacedListIds = emptyList(),
-        webhookEnabled = false,
-        webhookUrl = "",
+        exportOnCompletion = false,
         now = 1000
     )
 

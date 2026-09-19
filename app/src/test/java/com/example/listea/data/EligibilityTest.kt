@@ -160,7 +160,7 @@ class EligibilityTest {
         assertEquals(true, pdf.hasUnviewableAsset)
 
         // Both are members of the same List — eligibility does not gate membership.
-        val listId = dao.createListFromTasks("Trip", listOf(image.taskId, pdf.taskId), false, "", 3000)
+        val listId = dao.createListFromTasks("Trip", listOf(image.taskId, pdf.taskId), false,3000)
         assertEquals(2, dao.getItems(listId).size)
         assertEquals(1, rawInt("SELECT COUNT(*) FROM task_state WHERE taskId = '${image.taskId}'"))
         assertEquals(1, rawInt("SELECT COUNT(*) FROM task_state WHERE taskId = '${pdf.taskId}'"))
@@ -179,7 +179,7 @@ class EligibilityTest {
     // --- helpers ---------------------------------------------------------------------------------
 
     private fun media(completed: Boolean) =
-        ReviewResponse.MediaReview(completed = completed, favorite = false, customActions = emptySet())
+        ReviewResponse.MediaReview(completed = completed, selections = emptySet())
 
     private suspend fun folderList(vararg files: String): Long = dao.createFolderList(
         title = "Trip",
@@ -187,8 +187,7 @@ class EligibilityTest {
         relativePath = "",
         files = files.map { ScannedFile(name = it, relativePath = it, uri = "$ROOT/$it") },
         replacedListIds = emptyList(),
-        webhookEnabled = false,
-        webhookUrl = "",
+        exportOnCompletion = false,
         now = 1000
     )
 

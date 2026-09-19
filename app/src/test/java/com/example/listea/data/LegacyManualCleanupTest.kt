@@ -203,8 +203,7 @@ class LegacyManualCleanupTest {
             ScannedFile(name = it, relativePath = it, uri = "$rootUri/$folderPath/$it")
         },
         replacedListIds = emptyList(),
-        webhookEnabled = false,
-        webhookUrl = "",
+        exportOnCompletion = false,
         now = 1000
     )
 

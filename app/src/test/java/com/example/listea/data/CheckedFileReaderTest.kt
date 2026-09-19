@@ -96,7 +96,7 @@ class CheckedFileReaderTest {
     // --- helpers ---------------------------------------------------------------------------------
 
     private fun media(completed: Boolean) =
-        ReviewResponse.MediaReview(completed = completed, favorite = false, customActions = emptySet())
+        ReviewResponse.MediaReview(completed = completed, selections = emptySet())
 
     private suspend fun folderList(files: List<String>): Long = dao.createFolderList(
         title = "Trip",
@@ -104,8 +104,7 @@ class CheckedFileReaderTest {
         relativePath = "",
         files = files.map { ScannedFile(name = it, relativePath = it, uri = "$ROOT/$it") },
         replacedListIds = emptyList(),
-        webhookEnabled = false,
-        webhookUrl = "",
+        exportOnCompletion = false,
         now = 1000
     )
 
@@ -136,8 +135,8 @@ class CheckedFileReaderTest {
             "INSERT INTO list_items (" +
                 "publicId, listId, taskId, title, isCompleted, sortOrder, createdAt, " +
                 "sourceUri, sourceRelativePath, rootRelativePath, sourceMissing, " +
-                "sourceSizeBytes, sourceModifiedAt, isFavorite, customActions) " +
-                "VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, 0, NULL, NULL, 0, '')",
+                "sourceSizeBytes, sourceModifiedAt, isFavorite, customActions, selections) " +
+                "VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, 0, NULL, NULL, 0, '', '')",
             arrayOf<Any?>(
                 newItemPublicId(fileIdentity(relativePath), 1000),
                 listId,

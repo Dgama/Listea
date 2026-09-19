@@ -375,8 +375,7 @@ class ContentPolicyRunTest {
         dao.createListFromTasks(
             title = title,
             taskIds = dao.getCatalogTasks(sourceId).map { it.taskId },
-            webhookEnabled = false,
-            webhookUrl = "",
+            exportOnCompletion = false,
             now = 3000
         )
 

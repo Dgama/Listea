@@ -225,21 +225,25 @@ class TodoDissolutionTest {
         val assetId = rawText("SELECT id FROM assets WHERE taskId = '$taskId'")
         // Written straight to the pair's row rather than through `setAssetAction`: the record is the
         // fixture here and the dissolution is the subject. A `★` and an action id together, because
-        // the payload spells them as one file's line and only a record holding both says so.
+        // the payload spells them as one file's line and only a record holding both says so — and
+        // since v0.5.4 they are one *set* on that row rather than a boolean beside a list, so the
+        // star is written as the id it now is.
         rawExec(
-            "UPDATE task_asset_state SET isFavorite = 1, customActions = 'urgent' " +
+            "UPDATE task_asset_state SET selections = 'favorite,urgent' " +
                 "WHERE assetId = '$assetId'"
         )
         rawExec("UPDATE task_state SET isCompleted = 1 WHERE taskId = '$taskId'")
 
         dao.deleteTodo(todo, keepState = true, now = 5000)
 
-        // Judged, and the record is the file's: its path, its `★`, its action ids, on one line. The
-        // literal is the format contract read from the write side — [DissolvedRecordsTest] pins the
-        // rest of it — so a snapshot that dropped the file, or wrote the Task's answer once for the
-        // whole Todo, fails here.
+        // Judged, and the record is the file's: its path and the ids it was carrying, on one line.
+        // The literal is the format contract read from the write side — [DissolvedRecordsTest] pins
+        // the rest of it — so a snapshot that dropped the file, or wrote the Task's answer once for
+        // the whole Todo, fails here. The star sits inside the set in sorted position, which is
+        // [encodeActionIds]'s order rather than this fixture's, and is the half that says a `★` is
+        // no longer a field of the line.
         assertEquals(
-            "photos/a.jpg\t1\turgent",
+            "photos/a.jpg\tfavorite,urgent",
             rawText("SELECT records FROM dissolved_task_state WHERE groupPath = 'photos/a.jpg'")
         )
         assertEquals(
@@ -247,10 +251,11 @@ class TodoDissolutionTest {
             rawInt("SELECT recordVersion FROM dissolved_task_state WHERE groupPath='photos/a.jpg'")
         )
         // Never judged, which is a fact worth recording rather than an absence to fill in: a
-        // recovery that invented `false` here would be indistinguishable from one that copied a real
-        // "no". The file is still a line — it existed, and this is what it had.
+        // recovery that invented an empty set here would be indistinguishable from one that copied a
+        // real "no". The file is still a line — it existed, and this is what it had: a path and the
+        // empty set, which is the whole of a file nobody has said anything about.
         assertEquals(
-            "photos/b.jpg\t0\t",
+            "photos/b.jpg\t",
             rawText("SELECT records FROM dissolved_task_state WHERE groupPath = 'photos/b.jpg'")
         )
         // Completion is the Task's, so it stays a column and belongs to the Task that was checked.
@@ -302,8 +307,7 @@ class TodoDissolutionTest {
         val bystander = dao.createListFromTasks(
             title = "Elsewhere",
             taskIds = emptyList(),
-            webhookEnabled = false,
-            webhookUrl = "",
+            exportOnCompletion = false,
             now = 1000
         )
 
@@ -363,8 +367,7 @@ class TodoDissolutionTest {
         dao.createListFromTasks(
             title = title,
             taskIds = dao.getCatalogTasks(sourceId).map { it.taskId },
-            webhookEnabled = false,
-            webhookUrl = "",
+            exportOnCompletion = false,
             now = 3000
         )
 

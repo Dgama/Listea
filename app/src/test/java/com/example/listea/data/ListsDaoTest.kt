@@ -301,8 +301,7 @@ class ListsDaoTest {
             ScannedFile(name = it, relativePath = it, uri = "$ROOT/$folderPath/$it")
         },
         replacedListIds = emptyList(),
-        webhookEnabled = false,
-        webhookUrl = "",
+        exportOnCompletion = false,
         now = 1000
     )
 

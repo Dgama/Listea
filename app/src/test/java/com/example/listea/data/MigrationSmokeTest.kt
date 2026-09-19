@@ -40,9 +40,12 @@ class MigrationSmokeTest {
     fun `the current schema declares the template a List is judged under`() {
         val database = Room.databaseBuilder(context, ListeaDatabase::class.java, SCHEMA_DB).build()
         database.openHelper.writableDatabase.execSQL(
+            // `exportKind` is owed by the schema the entities declare — the column has no SQL
+            // default, because the entity carries a Kotlin one — and this test is about what the
+            // *other* columns say, so the choice is written as the word for *nothing*.
             "INSERT INTO lists (id, title, createdAt, webhookEnabled, webhookUrl, " +
-            "lastDissolvedReason) " +
-                "VALUES (1, 'Trip', 1000, 0, '', 'dissolved')"
+            "lastDissolvedReason, exportKind) " +
+                "VALUES (1, 'Trip', 1000, 0, '', 'dissolved', 'none')"
         )
         database.openHelper.writableDatabase
             .query(
@@ -59,9 +62,12 @@ class MigrationSmokeTest {
     fun `a database created from the entities round-trips`() {
         val database = Room.databaseBuilder(context, ListeaDatabase::class.java, FRESH_DB).build()
         database.openHelper.writableDatabase.execSQL(
+            // `exportKind` is owed by the schema the entities declare — the column has no SQL
+            // default, because the entity carries a Kotlin one — and this test is about what the
+            // *other* columns say, so the choice is written as the word for *nothing*.
             "INSERT INTO lists (id, title, createdAt, webhookEnabled, webhookUrl, " +
-            "lastDissolvedReason) " +
-                "VALUES (1, 'Trip', 1000, 0, '', 'dissolved')"
+            "lastDissolvedReason, exportKind) " +
+                "VALUES (1, 'Trip', 1000, 0, '', 'dissolved', 'none')"
         )
         database.openHelper.writableDatabase
             .query("SELECT title FROM lists WHERE id = 1").use { row ->
@@ -75,10 +81,11 @@ class MigrationSmokeTest {
     fun `MIGRATION_11_12 folds custom1 and custom2 into a customActions set`() {
         writeV11Fixture()
 
-        // Both steps, because a v11 database now has two to walk before it is current — and the
-        // version the app opens at is what decides how many are needed, not what this test is
-        // about. The assertions below survive V13 unchanged: it carries every decision column
-        // across and rebuilds only the table they sit on.
+        // The whole chain from v11, because the version the app opens at is what decides how many
+        // steps a fixture needs — not what this test is about. The assertions below survive every
+        // step after this one unchanged: V13 carries the decision columns across and rebuilds only
+        // the table they sit on, and V24 copies them into one column of its own without moving
+        // them.
         val database = Room.databaseBuilder(context, ListeaDatabase::class.java, V11_DB)
             .addMigrations(
                 ListeaDatabase.MIGRATION_11_12,
@@ -92,7 +99,9 @@ class MigrationSmokeTest {
                 ListeaDatabase.MIGRATION_19_20,
             ListeaDatabase.MIGRATION_20_21,
             ListeaDatabase.MIGRATION_21_22,
-            ListeaDatabase.MIGRATION_22_23
+            ListeaDatabase.MIGRATION_22_23,
+            ListeaDatabase.MIGRATION_23_24,
+            ListeaDatabase.MIGRATION_24_25
             )
             .build()
 

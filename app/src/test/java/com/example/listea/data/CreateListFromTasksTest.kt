@@ -62,14 +62,14 @@ class CreateListFromTasksTest {
             val listsBefore = rawInt("SELECT COUNT(*) FROM lists")
             assertTrue(
                 runCatching {
-                    dao.createListFromTasks("Trip", taskIds + "no-such-task", false, "", 3000)
+                    dao.createListFromTasks("Trip", taskIds + "no-such-task", false,3000)
                 }.isFailure
             )
             assertEquals(listsBefore, rawInt("SELECT COUNT(*) FROM lists"))
 
             // Known ids create one membership per Task, in the order given, with the Task's own
             // title and groupPath carried onto the row.
-            val listId = dao.createListFromTasks("Trip", taskIds, false, "", 3000)
+            val listId = dao.createListFromTasks("Trip", taskIds, false,3000)
             val items = dao.getItems(listId)
             assertEquals(taskIds, items.map { it.taskId })
             assertEquals(listOf("a.jpg", "b.jpg"), items.map { it.title })
@@ -96,8 +96,7 @@ class CreateListFromTasksTest {
                     )
                 ),
                 replacedListIds = emptyList(),
-                webhookEnabled = false,
-                webhookUrl = "",
+                exportOnCompletion = false,
                 now = now
             )
             val item = dao.getItems(listId).single()
@@ -119,8 +118,8 @@ class CreateListFromTasksTest {
     @Test
     fun `one Task in two Lists shows one TaskState and a submission from one is one event`() =
         runTest {
-            val listA = dao.createFolderList("A", ROOT, "", files("a.jpg"), emptyList(), false, "", 1000)
-            val listB = dao.createFolderList("B", ROOT, "", files("a.jpg"), emptyList(), false, "", 1000)
+            val listA = dao.createFolderList("A", ROOT, "", files("a.jpg"), emptyList(), false,1000)
+            val listB = dao.createFolderList("B", ROOT, "", files("a.jpg"), emptyList(), false,1000)
             val taskA = dao.getItems(listA).single().taskId
             val taskB = dao.getItems(listB).single().taskId
             assertEquals(taskA, taskB)
@@ -143,7 +142,7 @@ class CreateListFromTasksTest {
     @Test
     fun `deleting a List leaves the Task, its Assets, state, events and provenance intact`() =
         runTest {
-            val listId = dao.createFolderList("Trip", ROOT, "", files("a.jpg"), emptyList(), false, "", 1000)
+            val listId = dao.createFolderList("Trip", ROOT, "", files("a.jpg"), emptyList(), false,1000)
             val taskId = dao.getItems(listId).single().taskId
             dao.submitReview(taskId, media(true), Templates.MediaRapidReview.ref, ReviewContext.InFolder(ROOT, ""), 2000)
 
@@ -160,7 +159,7 @@ class CreateListFromTasksTest {
     // --- helpers ---------------------------------------------------------------------------------
 
     private fun media(completed: Boolean) =
-        ReviewResponse.MediaReview(completed = completed, favorite = false, customActions = emptySet())
+        ReviewResponse.MediaReview(completed = completed, selections = emptySet())
 
     private fun files(vararg names: String) = names.map {
         ScannedFile(name = it, relativePath = it, uri = "$ROOT/$it")

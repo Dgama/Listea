@@ -10,6 +10,7 @@ import com.example.listea.data.ReviewItem
 import com.example.listea.data.TaskStateEntity
 import com.example.listea.data.encodeActionIds
 import com.example.listea.data.taskDecisions
+import com.example.listea.domain.Templates
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -42,19 +43,20 @@ class QuickReviewQueueTest {
     )
 
     /**
-     * A catalog row with one Asset, which is what a row's tags hang on since v0.5.1.
+     * A catalog row with one Asset, which is what a row's marks hang on since v0.5.1.
      *
-     * `favorite` and `actions` mark that Asset rather than the row, because a row has no tags of
-     * its own to mark — that is the whole of the change these tests are here to pin, and a helper
-     * that took them and put them back on the row would be asserting the shape that was removed.
+     * `selections` marks that Asset rather than the row, because a row has no marks of its own to
+     * mark — that is the whole of the change these tests are here to pin, and a helper that took
+     * them and put them back on the row would be asserting the shape that was removed. One set and
+     * no `favorite` beside it, since v0.5.4: `★` is the button with the id
+     * [Templates.FAVOURITE_BUTTON_ID] and is carried here like any other.
      */
     private fun catalogRow(
         taskId: String,
         groupPath: String,
         displayName: String,
         completed: Boolean = false,
-        favorite: Boolean = false,
-        actions: Set<String> = emptySet(),
+        selections: Set<String> = emptySet(),
         missingAssets: Int = 0,
         unviewable: Boolean = false,
         sizeBytes: Long? = null,
@@ -77,7 +79,7 @@ class QuickReviewQueueTest {
                 sourceMissing = false,
                 sizeBytes = sizeBytes,
                 lastModified = lastModified,
-                decisions = AssetDecisions(isFavorite = favorite, customActions = actions)
+                decisions = AssetDecisions(selections = selections)
             )
         )
     )
@@ -102,12 +104,10 @@ class QuickReviewQueueTest {
     /** One pair's half, for the live reads below. */
     private fun assetState(
         assetId: String,
-        favorite: Boolean = false,
-        actions: Set<String> = emptySet()
+        selections: Set<String> = emptySet()
     ) = AssetStateEntity(
         assetId = assetId,
-        isFavorite = favorite,
-        customActions = encodeActionIds(actions),
+        selections = encodeActionIds(selections),
         updatedAt = 0
     )
 
@@ -140,7 +140,10 @@ class QuickReviewQueueTest {
             "sub",
             listOf(file("sub", "a.jpg"), file("sub", "b.jpg")),
             listOf(
-                catalogRow("task-a", "sub/a.jpg", "a.jpg", completed = true, favorite = true),
+                catalogRow(
+                    "task-a", "sub/a.jpg", "a.jpg",
+                    completed = true, selections = setOf(Templates.FAVOURITE_BUTTON_ID)
+                ),
                 catalogRow("task-b", "sub/b.jpg", "b.jpg")
             ),
             listOf(state(1, "sub/a.jpg"), state(2, "sub/b.jpg"))
@@ -148,7 +151,7 @@ class QuickReviewQueueTest {
 
         assertTrue(queue[0].isCompleted)
         // The mark comes off the row's Asset, which is the only place a row can carry one now.
-        assertTrue(queue[0].taskDecisions.isFavorite)
+        assertTrue(Templates.FAVOURITE_BUTTON_ID in queue[0].taskDecisions.selections)
         assertEquals(false, queue[1].isCompleted)
         assertEquals(true, reviewFacts(queue[0]).isChecked)
         assertEquals(false, reviewFacts(queue[1]).isChecked)
@@ -284,12 +287,19 @@ class QuickReviewQueueTest {
         val live = withLiveDecisions(
             queue,
             states = listOf(taskState("task-a", completed = true)),
-            assetStates = listOf(assetState("task-a#0", favorite = true, actions = setOf("a1")))
+            assetStates = listOf(
+                assetState("task-a#0", selections = setOf("a1", Templates.FAVOURITE_BUTTON_ID))
+            )
         )
 
         assertTrue(live.single().isCompleted)
-        assertTrue(live.single().taskDecisions.isFavorite)
-        assertEquals(setOf("a1"), live.single().taskDecisions.customActions)
+        // `★` and the tag are two ids of the one set now, so the whole set is the assertion: a
+        // re-read that carried the tag and not the star would fail here, exactly as it would have
+        // when they were stored apart.
+        assertEquals(
+            setOf("a1", Templates.FAVOURITE_BUTTON_ID),
+            live.single().taskDecisions.selections
+        )
         // Unchecking is the same write seen from the other side, so the merge has to carry it back
         // down as readily as it carried it up.
         assertEquals(
@@ -324,11 +334,11 @@ class QuickReviewQueueTest {
         val live = withLiveDecisions(
             queue,
             states = emptyList(),
-            assetStates = listOf(assetState("task-a#0", actions = setOf("a1")))
+            assetStates = listOf(assetState("task-a#0", selections = setOf("a1")))
         ).single()
 
-        assertEquals(setOf("a1"), live.assets[0].decisions.customActions)
-        assertTrue(live.assets[1].decisions.customActions.isEmpty())
+        assertEquals(setOf("a1"), live.assets[0].decisions.selections)
+        assertTrue(live.assets[1].decisions.selections.isEmpty())
     }
 
     @Test

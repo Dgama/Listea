@@ -69,8 +69,7 @@ class TaskWriteTest {
             taskId = "no-such-task",
             response = ReviewResponse.MediaReview(
                 completed = true,
-                favorite = false,
-                customActions = emptySet()
+                selections = emptySet()
             ),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InFolder(ROOT, ""),
@@ -142,8 +141,7 @@ class TaskWriteTest {
             ScannedFile(name = it, relativePath = it, uri = "$ROOT/$folderPath/$it")
         },
         replacedListIds = emptyList(),
-        webhookEnabled = false,
-        webhookUrl = "",
+        exportOnCompletion = false,
         now = 1000
     )
 

@@ -3,7 +3,6 @@ package com.example.listea.data
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
-import com.example.listea.AppSettings
 import com.example.listea.EVENT_LIST_COMPLETED
 import com.example.listea.FolderSnapshot
 import com.example.listea.ImporterKind
@@ -83,13 +82,15 @@ class WebhookCompatTest {
     fun `the webhook body for a file-backed Task is byte-identical before and after the release`() =
         runTest {
             val now = 1000L
-            val listId = dao.createFolderList("Trip", ROOT, "2026-07-11", files("a.jpg"), emptyList(), false, "", now)
+            val listId = dao.createFolderList("Trip", ROOT, "2026-07-11", files("a.jpg"), emptyList(), false, now)
             val list = dao.getList(listId)!!.copy(id = 7)
             // Normalise the random public id and the checked state so the body is deterministic; the
             // row itself is what the recomposed createFolderList produced.
             val item = dao.getItems(listId).single().copy(publicId = "PUBLIC-1", isCompleted = true)
 
-            val payload = buildWebhookPayload(EVENT_LIST_COMPLETED, list, listOf(item), AppSettings())
+            // No settings and no resolver: this body is what a caller with neither would send, which
+            // is the shape v0.1's receiver was written against.
+            val payload = buildWebhookPayload(EVENT_LIST_COMPLETED, list, listOf(item))
 
             assertEquals(
                 """{"event":"list.completed",""" +

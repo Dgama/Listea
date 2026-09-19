@@ -5,6 +5,7 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.listea.FolderSnapshot
 import com.example.listea.ImporterKind
+import com.example.listea.domain.Templates
 import com.example.listea.plan
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -68,10 +69,10 @@ class HistoryRecordsTest {
         val todo = importFolder("photos", DIRECTORY, THREE_FILES)
         // Three files and three different answers: one carries both a `★` and an action id, one an
         // action id alone, one nothing at all. A recovery that folded the Task's answers into one
-        // — `MAX(isFavorite)`, `GROUP_CONCAT(customActions)`, which is what v0.5.1's history did —
+        // — a single flag beside one concatenated id list, which is what v0.5.1's history did —
         // would hand all three the same thing, and this is the fixture that says so.
-        mark(todo, "alice/a.jpg", ItemAction.Favourite, ItemAction.Custom("custom1"))
-        mark(todo, "alice/b.jpg", ItemAction.Custom("custom2"))
+        mark(todo, "alice/a.jpg", ItemAction.Favourite, ItemAction("custom1"))
+        mark(todo, "alice/b.jpg", ItemAction("custom2"))
         dao.setTaskCompleted(taskOf(todo).taskId, completed = true, now = 1500)
 
         dao.deleteTodo(todo, keepState = true, now = 5000)
@@ -81,8 +82,8 @@ class HistoryRecordsTest {
         assertEquals(true, recovered.isCompleted)
         assertEquals(
             mapOf(
-                "a.jpg" to AssetDecisions(true, setOf("custom1")),
-                "b.jpg" to AssetDecisions(false, setOf("custom2")),
+                "a.jpg" to AssetDecisions(setOf("custom1", Templates.FAVOURITE_BUTTON_ID)),
+                "b.jpg" to AssetDecisions(setOf("custom2")),
                 "c.jpg" to AssetDecisions()
             ),
             recovered.assets.associate { it.name to it.decisions }
@@ -93,8 +94,8 @@ class HistoryRecordsTest {
     fun `a file the new import did not produce recovers nothing, and does not land on the file beside it`() =
         runTest {
             val todo = importFolder("photos", DIRECTORY, listOf("alice/a.jpg", "alice/b.jpg"))
-            mark(todo, "alice/a.jpg", ItemAction.Custom("custom1"))
-            mark(todo, "alice/b.jpg", ItemAction.Custom("custom2"))
+            mark(todo, "alice/a.jpg", ItemAction("custom1"))
+            mark(todo, "alice/b.jpg", ItemAction("custom2"))
             dao.setTaskCompleted(taskOf(todo).taskId, completed = true, now = 1500)
 
             // `a.jpg` was in the folder when the history was written and is not in it now. Its
@@ -108,7 +109,7 @@ class HistoryRecordsTest {
             assertEquals(1, result.tasksRecovered)
             val recovered = taskOf(sourceOf("photos"))
             assertEquals(
-                mapOf("b.jpg" to AssetDecisions(false, setOf("custom2"))),
+                mapOf("b.jpg" to AssetDecisions(setOf("custom2"))),
                 recovered.assets.associate { it.name to it.decisions }
             )
             // And the completion crossed anyway, because it is the Task's and the Task is still
@@ -152,15 +153,15 @@ class HistoryRecordsTest {
     @Test
     fun `a payload this build cannot read restores the completion, and nothing else`() = runTest {
         val todo = importFolder("photos", DIRECTORY, listOf("alice/a.jpg"))
-        mark(todo, "alice/a.jpg", ItemAction.Favourite, ItemAction.Custom("custom1"))
+        mark(todo, "alice/a.jpg", ItemAction.Favourite, ItemAction("custom1"))
         dao.setTaskCompleted(taskOf(todo).taskId, completed = true, now = 1500)
         dao.deleteTodo(todo, keepState = true, now = 5000)
 
-        // Two ways a row can say something this build cannot read, and both are written as a later
-        // release would write them rather than as a corrupted string: a version it does not know,
-        // and a line whose shape it does not know. Neither is a reason to refuse the completion —
-        // which is the Task's own and needs no decoding — and neither is a licence to guess at the
-        // rest.
+        // Two ways a row can say something this build cannot read, and both are written as a release
+        // might write them rather than as a corrupted string: a version it does not know, and a line
+        // whose shape the version it names does not describe. Neither is a reason to refuse the
+        // completion — which is the Task's own and needs no decoding — and neither is a licence to
+        // guess at the rest.
         rawExec("UPDATE dissolved_task_state SET recordVersion = 99 WHERE sourceId = '$todo'")
         reimport("photos", DIRECTORY, listOf("alice/a.jpg"), recoverFrom = todo, now = 6000)
         assertEquals(
@@ -169,9 +170,12 @@ class HistoryRecordsTest {
         )
         assertEquals(true, taskOf(sourceOf("photos")).isCompleted)
 
+        // The version is one this build reads, so the line has to be the shape it does not: the
+        // current encoding writes two fields, and a third is one it would have to guess the meaning
+        // of.
         rawExec(
             "UPDATE dissolved_task_state SET recordVersion = $DISSOLVED_RECORDS_VERSION, " +
-                "records = 'alice/a.jpg\t1' WHERE sourceId = '$todo'"
+                "records = 'alice/a.jpg\tcustom1\textra' WHERE sourceId = '$todo'"
         )
         reimport("photos", DIRECTORY, listOf("alice/a.jpg"), recoverFrom = todo, now = 7000)
         assertEquals(
@@ -186,8 +190,8 @@ class HistoryRecordsTest {
     @Test
     fun `dissolving a recovered Todo writes the records it recovered, byte for byte`() = runTest {
         val todo = importFolder("photos", DIRECTORY, THREE_FILES)
-        mark(todo, "alice/a.jpg", ItemAction.Favourite, ItemAction.Custom("custom1"))
-        mark(todo, "alice/b.jpg", ItemAction.Custom("custom2"))
+        mark(todo, "alice/a.jpg", ItemAction.Favourite, ItemAction("custom1"))
+        mark(todo, "alice/b.jpg", ItemAction("custom2"))
         dao.deleteTodo(todo, keepState = true, now = 5000)
 
         reimport("photos", DIRECTORY, THREE_FILES, recoverFrom = todo, now = 6000)

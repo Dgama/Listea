@@ -11,6 +11,7 @@ import com.example.listea.data.ListeaDatabase
 import com.example.listea.data.ListsDao
 import com.example.listea.data.ScannedFile
 import com.example.listea.data.taskDecisions
+import com.example.listea.domain.Templates
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
@@ -78,10 +79,10 @@ class ListDetailRecordTest {
     @Test
     fun `a List's item carries each of its files' own marks`() = runTest(dispatcher) {
         val pair = twoFileTask()
-        dao.setAssetAction(pair.taskId, pair.assets.getValue("alice/a.jpg"), ItemAction.Custom("cust1"), true, 2000)
+        dao.setAssetAction(pair.taskId, pair.assets.getValue("alice/a.jpg"), ItemAction("cust1"), true, 2000)
         dao.setAssetAction(pair.taskId, pair.assets.getValue("alice/a.jpg"), ItemAction.Favourite, true, 2001)
-        dao.setAssetAction(pair.taskId, pair.assets.getValue("alice/b.jpg"), ItemAction.Custom("cust2"), true, 2002)
-        val listId = dao.createListFromTasks("Holiday", listOf(pair.taskId), false, "", 3000)
+        dao.setAssetAction(pair.taskId, pair.assets.getValue("alice/b.jpg"), ItemAction("cust2"), true, 2002)
+        val listId = dao.createListFromTasks("Holiday", listOf(pair.taskId), false, 3000)
 
         val item = viewModel().observeDetail(listId).first()!!.items.single()
 
@@ -90,11 +91,11 @@ class ListDetailRecordTest {
         // release exists to fix — a Task-level answer handed to a page.
         val byName = item.assets.associateBy { it.name }
         assertEquals(
-            AssetDecisions(isFavorite = true, customActions = setOf("cust1")),
+            AssetDecisions(selections = setOf("cust1", Templates.FAVOURITE_BUTTON_ID)),
             byName.getValue("a.jpg").decisions
         )
         assertEquals(
-            AssetDecisions(customActions = setOf("cust2")),
+            AssetDecisions(selections = setOf("cust2")),
             byName.getValue("b.jpg").decisions
         )
     }
@@ -102,10 +103,10 @@ class ListDetailRecordTest {
     @Test
     fun `a List's item folds its files into what its own surface shows`() = runTest(dispatcher) {
         val pair = twoFileTask()
-        dao.setAssetAction(pair.taskId, pair.assets.getValue("alice/a.jpg"), ItemAction.Custom("cust1"), true, 2000)
-        dao.setAssetAction(pair.taskId, pair.assets.getValue("alice/b.jpg"), ItemAction.Custom("cust2"), true, 2001)
+        dao.setAssetAction(pair.taskId, pair.assets.getValue("alice/a.jpg"), ItemAction("cust1"), true, 2000)
+        dao.setAssetAction(pair.taskId, pair.assets.getValue("alice/b.jpg"), ItemAction("cust2"), true, 2001)
         dao.setAssetAction(pair.taskId, pair.assets.getValue("alice/b.jpg"), ItemAction.Favourite, true, 2002)
-        val listId = dao.createListFromTasks("Holiday", listOf(pair.taskId), false, "", 3000)
+        val listId = dao.createListFromTasks("Holiday", listOf(pair.taskId), false, 3000)
 
         val item = viewModel().observeDetail(listId).first()!!.items.single()
 
@@ -113,7 +114,9 @@ class ListDetailRecordTest {
         // read this one property, so both were empty together. The union and not the last file's:
         // a List row names no file, so nothing may be dropped for having been set on another page.
         assertEquals(
-            AssetDecisions(isFavorite = true, customActions = setOf("cust1", "cust2")),
+            AssetDecisions(
+                selections = setOf("cust1", "cust2", Templates.FAVOURITE_BUTTON_ID)
+            ),
             item.taskDecisions
         )
     }
@@ -121,7 +124,7 @@ class ListDetailRecordTest {
     @Test
     fun `a List's item arrives unmarked when nothing was recorded`() = runTest(dispatcher) {
         val pair = twoFileTask()
-        val listId = dao.createListFromTasks("Holiday", listOf(pair.taskId), false, "", 3000)
+        val listId = dao.createListFromTasks("Holiday", listOf(pair.taskId), false, 3000)
 
         val item = viewModel().observeDetail(listId).first()!!.items.single()
 

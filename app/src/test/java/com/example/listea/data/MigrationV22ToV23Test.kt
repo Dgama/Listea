@@ -26,6 +26,16 @@ import org.robolectric.annotation.Config
  * version the entities declare, given its rows and then **rewound to 22** — and
  * `the step changes no table` asserts the identity the shortcut rests on rather than assuming it.
  *
+ * Since v0.5.4 the version the entities declare is no longer 23, so the fixture also has that
+ * release's additions taken back off it — see [subtractV24Additions]. The step under test is
+ * unchanged and so is the claim: a v22 database is a v23 one, which is why a fixture built from the
+ * v24 schema needs the later step undone before it is a v22 at all.
+ *
+ * The walk does not stop at 23 any more, either. Room opens at the version the app ships whatever
+ * version a fixture was written at, so `migrate()` runs every step after this one as well; the
+ * assertions below are written to be indifferent to that, which is what lets them stay the same
+ * assertions a release later.
+ *
  * What is under test is therefore a *question* rather than a shape: `lists.completedAt` answers
  * *is this List finished*, and four writes used to move a List's membership without re-asking it.
  * The five rows below are the states those writes could leave behind, and the claim is that after
@@ -105,14 +115,45 @@ class MigrationV22ToV23Test {
     @Test
     fun `the step changes no table`() {
         // The premise the fixture is built on, asserted rather than assumed: a v22 database and a
-        // v23 one differ by a number and by nothing else. If a later release makes this step's
-        // schema move, this is where that is noticed — and the fixture above stops being honest at
-        // the same moment.
+        // v23 one differ by a number and by nothing else.
+        //
+        // Read as a difference rather than as an equality, because the walk no longer stops at 23.
+        // Room opens at the version the app ships whatever version a fixture was written at, so
+        // `migrate()` runs every later step as well, and the tables v0.5.4 adds are not this step's
+        // doing. Two claims stand in place of the one: nothing that existed at v22 has moved, and
+        // everything that appeared afterwards is a table a later migration creates. That second
+        // claim is the stronger of the two, and it is the one the shortcut depends on — an object
+        // appearing in a rewound fixture that no step puts back is exactly what makes such a fixture
+        // a database that never shipped.
+        //
+        // The three tables a later step appends a column to are compared by their columns rather
+        // than by their stored SQL, because `ALTER TABLE ADD COLUMN` rewrites a table's text and the
+        // text would differ for a reason that is not this step's. [ColumnsFromLaterSteps] is the
+        // list, so it is named once and grows in one place.
         writeFixture()
         val before = schema()
+        val columnsBefore = ColumnsFromLaterSteps.keys.associateWith { columnsOf(it) }
         migrate()
+        val after = schema()
 
-        assertEquals(before, schema())
+        assertEquals(
+            "every object that existed at v22 is as it was",
+            before.filterKeys { it !in ColumnsFromLaterSteps },
+            after.filterKeys { it in before && it !in ColumnsFromLaterSteps }
+        )
+        assertEquals(
+            "and a later step is the only thing that added anything",
+            TablesFromLaterSteps.toSet(),
+            after.keys - before.keys
+        )
+        // And the three a later step takes from here, by their columns rather than their SQL: the
+        // `ALTER` that appends one rewrites the table's text, so the comparison above cannot be made
+        // of them. `list_items` and `file_review_state` are in that set for the same reason
+        // `task_asset_state` is — v0.5.4 puts a `selections` on all three — and if it ever stops
+        // being true of one of them, this line fails rather than the exclusion quietly widening.
+        ColumnsFromLaterSteps.forEach { (table, column) ->
+            assertEquals("columns of $table", columnsBefore.getValue(table) + column, columnsOf(table))
+        }
     }
 
     // --- the fixture ------------------------------------------------------------------------------
@@ -128,15 +169,19 @@ class MigrationV22ToV23Test {
     private fun writeFixture() {
         val database = openAtCurrentVersion()
         database.exec(
+            // `exportKind` is written and thrown away, like everything else a step above this one
+            // adds: the row has to satisfy the schema Room builds before `subtractV24Additions`
+            // takes the column back off, and the step under test reads none of it.
             "INSERT INTO lists (id, title, createdAt, completedAt, webhookEnabled, webhookUrl, " +
-                "lastDissolvedReason, taskReviewTemplateId, taskReviewTemplateVersion) VALUES " +
-                "(1, 'all done', 1000, NULL, 0, '', 'dissolved', 'builtin.media.rapid-review', 1), " +
-                "(2, 'one left', 1000, NULL, 0, '', 'dissolved', 'builtin.media.rapid-review', 1), " +
+                "lastDissolvedReason, taskReviewTemplateId, taskReviewTemplateVersion, exportKind) " +
+                "VALUES " +
+                "(1, 'all done', 1000, NULL, 0, '', 'dissolved', 'builtin.media.rapid-review', 1, 'none'), " +
+                "(2, 'one left', 1000, NULL, 0, '', 'dissolved', 'builtin.media.rapid-review', 1, 'none'), " +
                 "(3, 'done and stamped', 1000, 9000, 0, '', 'dissolved', " +
-                "'builtin.media.rapid-review', 1), " +
-                "(4, 'emptied', 1000, 8000, 0, '', 'dissolved', 'builtin.media.rapid-review', 1), " +
+                "'builtin.media.rapid-review', 1, 'none'), " +
+                "(4, 'emptied', 1000, 8000, 0, '', 'dissolved', 'builtin.media.rapid-review', 1, 'none'), " +
                 "(5, 'reopened', 1000, 7000, 0, '', 'dissolved', " +
-                "'builtin.media.rapid-review', 1)"
+                "'builtin.media.rapid-review', 1, 'none')"
         )
         // The Tasks the memberships point at. `tasks` is two columns wide, and Room opens with
         // foreign keys on, so these are owed rather than optional.
@@ -164,6 +209,9 @@ class MigrationV22ToV23Test {
         // list 4 gets nothing: a List whose memberships were all taken away.
         member(5, "t4"); member(5, "t5")
 
+        // Taken back off, because the schema Room builds is no longer v23's: this step changed
+        // nothing, so a v22 database *is* a v23 one, but it is not a v24 one.
+        database.subtractV24Additions()
         database.close()
         rewind()
     }
@@ -193,13 +241,13 @@ class MigrationV22ToV23Test {
 
     private fun migrate(): ListeaDatabase =
         Room.databaseBuilder(context, ListeaDatabase::class.java, V22_DB)
-            .addMigrations(ListeaDatabase.MIGRATION_22_23)
+            .addMigrations(
+                ListeaDatabase.MIGRATION_22_23,
+                ListeaDatabase.MIGRATION_23_24,
+                ListeaDatabase.MIGRATION_24_25
+            )
             .build()
             .also { it.openHelper.writableDatabase }
-
-    private fun ListeaDatabase.exec(sql: String) {
-        openHelper.writableDatabase.execSQL(sql)
-    }
 
     /** One List's recorded completion, or null when it is not recorded as finished. */
     private fun ListeaDatabase.timestamp(listId: Int): Long? =
@@ -210,22 +258,42 @@ class MigrationV22ToV23Test {
             if (row.isNull(0)) null else row.getLong(0)
         }
 
-    /** Every table and index, as SQLite wrote them — compared across the step, not parsed. */
-    private fun schema(): List<String> =
+    /**
+     * Every object the app put there, as SQLite wrote it — compared across the step, not parsed.
+     *
+     * Keyed by name rather than listed, so that a later migration's additions can be told apart from
+     * a change to something that was already here. SQLite's own `sqlite_%` bookkeeping and Room's
+     * `room_master_table` are left out: they are the toolchain's, they are not what a migration
+     * moves, and the master table's row is rewritten by every step by design.
+     */
+    private fun schema(): Map<String, String> =
         SQLiteDatabase.openDatabase(
             context.getDatabasePath(V22_DB).path,
             null,
             SQLiteDatabase.OPEN_READONLY
         ).use { database ->
             database.rawQuery(
-                "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name",
+                "SELECT name, sql FROM sqlite_master WHERE sql IS NOT NULL " +
+                    "AND name NOT LIKE 'sqlite_%' AND name <> 'room_master_table'",
                 null
             )
                 .use { row ->
-                    buildList {
-                        while (row.moveToNext()) add(row.getString(0))
+                    buildMap {
+                        while (row.moveToNext()) put(row.getString(0), row.getString(1))
                     }
                 }
+        }
+
+    /** One table's columns, in the order SQLite holds them. */
+    private fun columnsOf(table: String): List<String> =
+        SQLiteDatabase.openDatabase(
+            context.getDatabasePath(V22_DB).path,
+            null,
+            SQLiteDatabase.OPEN_READONLY
+        ).use { database ->
+            database.rawQuery("PRAGMA table_info($table)", null).use { row ->
+                buildList { while (row.moveToNext()) add(row.getString(1)) }
+            }
         }
 
     private companion object {

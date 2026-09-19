@@ -114,8 +114,7 @@ class ListAfterDissolutionTest {
         val bystander = dao.createListFromTasks(
             title = "Elsewhere",
             taskIds = emptyList(),
-            webhookEnabled = false,
-            webhookUrl = "",
+            exportOnCompletion = false,
             now = 1000
         )
 
@@ -246,8 +245,7 @@ class ListAfterDissolutionTest {
         dao.createListFromTasks(
             title = title,
             taskIds = dao.getCatalogTasks(sourceId).map { it.taskId },
-            webhookEnabled = false,
-            webhookUrl = "",
+            exportOnCompletion = false,
             now = 3000
         )
 
@@ -267,8 +265,7 @@ class ListAfterDissolutionTest {
             relativePath = "photos",
             files = listOf("a.jpg", "b.jpg").map { scanned(it) },
             replacedListIds = emptyList(),
-            webhookEnabled = false,
-            webhookUrl = "",
+            exportOnCompletion = false,
             now = 3000
         )
 
