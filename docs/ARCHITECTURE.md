@@ -2,7 +2,12 @@
 
 > **Status:** Normative architectural direction  
 > **Scope:** Long-lived product and domain boundaries  
-> **Last updated:** 2026-09-17 (revised: an Upstream is the registered origin; Source is retired as a user-facing name, with the implementation's remaining uses of the word recorded as an open item in [File, Source, and Upstream](#file-source-and-upstream); and missing material erases nothing *by default*, with the two named policies that are the exception set out in [Re-import and reconciliation](#re-import-and-reconciliation))
+> **Last updated:** 2026-09-19 (revised: v0.5.4's move of the Asset Control band into stored
+> templates is recorded in [Templates](#templates); v0.5.6's split of the *export* from its
+> *mechanism* is recorded in [Exporter / Action](#exporter--action); and v0.5.1's move of `★` and the
+> configured actions down to the Task–Asset pair is recorded in [TaskState](#taskstate), where the
+> sentence it was measured against says the opposite — the decision is kept and its shape is left
+> open)
 
 Listea is a lightweight human-judgment layer between structured inputs and workflow outputs. It turns a collection of reviewable tasks into a fast, resumable feed, records what a person decided, and leaves upstream ingestion and downstream consequences to other systems.
 
@@ -182,6 +187,33 @@ The architecture does not currently introduce per-membership completion. If a fu
 
 Current state belongs to the Task, not to an Asset and not to a List membership. In the media workflow, this preserves the existing rule that Quick Review and List Review see the same decision when they reach the same reviewable object.
 
+> **Since v0.5.1 the current state is filed under two keys, and this paragraph is what a reader
+> would check that against.** Completion is still Task-level (`task_state.isCompleted`). `★` and the
+> configured actions are not: they live on the **Task–Asset pair** (`task_asset_state`, one row per
+> Asset, holding a single `selections` column since v0.5.4), so two files of one folder-as-Task can
+> carry different tags, and the badge row under an item's name is now the *file's* rather than the
+> item's.
+>
+> The decision was taken deliberately, and the argument for it is in
+> [v0.5.1](iterations/v0.5.1.md#the-record-still-belongs-to-the-task): the record is the **Task's**
+> current state — it is *about* one of the Task's Assets and *owned* by the Task, and the Asset is
+> the key it is filed under rather than the object that holds it. The evidence offered for that
+> reading is structural: the table is `task_asset_state` and not `asset_state`; it is written through
+> the Task's own state row's transaction; and deleting the Asset takes the record with it, as a
+> Task's state cascades from its Task. The alternative — decision columns on `assets` — was rejected
+> because `runImport` is the sole writer of the asset rows, and judgment in those columns would make
+> the import run the co-owner of a column it must never write.
+>
+> It is recorded **here** and not only there because until now the argument existed solely inside an
+> iteration document, and the sentence above read on its own says the opposite of what the code does.
+> Nothing in the paragraph is repealed: what is now pair state is still the Task's current state, and
+> still belongs to no List membership. What a later reader should treat as open is not the decision
+> but its **shape** — whether *"current state belongs to the Task"* is the right sentence for a model
+> whose current state is one value at the Task and several at the pair, or whether the rule should
+> narrow to *completion* with marks named as pair state in a sentence of their own. The column that
+> merged `isFavorite` and `customActions` into the pair's one set is v0.5.4's schema step — see
+> [the plan](iterations/v0.5.4-plan.md) §1.
+
 TaskState may include current responses or action selections as the product grows, but those values must remain distinct from historical review records and from exporter-specific wire values.
 
 ### ReviewEvent and ReviewResult
@@ -269,6 +301,8 @@ Core templates describe reusable capability: asset viewing, metadata presentatio
 
 Template abstraction does not imply a component table, drag-and-drop builder, marketplace, plugin runtime, or universal schema language. Those are separate product decisions. A small number of code-defined, versioned built-ins is a valid first implementation.
 
+**v0.5.4 moves the Asset Control band past that first implementation**, and the move is recorded here because this paragraph is what a reader would check it against. A template in that band is now a **stored row** rather than a code-defined constant: it has a `templates` lineage with a name a person may change, immutable `template_versions` rows an edit appends to, a **scope** deciding which files it governs, and **buttons** rather than a fixed tag set. The built-in is still seeded from code and still carries its original id, so nothing above changes for the two kinds this section names. What the release does *not* take is any of the separations the paragraph above lists: there is no component table, no builder, no plugin runtime, and the button vocabulary is a small closed set of two types. One thing about the attachment is a rule rather than an implementation detail and is stated here for that reason: **a Todo holds one version of a lineage, not several.** The version records how the template stood when a run happened, which is what lets a completed Task go on meaning what it meant after an edit; it is not a choice being held, so *use the media control* is a thing a Todo has or does not have, and updating it is a move rather than an addition. See [v0.5.4](iterations/v0.5.4.md) and [ARCHITECTURE → Identity](#identity) for the id rule the minting had to obey.
+
 ## Review surface and navigation
 
 The review hierarchy is:
@@ -346,6 +380,36 @@ An exporter translates canonical review results into an external representation 
 Exporter configuration must not appear on Task, Asset, or Template merely because one current workflow uses it. Delivery attempts and delivery history may have their own persistence at the boundary.
 
 These boundaries do not require a generalized importer/exporter framework in the first iteration. Preserving a clean seam is sufficient until multiple implementations justify an abstraction.
+
+**v0.5.6 takes both sentences above at their word, and this paragraph is what a reader would check
+the result against.** Until then the *mechanism* was in the model — a POST URL column on every List,
+a `webhookEnabled` flag beside it, a `webhook_history` table — which is the thing *"None is the
+canonical internal model"* forbids. An **export** is now the act and an **export kind** is how it
+happens: `webhook` and `txt` are the two this build ships, named by a closed enum, so the set of
+kinds is the set of exporters and cannot be a table. A kind this build cannot read decodes to *export
+nothing* rather than to a guess, which is v0.5.3's failing-closed rule one level up.
+
+Where the choice is stored is where the prohibition above comes nearest, so it is stated rather than
+implied. **A Todo names one kind; a List names one choice and overrides the Todos it holds; and a
+List that has said nothing is not a List that exports nothing** — its round is split by the Todo each
+item came from, and each group leaves by its own Todo's kind. Nothing in `tasks`, `assets`,
+`templates` or `template_versions` holds any of it, so the sentence above stands. Two consequences
+are worth naming because neither is obvious from it:
+
+- **Export configuration now reaches a Todo**, which sits on the Task-creation side of the boundary.
+  This document had not said whether that is allowed. It is recorded here as permitted for the reason
+  the opening paragraph gives: an exporter is a boundary in its own right, and what a run of Tasks
+  will do with its results is a property of the run, not of any Task inside it.
+- **A List may hold Tasks from several Todos with different kinds, and export more than once per
+  round.** That does not touch [the one-Task-Review-Template rule](#list-and-listentry), which is
+  about the review surface and not about where results go; the architecture's "one List remains
+  homogeneous" is a statement about the review interaction and completion complexity that sentence
+  names, and this release adds neither.
+
+The List half is not new — [Legacy compatibility is not architecture](#legacy-compatibility-is-not-architecture)
+already allows a List to display and configure a delivery. Delivery history stays at the boundary, as
+the paragraph above permits: the table keeps its `webhook_history` name and gains a `kind`, and it now
+records every kind's attempts rather than one kind's. See [v0.5.6](iterations/v0.5.6.md).
 
 ## Source material, import, and review selection
 
