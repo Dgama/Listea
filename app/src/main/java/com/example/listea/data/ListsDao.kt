@@ -5,7 +5,6 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
-import com.example.listea.AssetControlConfig
 import com.example.listea.ContentDecision
 import com.example.listea.ContentPolicy
 import com.example.listea.ImporterKind
@@ -13,12 +12,12 @@ import com.example.listea.ImportPlan
 import com.example.listea.PlannedTask
 import com.example.listea.assetViewerAvailable
 import com.example.listea.decideContentDecision
-import com.example.listea.encodeAssetControls
 import com.example.listea.hasSourceChanges
 import com.example.listea.isAncestorOrSame
 import com.example.listea.normalizeKeepTree
 import com.example.listea.taskChanges
 import com.example.listea.domain.AssetKind
+import com.example.listea.domain.EXPORT_CHOICE_NONE
 import com.example.listea.domain.ReviewContext
 import com.example.listea.domain.ReviewEventId
 import com.example.listea.domain.ReviewEventKind
@@ -49,7 +48,8 @@ abstract class ListsDao {
                l.completedAt AS completedAt,
                COUNT(i.id) AS totalItems,
                COALESCE(SUM(ts.isCompleted), 0) AS completedItems,
-               l.webhookEnabled AS webhookEnabled,
+               l.webhookEnabled AS exportOnCompletion,
+               l.exportKind AS exportKind,
                l.lastDeliveryStatus AS lastDeliveryStatus,
                l.lastDeliveryCode AS lastDeliveryCode,
                l.lastDissolvedCount AS lastDissolvedCount,
@@ -114,8 +114,12 @@ abstract class ListsDao {
                i.sourceMissing AS sourceMissing,
                i.sourceSizeBytes AS sourceSizeBytes,
                i.sourceModifiedAt AS sourceModifiedAt,
-               COALESCE(MAX(tas.isFavorite), 0) AS isFavorite,
-               COALESCE(GROUP_CONCAT(tas.customActions), '') AS customActions
+               -- The two retired columns, selected because the entity still declares them and they
+               -- are still there. Both are dead: the pair table is where a mark lives, and nothing
+               -- has written either since v0.5.4 — see `ListItemEntity.customActions`.
+               i.isFavorite AS isFavorite,
+               i.customActions AS customActions,
+               COALESCE(GROUP_CONCAT(tas.selections), '') AS selections
         FROM list_items i
         JOIN task_state ts ON ts.taskId = i.taskId
         LEFT JOIN assets a ON a.taskId = i.taskId
@@ -196,6 +200,31 @@ abstract class ListsDao {
         """
     )
     abstract suspend fun getAssetControlsForList(listId: Long): List<TaskAssetControls>
+
+    /**
+     * The Todo each Task came from, and how that Todo exports. The lookup the export split is built
+     * on, and the only place `task_imports` is joined to `sources` for this purpose.
+     *
+     * **Addressed by Task id, and an absent row is an answer.** A Task with no `task_imports` row —
+     * one added by hand, or a folder round's file that no Todo owns — simply does not appear, and
+     * the caller reads its absence as *no source* rather than as an error. That is why this returns
+     * a list and not one row per id passed in: inventing a row for a Task that has none would turn
+     * *no Todo owns this* into *a Todo called null owns this*.
+     *
+     * `ORDER BY` is deliberately absent. The order payloads are delivered in comes from
+     * [planExports], which works off the round's own item order; a second ordering here could only
+     * disagree with it.
+     */
+    @Query(
+        """
+        SELECT ti.taskId AS taskId, s.id AS sourceId, s.displayName AS sourceName,
+               s.exportKind AS exportKind
+        FROM task_imports ti
+        JOIN sources s ON s.id = ti.sourceId
+        WHERE ti.taskId IN (:taskIds)
+        """
+    )
+    abstract suspend fun getExportSources(taskIds: List<String>): List<TaskExportSource>
 
     /**
      * The same for a named set of Tasks, which is what a folder round has instead of a list.
@@ -445,7 +474,8 @@ abstract class ListsDao {
                l.completedAt AS completedAt,
                COUNT(i.id) AS totalItems,
                COALESCE(SUM(ts.isCompleted), 0) AS completedItems,
-               l.webhookEnabled AS webhookEnabled,
+               l.webhookEnabled AS exportOnCompletion,
+               l.exportKind AS exportKind,
                l.lastDeliveryStatus AS lastDeliveryStatus,
                l.lastDeliveryCode AS lastDeliveryCode
         FROM lists l
@@ -495,8 +525,7 @@ abstract class ListsDao {
         relativePath: String,
         files: List<ScannedFile>,
         replacedListIds: List<Long>,
-        webhookEnabled: Boolean,
-        webhookUrl: String,
+        exportOnCompletion: Boolean,
         now: Long
     ): Long {
         replacedListIds.forEach { deleteList(it) }
@@ -512,10 +541,10 @@ abstract class ListsDao {
             ListEntity(
                 title = title,
                 createdAt = now,
-                // Copied from settings by the caller, once, at creation. The list owns it from
-                // here on and a later settings change never reaches back to it.
-                webhookEnabled = webhookEnabled,
-                webhookUrl = webhookUrl,
+                // Seeded from settings by the caller at creation, and owned by the List from here
+                // on. What is *no longer* copied is a URL: since v0.5.6 every webhook reads the
+                // settings default at the moment it exports, so changing it reaches every List.
+                exportOnCompletion = exportOnCompletion,
                 sourceRootUri = rootUri,
                 sourceRelativePath = relativePath
             )
@@ -544,16 +573,14 @@ abstract class ListsDao {
     open suspend fun createListFromTasks(
         title: String,
         taskIds: List<String>,
-        webhookEnabled: Boolean,
-        webhookUrl: String,
+        exportOnCompletion: Boolean,
         now: Long
     ): Long {
         val listId = insertList(
             ListEntity(
                 title = title,
                 createdAt = now,
-                webhookEnabled = webhookEnabled,
-                webhookUrl = webhookUrl
+                exportOnCompletion = exportOnCompletion
             )
         )
         insertItems(
@@ -683,8 +710,12 @@ abstract class ListsDao {
                i.sourceMissing AS sourceMissing,
                i.sourceSizeBytes AS sourceSizeBytes,
                i.sourceModifiedAt AS sourceModifiedAt,
-               COALESCE(MAX(tas.isFavorite), 0) AS isFavorite,
-               COALESCE(GROUP_CONCAT(tas.customActions), '') AS customActions
+               -- The two retired columns, selected because the entity still declares them and they
+               -- are still there. Both are dead: the pair table is where a mark lives, and nothing
+               -- has written either since v0.5.4 — see `ListItemEntity.customActions`.
+               i.isFavorite AS isFavorite,
+               i.customActions AS customActions,
+               COALESCE(GROUP_CONCAT(tas.selections), '') AS selections
         FROM list_items i
         JOIN task_state ts ON ts.taskId = i.taskId
         LEFT JOIN assets a ON a.taskId = i.taskId
@@ -1142,8 +1173,7 @@ abstract class ListsDao {
                ti.displayName AS taskName,
                COALESCE(ti.groupPath = a.relativePath, 0) AS isOwnTask,
                ts.isCompleted AS isCompleted,
-               COALESCE(tas.isFavorite, 0) AS isFavorite,
-               COALESCE(tas.customActions, '') AS customActions,
+               COALESCE(tas.selections, '') AS selections,
                ti.assetControls AS assetControls
         FROM assets a
         JOIN task_imports ti ON ti.taskId = a.taskId
@@ -1183,8 +1213,11 @@ abstract class ListsDao {
                frs.rootUri AS rootUri,
                frs.relativePath AS relativePath,
                COALESCE(MAX(ts.isCompleted), 0) AS isCompleted,
-               COALESCE(MAX(tas.isFavorite), 0) AS isFavorite,
-               COALESCE(MAX(tas.customActions), '') AS customActions,
+               -- The retired pair, folded for the group by like everything else here. Dead columns
+               -- the entity still declares: see `FileReviewStateEntity.customActions`.
+               COALESCE(MAX(frs.isFavorite), 0) AS isFavorite,
+               COALESCE(MAX(frs.customActions), '') AS customActions,
+               COALESCE(MAX(tas.selections), '') AS selections,
                COALESCE(MAX(a.sourceMissing), 0) AS sourceMissing,
                frs.updatedAt AS updatedAt
         FROM file_review_state frs
@@ -1217,8 +1250,11 @@ abstract class ListsDao {
                frs.rootUri AS rootUri,
                frs.relativePath AS relativePath,
                COALESCE(MAX(ts.isCompleted), 0) AS isCompleted,
-               COALESCE(MAX(tas.isFavorite), 0) AS isFavorite,
-               COALESCE(MAX(tas.customActions), '') AS customActions,
+               -- The retired pair, folded for the group by like everything else here. Dead columns
+               -- the entity still declares: see `FileReviewStateEntity.customActions`.
+               COALESCE(MAX(frs.isFavorite), 0) AS isFavorite,
+               COALESCE(MAX(frs.customActions), '') AS customActions,
+               COALESCE(MAX(tas.selections), '') AS selections,
                COALESCE(MAX(a.sourceMissing), 0) AS sourceMissing,
                frs.updatedAt AS updatedAt
         FROM file_review_state frs
@@ -1253,12 +1289,12 @@ abstract class ListsDao {
 
     @Query(
         """
-        SELECT id, event, listTitle, itemCount, at, outcome, detail
+        SELECT id, event, listTitle, itemCount, at, outcome, detail, kind
         FROM webhook_history
         ORDER BY at DESC, id DESC
         """
     )
-    abstract fun observeWebhookHistory(): Flow<List<WebhookRecordSummary>>
+    abstract fun observeWebhookHistory(): Flow<List<ExportRecordSummary>>
 
     /** Everything ever recorded, for the Settings line that says how big the history is. */
     @Query("SELECT COUNT(*) FROM webhook_history")
@@ -1271,14 +1307,14 @@ abstract class ListsDao {
      * the total is how much history there is, and this is how much of it is still owed to a
      * receiver. Only this one is worth a warning tint.
      */
-    @Query("SELECT COUNT(*) FROM webhook_history WHERE outcome != 'SENT'")
+    @Query("SELECT COUNT(*) FROM webhook_history WHERE outcome NOT IN ('SENT', 'WRITTEN')")
     abstract fun observePendingWebhookCount(): Flow<Int>
 
     @Insert
-    abstract suspend fun insertWebhookRecord(record: WebhookRecordEntity): Long
+    abstract suspend fun insertWebhookRecord(record: ExportRecordEntity): Long
 
     @Query("SELECT * FROM webhook_history WHERE id = :id")
-    abstract suspend fun getWebhookRecord(id: Long): WebhookRecordEntity?
+    abstract suspend fun getWebhookRecord(id: Long): ExportRecordEntity?
 
     /**
      * Moves a record on to its newest verdict, after a resend.
@@ -1298,11 +1334,13 @@ abstract class ListsDao {
     @Query("UPDATE lists SET reviewCurrentItemId = :itemId WHERE id = :id")
     abstract suspend fun setReviewPosition(id: Long, itemId: Long?)
 
+    /** The column keeps the old word — see [com.example.listea.data.ListEntity.exportOnCompletion]. */
     @Query("UPDATE lists SET webhookEnabled = :enabled WHERE id = :id")
-    abstract suspend fun setWebhookEnabled(id: Long, enabled: Boolean)
+    abstract suspend fun setExportOnCompletion(id: Long, enabled: Boolean)
 
-    @Query("UPDATE lists SET webhookUrl = :url WHERE id = :id")
-    abstract suspend fun setWebhookUrl(id: Long, url: String)
+    /** The List's own kind, or `inherit`/`none`. Encoded by `domain/Exports.kt`. */
+    @Query("UPDATE lists SET exportKind = :kind WHERE id = :id")
+    abstract suspend fun setListExportKind(id: Long, kind: String)
 
     @Query(
         """
@@ -1512,19 +1550,24 @@ abstract class ListsDao {
     @Query("SELECT * FROM task_asset_state WHERE assetId = :assetId")
     protected abstract suspend fun getAssetState(assetId: String): AssetStateEntity?
 
+    /**
+     * One pair's selection set, replaced whole.
+     *
+     * The two columns beside it are left exactly as the 23 → 24 step wrote them: dead, and the only
+     * copy of a mark that exists if [selections] is ever found to be wrong. Nothing writes them
+     * again — see [AssetStateEntity.selections].
+     */
     @Query(
         """
         UPDATE task_asset_state
-        SET isFavorite = :isFavorite,
-            customActions = :customActions,
+        SET selections = :selections,
             updatedAt = :updatedAt
         WHERE assetId = :assetId
         """
     )
     protected abstract suspend fun updateAssetState(
         assetId: String,
-        isFavorite: Boolean,
-        customActions: String,
+        selections: String,
         updatedAt: Long
     )
 
@@ -1633,8 +1676,7 @@ abstract class ListsDao {
         val next = change(existing.decisions)
         updateAssetState(
             assetId = assetId,
-            isFavorite = next.isFavorite,
-            customActions = encodeActionIds(next.customActions),
+            selections = encodeActionIds(next.selections),
             updatedAt = now
         )
         return next
@@ -1896,8 +1938,7 @@ abstract class ListsDao {
                s.rootUri AS rootUri, s.relativePath AS sourcePath, s.importerKind AS importerKind,
                COALESCE(ts.isCompleted, 0) AS isCompleted,
                a.relativePath AS assetPath,
-               COALESCE(tas.isFavorite, 0) AS isFavorite,
-               COALESCE(tas.customActions, '') AS customActions
+               COALESCE(tas.selections, '') AS selections
         FROM task_imports ti
         JOIN sources s ON s.id = ti.sourceId
         LEFT JOIN task_state ts ON ts.taskId = ti.taskId
@@ -1953,8 +1994,7 @@ abstract class ListsDao {
                                     DissolvedFileRecord(
                                         relativePath = path,
                                         decisions = AssetDecisions(
-                                            isFavorite = row.isFavorite,
-                                            customActions = decodeActionIds(row.customActions)
+                                            selections = decodeActionIds(row.selections)
                                         )
                                     )
                                 }
@@ -2386,7 +2426,8 @@ abstract class ListsDao {
         contentPolicy: ContentPolicy = ContentPolicy.Default,
         followUpstream: Boolean = false,
         now: Long,
-        assetControls: Map<AssetKind, AssetControlConfig> = emptyMap()
+        assetControls: String = "",
+        exportKind: String = EXPORT_CHOICE_NONE
     ): SourceEntity {
         val source = SourceEntity(
             id = UUID.randomUUID().toString(),
@@ -2399,7 +2440,8 @@ abstract class ListsDao {
             keepTree = normalizeKeepTree(importerKind, keepTree),
             contentPolicy = contentPolicy.key,
             followUpstream = followUpstream,
-            assetControls = encodeAssetControls(assetControls)
+            assetControls = assetControls,
+            exportKind = exportKind
         )
         insertSource(source)
         return source
@@ -2429,6 +2471,13 @@ abstract class ListsDao {
      * asked at the moment it acts, and the dialog that carries this call has no control for it —
      * [setFollowUpstream] on the Todo's own card is its only writer, and a run that quietly reset a
      * switch it was never shown would be the app answering a question nobody asked it.
+     *
+     * [assetControls] is the **encoded attachment list**, not a decoded value: the templates the
+     * dialog attached, in the order it attached them, written as the same string the resolver reads.
+     * It keeps the column's name and changes its payload, which is the shape decision 8 chose for
+     * this release — `sources.assetControls` was always "what this Todo is configured with", and it
+     * is a list of references now rather than a per-kind copy of what they said. Encoding is the
+     * caller's one call to [encodeTemplateAttachments], so this DAO has no opinion about the format.
      */
     open suspend fun configureSource(
         id: String,
@@ -2436,14 +2485,16 @@ abstract class ListsDao {
         importerKind: ImporterKind,
         keepTree: Boolean,
         contentPolicy: ContentPolicy = ContentPolicy.Default,
-        assetControls: Map<AssetKind, AssetControlConfig> = emptyMap()
+        assetControls: String = "",
+        exportKind: String = EXPORT_CHOICE_NONE
     ) = setSourceConfig(
         id,
         displayName,
         importerKind.key,
         normalizeKeepTree(importerKind, keepTree),
         contentPolicy.key,
-        encodeAssetControls(assetControls)
+        assetControls,
+        exportKind
     )
 
     /**
@@ -2518,7 +2569,7 @@ abstract class ListsDao {
         now: Long,
         recoverFrom: String? = null,
         contentPolicy: ContentPolicy? = null,
-        assetControls: Map<AssetKind, AssetControlConfig> = emptyMap()
+        assetControls: String = ""
     ): ImportResult = runImportInternal(
         sourceId,
         coverage,
@@ -2538,6 +2589,13 @@ abstract class ListsDao {
      * recovering share one transaction: a run that wrote Tasks and then failed to load the
      * decisions it was asked to load would be a run that half-did the thing it was asked to do, and
      * there is nothing the caller could do with that.
+     *
+     * [assetControls] is stamped onto every Task this run touches — the ones it creates, the ones it
+     * adopts and the ones it merely sees again — so that a Task's control is always a statement
+     * about one run rather than a mixture of when each Task last moved. It comes from the
+     * *argument*, never from `source.assetControls`: the row was written by an earlier run or by
+     * nobody, and a run that read it back would apply the dialog's answer one run late, which is the
+     * failure `contentPolicy`'s parameter exists to avoid and this one copies.
      */
     protected open suspend fun runImportInternal(
         sourceId: String,
@@ -2546,19 +2604,10 @@ abstract class ListsDao {
         now: Long,
         recoverFrom: String? = null,
         contentPolicy: ContentPolicy? = null,
-        assetControlsByKind: Map<AssetKind, AssetControlConfig> = emptyMap()
+        assetControls: String = ""
     ): ImportResult {
         val source = getSource(sourceId) ?: return ImportResult(outcome = ImportOutcome.FAILED)
         val importer = ImporterKind.fromKey(source.importerKind)
-
-        // Encoded once, here, and stamped onto every Task this run touches — the ones it creates,
-        // the ones it adopts and the ones it merely sees again — so that a Task's control is
-        // always a statement about one run rather than a mixture of when each Task last moved.
-        //
-        // From the *argument*, never from `source.assetControls`. The row was written by an earlier
-        // run or by nobody; a run that read it back would apply the dialog's answer one run late,
-        // which is the failure `contentPolicy`'s parameter exists to avoid and this one copies.
-        val assetControls = encodeAssetControls(assetControlsByKind)
 
         // A folder-as-Task Task is assembled from a whole subtree, so a half-scanned group is a
         // group whose Asset list is wrong. Refuse a scoped refresh rather than write one. FAILED
@@ -2844,7 +2893,7 @@ abstract class ListsDao {
     @Query(
         "UPDATE sources SET displayName = :displayName, importerKind = :importerKind, " +
             "keepTree = :keepTree, contentPolicy = :contentPolicy, " +
-            "assetControls = :assetControls WHERE id = :id"
+            "assetControls = :assetControls, exportKind = :exportKind WHERE id = :id"
     )
     protected abstract suspend fun setSourceConfig(
         id: String,
@@ -2852,7 +2901,8 @@ abstract class ListsDao {
         importerKind: String,
         keepTree: Boolean,
         contentPolicy: String,
-        assetControls: String
+        assetControls: String,
+        exportKind: String
     )
 
     /**

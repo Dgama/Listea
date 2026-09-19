@@ -14,6 +14,8 @@ import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.UnknownHostException
+import com.example.listea.domain.ExportChoice
+import com.example.listea.domain.ExportKind
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -23,7 +25,7 @@ import javax.net.ssl.SSLException
 const val EVENT_LIST_COMPLETED = "list.completed"
 
 /** Fired by the "Test webhook" button. Never changes completion state. */
-const val EVENT_WEBHOOK_TEST = "list.webhook.test"
+const val EVENT_EXPORT_TEST = "export.test"
 
 /**
  * Fired when a Quick Review reaches the end of its queue, if the user has switched Quick Review
@@ -52,7 +54,16 @@ private const val DIAGNOSTICS = true
 private const val SNIPPET_BYTES = 512
 // ---------------------------------------------------------------------------------------------
 
-enum class DeliveryStatus { SUCCESS, FAILED }
+/**
+ * How an attempt to leave the device ended, as a `lists` row records it.
+ *
+ * [NOT_SENT] is not a transport result and no POST can produce it: it is the answer *not now*,
+ * recorded so that a List can say the last time its export came up, nothing left. Which of the two
+ * *not now*s it was — the user's, from the dialog, or the app's, on behalf of a user who was busy
+ * with another List — is the history's business rather than the column's; both mean the same thing
+ * to the card that reads it and to the resend that can still send it.
+ */
+enum class DeliveryStatus { SUCCESS, FAILED, NOT_SENT }
 
 data class DeliveryResult(
     val status: DeliveryStatus,
@@ -68,6 +79,21 @@ data class DeliveryResult(
 enum class NoticeOutcome {
     SENT,
     FAILED,
+
+    /**
+     * A text export landed in the user's own storage.
+     *
+     * The second terminal outcome, and it exists because without one a txt export is
+     * **unfalsifiable**: the user cannot tell whether the file was written, and the *Last export*
+     * line on the List card would have nothing to say exactly when the effective kind is txt.
+     * Terminal in the same sense [SENT] is — `observePendingWebhookCount` asks *is this still
+     * unfinished*, and there are now two ways to be finished.
+     *
+     * Not a flavour of [SENT]: that one names an HTTP result the record carries a code for, and a
+     * file has no code. What it has is a name, which [WebhookNotice.location] carries.
+     */
+    WRITTEN,
+
     DISABLED,
 
     /**
@@ -85,7 +111,47 @@ enum class NoticeOutcome {
      * first, and this is the answer. The payload is kept exactly as a failure's is, so declining
      * costs nothing: the round is in the history and can be sent from there whenever.
      */
-    DECLINED
+    DECLINED,
+
+    /**
+     * The app answered *Not now* for the user, because they were somewhere else.
+     *
+     * A List completed while a round was open on another List, or on a folder: an event about one
+     * thing happening under a screen that is about another. Sending would put a payload on the wire
+     * that nobody asked for at a moment nobody chose; asking would put a dialog about one List over
+     * the review of a different one, which is what the user reported — a *Demo* completion asking
+     * for permission in the middle of reviewing *export test*.
+     *
+     * So the app makes the safe choice on the user's behalf, and it is the same choice the dialog
+     * offers: nothing is sent, the payload is built and kept, and it can be sent from the history
+     * whenever. The List records [DeliveryStatus.NOT_SENT], which is what *Last export* reads.
+     *
+     * Never shown. There is no notice for it because there is no moment at which showing one would
+     * be welcome — the whole point is that this List's business does not interrupt the other one's
+     * — and the record in the history is the whole of the report. Read from there, it names its own
+     * reason rather than borrowing [DECLINED]'s, which would tell the user they chose something
+     * they were never asked.
+     */
+    DEFERRED,
+
+    /**
+     * The round finished and **nothing was configured to carry it**: every Todo it covered is set
+     * to export nothing, so there was no mechanism to hand the items to and not even a payload to
+     * build.
+     *
+     * This is the case v0.5.6 shipped silently, and the silence was the defect. Quick Review's
+     * whole promise is that finishing a round *produces a result* — that is what "send when leaving
+     * a review" is for — so a round that ends with no file, no POST and no word to the user is
+     * indistinguishable from one that failed quietly, and the user has no way to learn which. The
+     * outcome is not a failure and must not be dressed as one: nothing was attempted and nothing
+     * is broken. It is the app saying what it did not do and why, which is the one thing it owed
+     * the user here.
+     *
+     * Nothing is recorded in the history. There is no payload whose kind means anything, and a row
+     * saying *a round happened, exported by nothing, to nowhere* would be a record of an attempt
+     * that was never made — the same argument [EMPTY] is not recorded under.
+     */
+    UNCONFIGURED
 }
 
 /**
@@ -100,6 +166,16 @@ enum class NoticeOutcome {
 data class WebhookNotice(
     val event: String,
     val listTitle: String,
+    /**
+     * The mechanism this round was going to leave by, so the sentences below can name the right
+     * one.
+     *
+     * Required rather than defaulted, because a notice that guessed *webhook* would tell a user
+     * whose text export failed that their webhook had — which is exactly what this release's
+     * device pass caught it doing. The mechanism is a fact about the round, known before any
+     * attempt is made, so a caller always has it to hand.
+     */
+    val kind: ExportKind,
     val host: String?,
     val itemCount: Int?,
     val outcome: NoticeOutcome,
@@ -108,24 +184,55 @@ data class WebhookNotice(
     /** Whether the app's default webhook was used rather than the list's own, so a switched-off
      * webhook can name the switch the user actually has to change. */
     val defaultWebhook: Boolean,
-    val at: Long
+    val at: Long,
+
+    /**
+     * Where a [NoticeOutcome.WRITTEN] export went — the file's name, which is the only thing that
+     * can tell two rounds' reports apart once they are both in the album.
+     *
+     * Null for every other outcome: a POST's destination is [host], and an attempt that got
+     * nowhere has nowhere to name. A nullable field rather than a widening of [host] to mean *the
+     * place it went, however it got there*, because the two are read in different sentences.
+     */
+    val location: String? = null
 ) {
-    val succeeded: Boolean get() = outcome == NoticeOutcome.SENT
+    val succeeded: Boolean
+        get() = outcome == NoticeOutcome.SENT || outcome == NoticeOutcome.WRITTEN
 
     /**
      * Whether anything left the device, or was going to. False means nothing was even tried, and
      * a second notice saying the same is worth collapsing rather than showing twice.
      */
     val attempted: Boolean
-        get() = outcome == NoticeOutcome.SENT || outcome == NoticeOutcome.FAILED
+        get() = outcome == NoticeOutcome.SENT ||
+            outcome == NoticeOutcome.WRITTEN ||
+            outcome == NoticeOutcome.FAILED
 
+    /**
+     * The one line at the top of the notice, naming both what happened and which mechanism it
+     * happened to.
+     *
+     * A failure is the case that made [kind] necessary: *Webhook not sent* over a text export that
+     * failed to be written is a sentence about a request the round was never going to make, and it
+     * sends the user to look at a URL that is not involved. Success and failure both name the
+     * mechanism; the two outcomes that have no mechanism to name — nothing to send, and nothing
+     * configured to send it — say so without one.
+     */
     val headline: String
         get() = when (outcome) {
             NoticeOutcome.SENT -> "Webhook sent"
-            NoticeOutcome.FAILED -> "Webhook not sent"
+            NoticeOutcome.WRITTEN -> "Txt written"
+            NoticeOutcome.FAILED ->
+                if (kind == ExportKind.TXT) "Txt not written" else "Webhook not sent"
+
             NoticeOutcome.DISABLED -> "Webhook is off"
             NoticeOutcome.EMPTY -> "Nothing to send"
             NoticeOutcome.DECLINED -> "Not sent"
+            // The same words as a decline, and deliberately: to the List and to the user reading
+            // the history, both say the one thing that matters about the record — this payload
+            // exists and did not go. Who made the choice is the line below.
+            NoticeOutcome.DEFERRED -> "Not sent"
+            NoticeOutcome.UNCONFIGURED -> "Nothing exported"
         }
 
     val eventLabel: String get() = webhookEventLabel(event)
@@ -134,14 +241,19 @@ data class WebhookNotice(
     val outcomeLabel: String
         get() = when (outcome) {
             NoticeOutcome.SENT -> "Success" + (httpCode?.let { " · HTTP $it" } ?: "")
+            NoticeOutcome.WRITTEN -> "Success" + (location?.let { " · $it" } ?: "")
             NoticeOutcome.FAILED -> "Failed · " + (httpCode?.let { "HTTP $it" } ?: error ?: "Failed")
-            NoticeOutcome.DISABLED -> "Nothing was sent · " + if (defaultWebhook) {
-                "the default webhook is switched off"
-            } else {
-                "this list's webhook is switched off"
-            }
+            // One switch, so one sentence. This used to name a List's own webhook when the round
+            // had come through one — a switch that no longer exists, described to a user who has
+            // no such switch to go and turn on. The only thing that can be off is the app default.
+            NoticeOutcome.DISABLED -> "Nothing was sent · the default webhook is switched off"
             NoticeOutcome.EMPTY -> "Nothing was sent · there were no items to send"
             NoticeOutcome.DECLINED -> "Nothing was sent · you chose not to send it"
+            // Not *you chose*: the user was in the middle of another review and was never asked.
+            // Saying it was their decision would be telling them they did something they did not.
+            NoticeOutcome.DEFERRED -> "Nothing was sent · you were in another review"
+            NoticeOutcome.UNCONFIGURED ->
+                "Nothing was sent · no Todo this round covers is set to export"
         }
 
     val timeLabel: String
@@ -184,8 +296,10 @@ data class WebhookProgress(
  * off the back of a swipe used to be the one thing in Listea that left the device without anyone
  * asking, which is a strange amount of trust to place in a gesture whose whole job is to be fast.
  *
- * The same fields as [WebhookProgress] and built from it, so the dialog that asks and the dialog
- * that reports name the same delivery in the same words.
+ * The same fields as [WebhookProgress], so the dialog that asks and the dialog that reports cannot
+ * disagree about the delivery they are describing. There are deliberately **not** a source URL or a
+ * per-group Todo among them: a round asks once for all of its groups, so a field naming one group's
+ * origin would be a sentence about one payload shown over another's.
  */
 data class WebhookConfirmation(
     val event: String,
@@ -196,16 +310,45 @@ data class WebhookConfirmation(
 ) {
     val eventLabel: String get() = webhookEventLabel(event)
 
-    val summaryLabel: String
+    /**
+     * What caused this export, as the line at the top of the dialog.
+     *
+     * [listTitle] alone was half a sentence. A dialog can be raised over *any* screen — a List's
+     * page, the review that just ended, the folder a Quick Review walked — and the device pass
+     * found the other half missing in exactly the case that had two Lists in it: a completion of
+     * one List asking for permission over the review of another, with a bare *Demo* at the top and
+     * nothing saying what Demo had to do with what the user was doing. The event is a fact the
+     * delivery already carries, so joining it to the subject costs nothing and every dialog gets it.
+     */
+    val triggerLabel: String get() = webhookTriggerLabel(event, listTitle)
+
+    /**
+     * The sizes and the destination, under the sentence that says what this is.
+     *
+     * Deliberately without the event: the line above has already named it, and a dialog that said
+     * *List completed* twice would read as two facts where there is one.
+     */
+    val factsLabel: String
         get() = buildList {
-            add(eventLabel)
             add(countOfItems(itemCount))
             host?.let { add(it) }
         }.joinToString(" - ")
 
-    /** Which webhook this would go to, since Quick Review's is not the list's own. */
+    /**
+     * Which webhook this would go to.
+     *
+     * **There is one answer since v0.5.6, and this used to give two.** A List could carry its own
+     * URL and a round could go to either, so the dialog had to say which; the List's URL is gone
+     * and every webhook is the app default, so the branch that said *this list's webhook* was
+     * naming something the user cannot configure and the release had just deleted. The device pass
+     * caught it saying exactly that over a round bound for the *default* URL.
+     *
+     * [defaultWebhook] survives as a fact — whether the round followed the List's own choice or a
+     * Todo's — but it no longer decides this sentence, because it no longer decides the
+     * destination.
+     */
     val destinationLabel: String
-        get() = if (defaultWebhook) "the default webhook" else "this list's webhook"
+        get() = "the default webhook"
 }
 
 /** "1 item" / "42 items", used wherever a payload is sized in front of the user. */
@@ -218,10 +361,33 @@ fun countOfItems(count: Int): String = "$count item" + if (count == 1) "" else "
  */
 fun webhookEventLabel(event: String): String = when (event) {
     EVENT_LIST_COMPLETED -> "List completed"
-    EVENT_WEBHOOK_TEST -> "Test webhook"
+    EVENT_EXPORT_TEST -> "Test export"
     EVENT_QUICK_REVIEW_COMPLETED -> "Quick Review completed"
     EVENT_REVIEW_EXITED -> "Review left"
     else -> event
+}
+
+/**
+ * The same events as [webhookEventLabel], said as a sentence about the thing they happened to.
+ *
+ * A second vocabulary, and it is worth the cost for one reason: a label is a *category*, read
+ * beside a name — *Demo · List completed* — while this is read as the reason a dialog is on screen,
+ * and the reader of that dialog is standing somewhere else entirely. It says what happened, to
+ * what, in the words a person would use, so a delivery that reached them mid-round explains itself
+ * instead of naming a List they were not looking at.
+ *
+ * Every sentence is true both of the moment a round is reported from and of the moment it ends:
+ * *Review left* covers a queue finished on screen and one backed out of, and this must not claim
+ * which — a sentence that guessed *you left* would be wrong at the completion screen the dialog is
+ * most often raised over. [subject] is a List's title or, for a folder round, the name of the
+ * folder, which is the subject that round has.
+ */
+fun webhookTriggerLabel(event: String, subject: String): String = when (event) {
+    EVENT_LIST_COMPLETED -> "The List $subject just completed"
+    EVENT_REVIEW_EXITED -> "The review of $subject ended"
+    EVENT_QUICK_REVIEW_COMPLETED -> "The Quick Review of $subject finished"
+    EVENT_EXPORT_TEST -> "The Test export button in Settings"
+    else -> webhookEventLabel(event) + ": " + subject
 }
 
 /**
@@ -277,7 +443,6 @@ fun buildWebhookPayload(
     event: String,
     list: ListEntity,
     items: List<ListItemEntity>,
-    settings: AppSettings,
     /**
      * What each item's Task was imported under, by Task id, as `task_imports.assetControls` holds
      * it.
@@ -285,30 +450,66 @@ fun buildWebhookPayload(
      * A lookup passed in rather than a field on [ListItemEntity], because the record belongs to the
      * Task and neither row this builder is handed carries it: a list round's rows come from a
      * membership query that does not join `task_imports`, and a folder round's are synthetic.
-     * Absent, it resolves to this app's current default — which is the behaviour-preserving reading
-     * and is what every caller that predates v0.5.0 means.
+     * Absent, it resolves to no templates at all, so an action falls back to its stored id — the
+     * behaviour-preserving reading for a caller that has no tables, and what every caller that
+     * predates v0.5.0 means.
      *
      * It is keyed by Task because that is what a control *is* keyed by, and it is read here rather
      * than resolved by the caller because the wire values a tag sends are answered by the same
      * configuration that decides which tags exist — one lookup, so the `actions` array cannot name
      * a tag the row's kind never offered.
      */
-    assetControls: Map<String, String> = emptyMap()
-): String {
-    val itemsJson = JSONArray()
-    items.forEach { itemsJson.put(itemJson(list, it, settings, assetControls[it.taskId].orEmpty())) }
-    return JSONObject()
-        .put("event", event)
-        .put(
-            "list",
-            JSONObject()
-                .put("id", list.id)
-                .put("title", list.title)
-                .put("completedAt", list.completedAt ?: JSONObject.NULL)
-        )
-        .put("items", itemsJson)
-        .toString()
-}
+    assetControls: Map<String, String> = emptyMap(),
+    /**
+     * The templates those attachment strings resolve against.
+     *
+     * Passed alongside them because an attachment is a *reference* since v0.5.4 and names a template
+     * rather than spelling out its buttons: on its own the column says which version governs a Task,
+     * and only the tables can say what that version offers. [TemplateResolver.Empty] is the honest
+     * answer for a caller with no tables to hand — every action then falls back to its stored id,
+     * which is exactly what a build that cannot read the template would be able to say.
+     */
+    resolver: TemplateResolver = TemplateResolver.Empty
+): String = buildWebhookPayload(
+    ExportPayload(
+        event = event,
+        listId = list.id,
+        listTitle = list.title,
+        completedAt = list.completedAt,
+        sourceId = null,
+        sourceTitle = null,
+        // The body carries no timestamp, and this entry point exists for callers that have no round
+        // to describe — see the payload-based builder below. It returns a body, so it can never
+        // reach a renderer whose output would show a time.
+        at = 0L,
+        items = items.map { exportItemView(list, it, assetControls[it.taskId].orEmpty(), resolver) }
+    )
+)
+
+/**
+ * The same body, from a payload the export model has already assembled.
+ *
+ * Since v0.5.6 the dispatcher builds an [ExportPayload] once per group and hands it to whichever
+ * mechanism the group's Todo named. This overload is what makes the POST and the text file two
+ * renderings of one payload rather than two descriptions of a similar round: the item facts are
+ * assembled by [exportItemView] and never here.
+ *
+ * **The shape is unchanged and deliberately so.** Every field below was on the wire before this
+ * release, at this nesting, under these names — `WebhookBodyTest` and `WebhookPayloadTest` pin it,
+ * and they are untouched. The export model changed how many requests a round makes and what each
+ * one holds; it changed nothing about what a request looks like.
+ */
+fun buildWebhookPayload(payload: ExportPayload): String = JSONObject()
+    .put("event", payload.event)
+    .put(
+        "list",
+        JSONObject()
+            .put("id", payload.listId)
+            .put("title", payload.listTitle)
+            .put("completedAt", payload.completedAt ?: JSONObject.NULL)
+    )
+    .put("items", JSONArray().apply { payload.items.forEach { put(itemJson(it)) } })
+    .toString()
 
 /**
  * One item as the receiver sees it. Completion and actions are separate on purpose: `isCompleted`
@@ -327,24 +528,21 @@ fun buildWebhookPayload(
  * **One entry per Task, resolved over every kind the Task is configured for** — the union, exactly
  * as the badge row resolves it, and for the same reason: a payload is about a Task and names no
  * file, so an `actions` array built from one kind would silently omit a tag the user can see
- * selected in the app. [AppSettings.controlForTask] is the resolver; [AppSettings.controlFor] is the
- * per-file one the chip row uses.
+ * selected in the app. [TemplateResolver.controlForTask] is the resolver; [TemplateResolver.controlFor]
+ * is the per-file one the chip row uses.
+ *
+ * Since v0.5.6 the facts come from [exportItemView] rather than being assembled here, so that this
+ * body and the text file cannot describe one round two ways. What this function decides is only how
+ * those facts are spelled.
  */
-private fun itemJson(
-    list: ListEntity,
-    item: ListItemEntity,
-    settings: AppSettings,
-    assetControls: String
-): JSONObject {
+private fun itemJson(item: ExportItemView): JSONObject {
     val actions = JSONArray()
-    itemActionNames(item.decisions.assetDecisions, settings.controlForTask(assetControls)).forEach {
-        actions.put(it)
-    }
+    item.actions.forEach { actions.put(it) }
     return JSONObject()
         .put("id", item.publicId)
         .put("title", item.title)
         .put("isCompleted", item.isCompleted)
-        .put("relativePath", webhookRelativePath(list, item) ?: JSONObject.NULL)
+        .put("relativePath", item.relativePath ?: JSONObject.NULL)
         .put("actions", actions)
 }
 
@@ -499,37 +697,65 @@ internal fun webhookErrorLabel(e: Throwable, target: URL?): String {
 }
 
 /**
- * Compact webhook state for a browse row, e.g. "Webhook · On · Failed · HTTP 500".
+ * Compact export state for a browse row, e.g. "Webhook · On · Failed · HTTP 500".
  * Deliberately omits the URL, timestamp and error text so folder cards and list rows stay
- * glanceable; the List detail screen shows the fuller [deliveryLabel] instead.
+ * glanceable; the List detail screen shows the fuller [exportLabel] instead.
  *
- * Two independent facts, and both are always reported: whether the webhook will fire from here
- * on, and what happened the last time it did. Switching a webhook off says nothing about what it
- * already sent, so a list that delivered and was then switched off reads "Off · Success" rather
- * than losing its history to a toggle. A delivery always records its timestamp and status
- * together, so a null [lastDeliveryStatus] means nothing has ever been sent.
+ * **The kind is named**, because a List may export by either mechanism and a badge that said only
+ * "Export" would leave the reader to go and find out which. [ExportChoice.Inherit] is the one
+ * answer with no single kind to name — it exports by whatever each of its Todos said — so it is
+ * called *Automatic* rather than named after one of the two, which would be a lie about the other.
+ *
+ * Two independent facts, and both are always reported: whether the export will fire from here on,
+ * and what happened the last time it did. Switching an export off says nothing about what it
+ * already delivered, so a List that exported and was then switched off reads "Off · Success"
+ * rather than losing its history to a toggle. An attempt always records its timestamp and status
+ * together, so a null [lastDeliveryStatus] means nothing has ever left.
  */
-fun webhookStatusLabel(
+fun exportStatusLabel(
+    choice: ExportChoice,
     enabled: Boolean,
     lastDeliveryStatus: String?,
     lastDeliveryCode: Int?
 ): String {
     val delivery = when (lastDeliveryStatus) {
-        null -> "Never sent"
-        DeliveryStatus.SUCCESS.name -> "Success"
+        null -> "Never exported"
+        DeliveryStatus.SUCCESS.name -> if (choice == ExportChoice.By(ExportKind.TXT)) {
+            "Written"
+        } else {
+            "Success"
+        }
+        // A round that was kept rather than sent. Distinct from *Failed*, because nothing went
+        // wrong: there is a payload, it did not leave, and it can still be sent from the history.
+        DeliveryStatus.NOT_SENT.name -> "Not sent"
         else -> "Failed" + (lastDeliveryCode?.let { " · HTTP $it" } ?: "")
     }
-    return "Webhook · " + (if (enabled) "On" else "Off") + " · " + delivery
+    val name = when (choice) {
+        ExportChoice.Inherit -> "Automatic"
+        ExportChoice.Nothing -> "Export off"
+        is ExportChoice.By -> choice.kind.label
+    }
+    return name + " · " + (if (enabled) "On" else "Off") + " · " + delivery
 }
 
-/** "Last delivery: Success / 18:42", or a short failure reason. */
-fun deliveryLabel(list: ListEntity): String {
-    val at = list.lastDeliveryAt ?: return "Last delivery: never sent"
+/**
+ * "Last export: Success / 18:42", "Last export: Not sent / 18:42", or a short failure reason.
+ *
+ * Three answers and not two, because *nothing left* has two causes that must not be confused: a
+ * round that was attempted and failed, which is a problem to go and fix, and a round that was kept
+ * unsent — declined in the dialog, or set aside because the user was in another review — which is a
+ * payload sitting in the history waiting for someone. Saying *Failed* over the second would send the
+ * user looking for a broken URL that is not broken.
+ */
+fun exportLabel(list: ListEntity): String {
+    val at = list.lastDeliveryAt ?: return "Last export: never exported"
     val time = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(at))
-    return if (list.lastDeliveryStatus == DeliveryStatus.SUCCESS.name) {
-        "Last delivery: Success · $time"
-    } else {
-        val reason = list.lastDeliveryCode?.let { "HTTP $it" } ?: list.lastDeliveryError ?: "Failed"
-        "Last delivery: Failed · $reason · $time"
+    return when (list.lastDeliveryStatus) {
+        DeliveryStatus.SUCCESS.name -> "Last export: Success · $time"
+        DeliveryStatus.NOT_SENT.name -> "Last export: Not sent · $time"
+        else -> {
+            val reason = list.lastDeliveryCode?.let { "HTTP $it" } ?: list.lastDeliveryError ?: "Failed"
+            "Last export: Failed · $reason · $time"
+        }
     }
 }

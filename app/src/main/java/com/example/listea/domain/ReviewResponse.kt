@@ -22,13 +22,22 @@ sealed interface ReviewResponse {
      * The rapid-media answer: dealt with or not, and what it was marked with.
      *
      * A snapshot, not a set of changes — it says what was true at submission, which is why it
-     * carries the favourite and action values even though toggling either one is not itself a
-     * submission. Their latest values ride along with the next judgment about the Task.
+     * carries the mark set even though toggling a button is not itself a submission. Its latest
+     * value rides along with the next judgment about the Task.
+     *
+     * **One set of button ids, and no favourite flag beside it**, which is the change v0.5.4 makes.
+     * `favorite` and `customActions` were two fields describing one thing — `★` is the button with
+     * the id `favorite`, and the two could disagree about whether it was on. A snapshot that can
+     * contradict itself about one button is a snapshot whose readers have to pick a field to
+     * believe, which is exactly what a record of what somebody decided must not be.
+     *
+     * The reset of [com.example.listea.data.AssetDecisions] and [ReviewDecisions] reaches here
+     * because it is the same fact at a third layer: the row says what is marked now, this says what
+     * was marked when somebody said so, and both are a set of ids.
      */
     data class MediaReview(
         val completed: Boolean,
-        val favorite: Boolean,
-        val customActions: Set<String>
+        val selections: Set<String>
     ) : ReviewResponse
 }
 
@@ -39,11 +48,17 @@ sealed interface ReviewResponse {
  * would call identical must not be distinguishable by a diff, or every reader of this column ends
  * up normalising before it can compare, and a test that pins the bytes is worthless.
  *
- * Action ids are sorted, and blanks are dropped going in, for the same reasons
+ * Button ids are sorted, and blanks are dropped going in, for the same reasons
  * [com.example.listea.data.encodeActionIds] does it on the item rows: a set that varies with the
  * order somebody tapped things
  * looks changed when nothing has. Sorting by plain string order is enough — the ids are generated,
  * not typed, so nothing here depends on a locale's idea of alphabetical.
+ *
+ * **The field names changed in v0.5.4 and no migration was written for them.** This column holds
+ * `completed=…;selections=…` now, and older rows hold `completed=…;favorite=…;actions=…`. Nothing
+ * reads either back — see the paragraph below on why there is no decoder — so the two shapes never
+ * meet: a reader that arrives would have to tell them apart by which keys are present, and until
+ * one does, saying so here is the whole of the compatibility story.
  *
  * Hand-written rather than JSON, for two reasons that both matter. `org.json` is an Android class
  * and this package does not depend on Android; and the wire format's own encoder escapes a solidus
@@ -59,18 +74,17 @@ sealed interface ReviewResponse {
 fun ReviewResponse.encode(): String = when (this) {
     is ReviewResponse.MediaReview -> listOf(
         "completed=$completed",
-        "favorite=$favorite",
-        "actions=${customActions.filter { it.isNotBlank() }.sorted().joinToString(",")}"
+        "selections=${selections.filter { it.isNotBlank() }.sorted().joinToString(",")}"
     ).joinToString(";")
 }
 
 /**
  * The one thing a committed response moves in [TaskState]: whether the Task is complete.
  *
- * The rest of a response is a snapshot — [ReviewResponse.MediaReview.favorite] and its
- * [ReviewResponse.MediaReview.customActions] record what the Task was marked with at the moment
- * somebody judged it, and toggling either of those is not itself a submission (§5). Writing them
- * back from a response would quietly turn a record of a judgment into a second way to make one.
+ * The rest of a response is a snapshot — [ReviewResponse.MediaReview.selections] records what the
+ * Task was marked with at the moment somebody judged it, and toggling a button is not itself a
+ * submission (§5). Writing it back from a response would quietly turn a record of a judgment into a
+ * second way to make one.
  *
  * Spelled as an exhaustive `when` rather than read off a member, for the reason
  * [TaskAction.isSubmission] is: a response type that arrives without being classified would append

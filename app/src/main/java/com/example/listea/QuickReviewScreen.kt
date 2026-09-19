@@ -12,6 +12,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -239,6 +240,21 @@ private fun QuickReviewQueue(
     // the unchecked-only setting removes. The very same call a List's Review makes: the two modes
     // differ in where the queue came from, not in what a filter and a sort do to one.
     val queue = rememberReviewRound(files, sessionKey, arrangement, uncheckedOnly, now)
+
+    // A round with no List is still a round: this is what lets a List that completes while the
+    // folder is being walked be kept quietly rather than asked about, exactly as one completing
+    // under another List's review is. Keyed on the session, so re-entering the same folder is one
+    // round rather than two.
+    //
+    // Both ends are here, and deliberately *not* around the leave gesture: a round ends either by
+    // running out of queue or by being left, only the second of which calls
+    // `onFolderReviewExited`, and a start with no matching end would leave the app treating every
+    // later completion as somebody else's to answer for. The screen is the round, so the
+    // composition's own lifetime is what says when it is over. See `onFolderReviewEnded`.
+    DisposableEffect(sessionKey) {
+        viewModel.onFolderReviewStarted()
+        onDispose { viewModel.onFolderReviewEnded() }
+    }
 
     // Set when finishing the queue delivers, so leaving afterwards does not deliver a second time.
     val delivered = rememberSessionDelivered(sessionKey)

@@ -36,6 +36,21 @@ data class TaskAssetControls(
 )
 
 /**
+ * The Todo one Task came from, and how that Todo exports.
+ *
+ * `exportKind` is the raw stored word and not a decoded choice: this is the `data` package and
+ * `domain/Exports.kt` is where a word becomes a meaning, so the caller decodes. A `data` type that
+ * had already decided what an unrecognised word means would be the failing-closed rule living in
+ * two places, and this codebase has exactly one of those on purpose.
+ */
+data class TaskExportSource(
+    val taskId: String,
+    val sourceId: String,
+    val sourceName: String,
+    val exportKind: String
+)
+
+/**
  * One Task in the catalog: what it is, where it sits, and whether any of its content cannot render.
  *
  * It carries `isCompleted` and no other decision, since v0.5.1. The tags a Task's files were given

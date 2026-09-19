@@ -122,15 +122,15 @@ data class ReviewItemInfo(
  *
  * [decisions] is the **page's** pair record and not the Task's, which is the sheet telling the
  * truth about the file in front of the user: the actions it lists are the ones set on this file,
- * so a tag set on a video does not appear in a photograph's sheet. They are named through the
- * Task's control — [AppSettings.controlForTask] — so that an id set under a control the page's own
- * kind no longer defines still reads as the label the user knows rather than as a bare id. The
- * same pair of choices the badge row makes, for the same reasons.
+ * so a button set on a video does not appear in a photograph's sheet. They are *named* through the
+ * Task's control — [TemplateResolver.controlForTask] — so that an id set under a template the
+ * page's own kind no longer admits still reads as the label the user knows rather than as a bare
+ * id. The same pair of choices the badge row makes, for the same reasons.
  */
 fun reviewItemInfo(
     item: ReviewItem,
     decisions: AssetDecisions,
-    settings: AppSettings,
+    resolver: TemplateResolver,
     listTitle: String?
 ): ReviewItemInfo = ReviewItemInfo(
     title = item.title,
@@ -138,7 +138,7 @@ fun reviewItemInfo(
     sourceUri = item.sourceUri,
     sourceMissing = item.sourceMissing,
     isCompleted = item.isCompleted,
-    actionLabel = itemActionLabel(decisions, settings.controlForTask(item.assetControls)),
+    actionLabel = itemActionLabel(decisions, resolver.controlForTask(item.assetControls)),
     listTitle = listTitle
 )
 
@@ -162,6 +162,7 @@ fun ReviewScreen(
     val detailFlow = remember(listId) { viewModel.observeDetail(listId) }
     val detail by detailFlow.collectAsStateWithLifecycle(initialValue = null)
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val resolver by viewModel.templateResolver.collectAsStateWithLifecycle()
     val arrangements by viewModel.arrangements.collectAsStateWithLifecycle()
 
     // Read here rather than carried in from the detail page, and read from the same two sources
@@ -473,6 +474,10 @@ fun ReviewSession(
     onBack: () -> Unit
 ) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    // The two bands below resolve against this rather than against [settings], which is the whole of
+    // what v0.5.4 moved: a chip row is a template's buttons now, and there is no app-wide tag list
+    // left to fall back to.
+    val resolver by viewModel.templateResolver.collectAsStateWithLifecycle()
     var currentTaskId by rememberSaveable(sessionKey) { mutableStateOf<String?>(null) }
     // Which file of the Task is on screen. Keyed on the Task rather than reset by an effect, so
     // arriving at another one shows its *first* file on the very first frame instead of flashing
@@ -593,8 +598,10 @@ fun ReviewSession(
     // `reviewBlockFor` already hands `assetViewerAvailable` for the same file.
     val page = assets.getOrNull(currentAsset)
     val kind = assetKindOf(page?.name.orEmpty())
-    val control = settings.controlFor(item.assetControls, kind)
-    val taskControl = settings.controlForTask(item.assetControls)
+    // Null is a real answer here and is resolved to the empty row rather than to a default: nothing
+    // attached admits this file's kind, so nothing offers it a button. See [TemplateResolver].
+    val control = resolver.controlFor(item.assetControls, kind) ?: ResolvedAssetControl.Empty
+    val taskControl = resolver.controlForTask(item.assetControls)
     // The page's own record, and the whole of v0.5.1 on the surface. `assets` is empty only for a
     // Task with no Asset at all — a manual item — where there is no pair to have recorded anything
     // and the middle band is not drawn in any case.
@@ -710,7 +717,7 @@ fun ReviewSession(
 
     if (infoOpen) {
         ReviewItemInfoSheet(
-            info = reviewItemInfo(item, pageDecisions, settings, chrome.listTitle),
+            info = reviewItemInfo(item, pageDecisions, resolver, chrome.listTitle),
             // The file the sheet's rows and its two offers are about. Without it a Task standing
             // for several files has no single source to save or share and the offers disappear —
             // which is exactly what a folder-as-Task used to do.

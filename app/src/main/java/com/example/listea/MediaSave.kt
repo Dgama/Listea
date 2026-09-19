@@ -55,6 +55,34 @@ private const val AlbumPrimaryDirectory = "DCIM"
 /** DCIM/Listea, as MediaStore's RELATIVE_PATH wants it and as the legacy path spells it too. */
 const val ListeaAlbumRelativePath = "$AlbumPrimaryDirectory/$ListeaAlbumName"
 
+/**
+ * The primary directory a `txt` export is written under.
+ *
+ * A second constant rather than a reuse of [AlbumPrimaryDirectory], because the two answer to
+ * different rules and folding them together is what produced the bug [ListeaExportRelativePath]
+ * describes: the album's directory is chosen for what a gallery will show, and this one is
+ * constrained by what the platform will accept. Nothing about them is shared but the app's name.
+ */
+private const val ExportPrimaryDirectory = "Download"
+
+/**
+ * Download/Listea/txt — where a `txt` export is written.
+ *
+ * **Not under the album, and it cannot be.** A gallery album is made by `MediaStore.Images` and
+ * `MediaStore.Video`, which do accept `DCIM/`; a `text/plain` file has neither to go through and
+ * must be inserted into `MediaStore.Files`, which since Android 11 accepts a non-media row under
+ * two primary directories and no others — `Download` and `Documents`. A `DCIM/Listea/txt/` insert
+ * fails on the device with *"Primary directory DCIM not allowed … allowed directories are
+ * [Download, Documents]"*, whatever permission the app holds. It was written that way first and
+ * the release's device pass is what found it.
+ *
+ * `Download` rather than `Documents` because of what the two already mean to a user: this is
+ * output an app produced for them, which is what a download is, and *Documents* is where their own
+ * files live. The folder keeps the app's own name underneath, so the whole path still reads as
+ * Listea's rather than as a stray file among yesterday's downloads.
+ */
+const val ListeaExportRelativePath = "$ExportPrimaryDirectory/$ListeaAlbumName/txt"
+
 /** The two things a gallery album can hold. Anything else is not offered a Save at all. */
 enum class SavedMediaKind { Image, Video }
 
@@ -228,6 +256,46 @@ private fun albumHolds(context: Context, collection: Uri, name: String): Boolean
     }.getOrDefault(false)
 
 /**
+ * Whether a file of this name is already at this path.
+ *
+ * The same query [albumHolds] makes, over the same collection, and used for the opposite decision:
+ * the album treats a name that is taken as *nothing to do*, and an export treats it as *try the next
+ * name*. So this answers a question and the caller decides — which is why it is not folded into
+ * [writeTextToPublicStorage].
+ *
+ * A miss answers false, so a provider that cannot be queried produces a write rather than a refusal.
+ * Writing into a name that turns out to be taken is the media store's own rename, which still leaves
+ * the user's file on disk; refusing to write would leave them with nothing.
+ */
+suspend fun exportFileExists(
+    context: Context,
+    relativePath: String,
+    name: String
+): Boolean = withContext(Dispatchers.IO) {
+    val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+    val directory = relativePath.trimEnd('/') + "/"
+
+    val throughMediaStore = runCatching {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return@runCatching false
+        context.contentResolver.query(
+            collection,
+            arrayOf(MediaStore.MediaColumns._ID),
+            "${MediaStore.MediaColumns.RELATIVE_PATH} = ? AND ${MediaStore.MediaColumns.DISPLAY_NAME} = ?",
+            arrayOf(directory, name),
+            null
+        )?.use { it.moveToFirst() } ?: false
+    }.getOrDefault(false)
+    if (throughMediaStore) return@withContext true
+
+    @Suppress("DEPRECATION")
+    val onDisk = File(
+        Environment.getExternalStoragePublicDirectory(ExportPrimaryDirectory),
+        relativePath.removePrefix("$ExportPrimaryDirectory/")
+    )
+    File(onDisk, name).exists()
+}
+
+/**
  * Android 9 and below: there is no media store to insert into, so the directory is created by
  * hand and the scanner is told about the file afterwards.
  *
@@ -263,4 +331,108 @@ private fun saveThroughLegacyFile(
 
     MediaScannerConnection.scanFile(context, arrayOf(target.absolutePath), null, null)
     return SaveToAlbumResult.Saved(name)
+}
+
+/**
+ * Writes [text] to `<relativePath>/<name>` in shared storage. Returns **null on success** and a
+ * sentence saying what went wrong otherwise.
+ *
+ * A plain `String?` rather than a result type, because there is exactly one way for this to fail —
+ * the file did not get written — and the caller has nowhere to branch on it. [SaveToAlbumResult]
+ * would be the wrong shape: it carries [SaveToAlbumResult.Unsupported] and
+ * [SaveToAlbumResult.PermissionDenied], which are answers about *media*, and a caller that had to
+ * name the wrong problem would eventually handle it wrongly.
+ *
+ * **A name that is taken is not an error here.** The album's own rule is that a second file with a
+ * name already present is [SaveToAlbumResult.AlreadySaved] and nothing is copied, which is right for
+ * a photograph the user can see they already have. A text export is not a thing the user holds — it
+ * is a report of one round — and two rounds a second apart can legitimately collide. So the caller
+ * picks a free name and this writes it; it never decides that there is nothing to do.
+ *
+ * The path goes through `MediaStore.Files` on Android 10 and up — the only collection that will
+ * take a non-media file at all — and through the legacy filesystem below that, and
+ * [ListeaExportRelativePath] explains what that collection will and will not accept. The two
+ * branches are kept in step by hand: the media store takes a `RELATIVE_PATH` with no leading
+ * slash, the file API takes the same path with the primary directory stripped, and both start
+ * from the one constant.
+ *
+ * **What protects this from the mistake it already made once** is `MediaSaveTest`: a plain JVM
+ * test asserting that the constant's first segment is one the platform allows. Robolectric cannot
+ * catch it — its `MediaStore` shadow does not enforce the primary-directory rule — so a test that
+ * reads the constant is the only thing standing between a careful edit and a release whose text
+ * export silently never lands.
+ */
+suspend fun writeTextToPublicStorage(
+    context: Context,
+    relativePath: String,
+    name: String,
+    text: String
+): String? = withContext(Dispatchers.IO) {
+    runCatching {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            writeTextThroughMediaStore(context, relativePath.trimEnd('/') + "/", name, text)
+        } else {
+            writeTextThroughLegacyFile(context, relativePath, name, text)
+        }
+    }.getOrElse { it.message ?: "the file did not get written" }
+}
+
+private fun writeTextThroughMediaStore(
+    context: Context,
+    relativePath: String,
+    name: String,
+    text: String
+): String? {
+    val resolver = context.contentResolver
+    val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+    val values = ContentValues().apply {
+        put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+        put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+        put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+        put(MediaStore.MediaColumns.IS_PENDING, 1)
+    }
+    val target = resolver.insert(collection, values)
+        ?: return "the export folder would not accept a new file"
+
+    try {
+        val stream = resolver.openOutputStream(target)
+            ?: return "the export folder could not be written to"
+        stream.use { it.write(text.toByteArray(Charsets.UTF_8)) }
+    } catch (error: Exception) {
+        // The pending row is the only trace a failed write leaves, and it is ours to clean up.
+        runCatching { resolver.delete(target, null, null) }
+        return error.message ?: "the file did not get written"
+    }
+
+    resolver.update(
+        target,
+        ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+        null,
+        null
+    )
+    return null
+}
+
+private fun writeTextThroughLegacyFile(
+    context: Context,
+    relativePath: String,
+    name: String,
+    text: String
+): String? {
+    @Suppress("DEPRECATION")
+    val directory = File(
+        Environment.getExternalStoragePublicDirectory(ExportPrimaryDirectory),
+        relativePath.removePrefix("$ExportPrimaryDirectory/")
+    )
+    if (!directory.exists() && !directory.mkdirs()) return "the export folder could not be created"
+
+    val target = File(directory, name)
+    return try {
+        target.writeText(text, Charsets.UTF_8)
+        MediaScannerConnection.scanFile(context, arrayOf(target.absolutePath), null, null)
+        null
+    } catch (error: Exception) {
+        runCatching { target.delete() }
+        error.message ?: "the file did not get written"
+    }
 }

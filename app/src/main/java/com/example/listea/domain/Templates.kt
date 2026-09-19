@@ -212,6 +212,65 @@ object Templates {
         )
     )
 
+    /** [MediaAssetControl]'s definition, typed — the shape every reader of it wants. */
+    private val MediaAssetControlDefinition =
+        MediaAssetControl.definition as TemplateDefinition.AssetControl
+
+    /**
+     * The id `★` has, everywhere it is written down.
+     *
+     * Fixed rather than minted, and equal to the wire name the favourite action already sends, so
+     * that a mark made before this release names the same button a mark made after it does. It is
+     * the one button id that is a promise rather than a value: a record holding `favorite` is `★`
+     * and nothing else may ever be.
+     */
+    const val FAVOURITE_BUTTON_ID = "favorite"
+
+    /**
+     * The two tag buttons a fresh install has always offered.
+     *
+     * Here rather than in Settings, because they are now *data* — the buttons the built-in template
+     * starts with — and Settings' remaining copies are derived from them. `custom1` and `custom2` are
+     * the two slots the app began with and are reserved by `newActionId`, so a mark made before any
+     * of this existed still names a button that exists.
+     */
+    val DefaultTagButtons: List<TemplateButton> = listOf(
+        TemplateButton("custom1", "C1", ButtonType.TAG, "cust1"),
+        TemplateButton("custom2", "C2", ButtonType.TAG, "cust2")
+    )
+
+    /**
+     * The built-in asset control as a *stored* template: what the 23 → 24 step writes into
+     * `templates` and `template_versions`, and what Settings lists as the one template every install
+     * starts with.
+     *
+     * This is [MediaAssetControl]'s runtime half, and the split is v0.5.0's. The definition above
+     * says what a control of this kind *can* hold, and a content-hash test pins it so it cannot be
+     * edited under a released version. This says what the built-in *does* hold — its scope and its
+     * buttons — and it is data: a row somebody may rename, re-scope and add buttons to, which is the
+     * whole of what this release adds. The two are held together by a test rather than by habit, so
+     * that the day the definition stops offering `★` the seed's buttons are a failing build instead
+     * of a template that quietly stopped drawing one.
+     */
+    val AssetControlSeed: StoredTemplateVersion = StoredTemplateVersion(
+        ref = MediaAssetControl.ref,
+        name = MediaAssetControl.displayName,
+        scope = TemplateScope.ofKinds(MediaAssetControlDefinition.compatibleKinds),
+        buttons = buildList {
+            if (MediaAssetControlDefinition.favourite) {
+                add(
+                    TemplateButton(
+                        id = FAVOURITE_BUTTON_ID,
+                        name = "★",
+                        type = ButtonType.BOOLEAN,
+                        recordValue = FAVOURITE_BUTTON_ID
+                    )
+                )
+            }
+            addAll(DefaultTagButtons)
+        }
+    )
+
     /** Every defined version, viewer first because the review template composes it. */
     val all: List<TemplateVersion> =
         listOf(MediaViewer, MediaRapidReview, MediaAssetControl)
@@ -226,6 +285,27 @@ object Templates {
      */
     fun byRef(ref: TemplateVersionRef): TemplateVersion? = all.firstOrNull { it.ref == ref }
 }
+
+/**
+ * One template version in the shape the store holds it: what it is called, what it governs, what it
+ * offers — with nothing about where it came from.
+ *
+ * A second type rather than a fourth field on [TemplateVersion], because a definition and a stored
+ * row are answers to different questions. A definition is code, hashed, and pointed at by review
+ * events forever; a stored version is a row somebody edits, which is why it carries a [scope] and a
+ * list of [buttons] rather than a [TemplateDefinition]. The two meet at a reference and at nothing
+ * else, and holding them apart is what keeps a user's edit from being mistaken for a change to what
+ * a completed review is on record as having said.
+ *
+ * [ref] carries the version number, so a seed and a stored row are the same shape and an edit
+ * appends one rather than mutating anything.
+ */
+data class StoredTemplateVersion(
+    val ref: TemplateVersionRef,
+    val name: String,
+    val scope: TemplateScope,
+    val buttons: List<TemplateButton>
+)
 
 /**
  * Lower-case hex SHA-256.

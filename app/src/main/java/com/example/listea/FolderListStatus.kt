@@ -1,5 +1,6 @@
 package com.example.listea
 
+import com.example.listea.domain.decodeExportChoice
 import com.example.listea.data.FileClaim
 import com.example.listea.data.FileCompletion
 import com.example.listea.data.FolderListScope
@@ -316,16 +317,22 @@ fun scopeProgressLabel(scope: FolderListScope): String =
     progressLabel(scope.completedItems, scope.totalItems, scope.isComplete)
 
 /**
- * Webhook state of a folder that owns its list outright, or null.
+ * Export state of a folder that owns its list outright, or null.
  *
- * Deliberately null for a Sublist: the webhook belongs to the ancestor list, and repeating it on
+ * Deliberately null for a Sublist: the export belongs to the ancestor list, and repeating it on
  * every folder underneath would suggest each one can deliver something of its own. One folder,
- * one webhook, shown where it is actually configured.
+ * one export, shown where it is actually configured.
+ *
+ * It was named for the webhook until v0.5.6, when a List's delivery stopped being one thing.
+ * The line it returns now reads whatever the List chose — a method's name, *Same as the Todos*,
+ * or *Export off* — so the old name would have been a promise about HTTP that the function no
+ * longer keeps.
  */
-fun statusWebhookLabel(status: FolderListStatus): String? {
+fun statusExportLabel(status: FolderListStatus): String? {
     val scope = (status as? FolderListStatus.Direct)?.scope ?: return null
-    return webhookStatusLabel(
-        enabled = scope.webhookEnabled,
+    return exportStatusLabel(
+        choice = decodeExportChoice(scope.exportKind, inheritable = true),
+        enabled = scope.exportOnCompletion,
         lastDeliveryStatus = scope.lastDeliveryStatus,
         lastDeliveryCode = scope.lastDeliveryCode
     )

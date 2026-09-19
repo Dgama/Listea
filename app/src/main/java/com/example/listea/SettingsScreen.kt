@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.Widgets
 import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.outlined.Bookmark
@@ -46,6 +47,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import com.example.listea.domain.ExportKind
 import androidx.compose.runtime.key
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
@@ -67,6 +69,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.listea.data.UpstreamEntity
 import com.example.listea.domain.AssetKind
+import com.example.listea.domain.ButtonType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.withContext
@@ -90,12 +93,20 @@ fun SettingsScreen(
     modifier: Modifier,
     viewModel: ListsViewModel = viewModel(),
     historyOpen: Boolean = false,
-    onHistoryOpenChange: (Boolean) -> Unit = {}
+    onHistoryOpenChange: (Boolean) -> Unit = {},
+    templatesOpen: Boolean = false,
+    onTemplatesOpenChange: (Boolean) -> Unit = {},
+    openTemplateId: String? = null,
+    onOpenTemplateChange: (String?) -> Unit = {},
+    exportsOpen: Boolean = false,
+    onExportsOpenChange: (Boolean) -> Unit = {},
+    openExportKind: ExportKind? = null,
+    onOpenExportKindChange: (ExportKind?) -> Unit = {}
 ) {
     // A page of its own rather than a section of this one: the payloads it holds are the app's,
     // not any one list's, and Settings is where the webhook they were headed for is configured.
     if (historyOpen) {
-        WebhookHistoryScreen(
+        ExportHistoryScreen(
             modifier = modifier,
             viewModel = viewModel,
             onBack = { onHistoryOpenChange(false) }
@@ -103,7 +114,59 @@ fun SettingsScreen(
         return
     }
 
+    // Two pages, and which one is up is `openTemplateId`: the list, and the template somebody
+    // tapped on it. Both are entered from the section below, and neither is a section of this
+    // screen for the reason the webhook history is not — a template is edited over a page, and
+    // editing it inside a scrolling Settings card is what v0.5.4 exists to stop doing.
+    if (templatesOpen) {
+        val open = openTemplateId
+        if (open == null) {
+            TemplateListScreen(
+                modifier = modifier,
+                viewModel = viewModel,
+                onBack = { onTemplatesOpenChange(false) },
+                onOpen = { onOpenTemplateChange(it) }
+            )
+        } else {
+            TemplateDetailScreen(
+                modifier = modifier,
+                viewModel = viewModel,
+                templateId = open,
+                onBack = { onOpenTemplateChange(null) }
+            )
+        }
+        return
+    }
+
+    // The export manager, and the same two-level shape for the same reason. A method's page holds
+    // its own history, and a history is a page — so configuring a method inside a dialog would be
+    // a page inside a dialog, which is what the user said not to build.
+    if (exportsOpen) {
+        val open = openExportKind
+        if (open == null) {
+            ExportListScreen(
+                modifier = modifier,
+                viewModel = viewModel,
+                onBack = { onExportsOpenChange(false) },
+                onOpenKind = { onOpenExportKindChange(it) },
+                onHistoryOpenChange = onHistoryOpenChange
+            )
+        } else {
+            ExportDetailScreen(
+                modifier = modifier,
+                viewModel = viewModel,
+                kind = open,
+                onBack = { onOpenExportKindChange(null) },
+                onHistoryOpenChange = onHistoryOpenChange
+            )
+        }
+        return
+    }
+
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    // The rows themselves rather than a count, because the count is a nullable read like the rows
+    // are: a number that appeared before the table was read would be a number this screen made up.
+    val templates by viewModel.templates.collectAsStateWithLifecycle()
     val historyCount by viewModel.webhookRecordCount.collectAsStateWithLifecycle()
     val pendingCount by viewModel.pendingWebhookCount.collectAsStateWithLifecycle()
     val deleteRequest by viewModel.deleteCheckedRequest.collectAsStateWithLifecycle()
@@ -296,18 +359,54 @@ fun SettingsScreen(
 
         }
 
-        // The template manager. One section per kind the asset-control definition accepts, generated
-        // from it rather than listed here, so what a user may configure and what the control actually
-        // governs cannot drift apart — the definition is the one answer to both.
-        SectionCard(title = "Asset controls") {
-            HelperText(
-                "An image and a video are controlled separately, so a tag set for one is not " +
-                    "offered on the other. These are the tags a new Todo starts with; a Todo " +
-                    "remembers what it was actually given, and Tasks already imported keep theirs."
+        // Templates, as the webhook card above leads to its history: one row here, a page behind it.
+        // A template is a thing with a name, a scope and a version — none of which fits on a card in
+        // a scrolling page — so what this screen says about them is how many there are and where
+        // they are edited.
+        SectionCard(title = "Templates") {
+            InfoActionsRow(
+                info = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
+                    ) {
+                        Icon(
+                            Icons.Filled.Widgets,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(ListeaDimens.IconSize)
+                        )
+                        Text("All templates", style = MaterialTheme.typography.bodyMedium)
+                    }
+                    // Nothing rather than "0 templates" while the table is being read: this app has
+                    // no spinner, and a count that has not been counted is not a count.
+                    templates?.let { StatusLine(countLabel(it.size, "template")) }
+                },
+                actions = {
+                    Button(
+                        onClick = { onTemplatesOpenChange(true) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Open", maxLines = 1)
+                    }
+                }
             )
-            configurableAssetKinds().forEach { kind ->
-                AssetControlSection(kind = kind, settings = settings, viewModel = viewModel)
-            }
+            HelperText(
+                "A template is what a Todo records with: which files it applies to, and the " +
+                    "buttons it offers. Every install starts with one built-in template, and the " +
+                    "upgrade that brings an existing Todo's own buttons across gives each of those " +
+                    "one of its own."
+            )
+            HelperText(
+                "Editing one appends a version. The version a Task was imported under is kept, so " +
+                    "renaming a button or changing what it sends never reaches back into what a " +
+                    "Task already says it was judged with."
+            )
+            HelperText(
+                "A template is also what a new Todo starts with, so there is one place to edit a " +
+                    "button rather than two. Which templates a Todo was given is shown on its card " +
+                    "under Upstreams."
+            )
         }
 
         SectionCard(title = "Media and review behaviour") {
@@ -390,65 +489,11 @@ fun SettingsScreen(
             )
         }
 
-        SectionCard(title = "Webhook") {
-            SwitchRow(
-                label = "Default enabled",
-                checked = settings.defaultWebhookEnabled,
-                onCheckedChange = { viewModel.setDefaultWebhookEnabled(it) }
-            )
-            SettingsTextField(
-                label = "Default URL",
-                value = settings.defaultWebhookUrl,
-                onCommit = { viewModel.setDefaultWebhookUrl(it) },
-                allowEmpty = true
-            )
-            HelperText(
-                "Copied into new Lists when they are created — existing Lists are never changed " +
-                    "— and used directly by anything that posts through the default webhook, " +
-                    "which the switch above turns on and off."
-            )
-
-            SwitchRow(
-                label = "Send from Quick Review",
-                icon = Icons.Filled.Visibility,
-                checked = settings.quickReviewWebhookEnabled,
-                onCheckedChange = { viewModel.setQuickReviewWebhookEnabled(it) }
-            )
-            HelperText(
-                "Finishing a Quick Review posts the folder's items through the default webhook " +
-                    "above — Quick Review has no webhook of its own — so it needs Default " +
-                    "enabled on and a URL filled in. Anything missing is reported rather than " +
-                    "passing silently."
-            )
-
-            SwitchRow(
-                label = "Send when leaving a review",
-                icon = Icons.AutoMirrored.Filled.ExitToApp,
-                checked = settings.webhookOnReviewExit,
-                onCheckedChange = { viewModel.setWebhookOnReviewExit(it) }
-            )
-            HelperText(
-                "Leaving Review or Quick Review sends what that round covered. Review uses the " +
-                    "List's own webhook; Quick Review uses the default webhook and also needs " +
-                    "the switch above. A queue you finished on screen does not send twice, and a " +
-                    "round with nothing in it is reported instead of sent."
-            )
-
-            SwitchRow(
-                label = "Send checked items only",
-                icon = Icons.Filled.FilterList,
-                checked = settings.webhookCompletedItemsOnly,
-                onCheckedChange = { viewModel.setWebhookCompletedItemsOnly(it) }
-            )
-            HelperText(
-                "Every payload carries only the items that are checked, the test webhook " +
-                    "included. With \"Review unchecked items only\" on, that is exactly the " +
-                    "decisions of the round you just did. Nothing checked means nothing is sent, " +
-                    "and Listea says so."
-            )
-
-            HorizontalDivider(Modifier.padding(top = ListeaDimens.CompactGap))
-
+        // One row, and a page behind it — the shape the Templates card above already has, and the
+        // shape the user asked for in as many words. It used to be a Webhook card holding the
+        // default URL, three switches that were never about HTTP, and a history button; every one
+        // of those lives in Exports now, at the level it actually belongs to.
+        SectionCard(title = "Exports") {
             InfoActionsRow(
                 info = {
                     Row(
@@ -456,33 +501,18 @@ fun SettingsScreen(
                         horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
                     ) {
                         Icon(
-                            Icons.Filled.History,
+                            Icons.AutoMirrored.Filled.ExitToApp,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(ListeaDimens.IconSize)
                         )
-                        Text("Webhook history", style = MaterialTheme.typography.bodyMedium)
+                        Text("All export methods", style = MaterialTheme.typography.bodyMedium)
                     }
-                    // Two numbers, because they answer different questions: how much has ever
-                    // been built, and how much of it a receiver has still not accepted. Only the
-                    // second is worth a warning, and it is mentioned only when it is not zero.
-                    StatusLine(
-                        when {
-                            historyCount == 0 -> "Nothing yet"
-                            pendingCount == 0 ->
-                                "$historyCount record" + (if (historyCount == 1) "" else "s") +
-                                    " · all sent"
-
-                            else ->
-                                "$historyCount record" + (if (historyCount == 1) "" else "s") +
-                                    " · $pendingCount not sent"
-                        },
-                        tone = if (pendingCount == 0) StatusTone.Neutral else StatusTone.Warning
-                    )
+                    StatusLine(exportMethodsSummary(historyCount, pendingCount))
                 },
                 actions = {
                     Button(
-                        onClick = { onHistoryOpenChange(true) },
+                        onClick = { onExportsOpenChange(true) },
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text("Open", maxLines = 1)
@@ -490,10 +520,13 @@ fun SettingsScreen(
                 }
             )
             HelperText(
-                "Every webhook Listea builds is kept here with its payload and what became of " +
-                    "it — sent, failed, or not sent at all — so a round of review is never lost " +
-                    "and you can always check whether one went out. Resending uses the default " +
-                    "URL above and needs nothing else switched on."
+                "Where a round's decisions go. Each Todo picks a method when it is created — " +
+                    "webhook, txt, or nothing — and a List can override that for everything it " +
+                    "holds, or leave each Todo to answer for its own Tasks."
+            )
+            HelperText(
+                "The history holds every export by every method, with what became of it, so a " +
+                    "round of review is never lost and can always be checked or sent again."
             )
         }
 
@@ -542,7 +575,7 @@ fun SettingsScreen(
             )
             HelperText(
                 "A webhook that did not go out deletes nothing. You are told the files are " +
-                    "still there, and the round stays in Webhook history above to be resent — " +
+                    "still there, and the round stays in Every export above to be resent — " +
                     "or you can clear the checked files here instead."
             )
 
@@ -897,91 +930,32 @@ private fun CheckedFileListing(pending: DeleteCheckedRequest.Confirm, rootLabel:
 }
 
 /**
- * One kind's tags: the heading, the rows, and the button that adds another.
- *
- * Stateless, and that is the point of it existing separately from its two callers, because they own
- * their tags in two different places. Settings edits what an install starts with and writes each
- * keystroke straight to the store; the Create Tasks dialog edits *one run's* answer, held in the
- * dialog's own draft and written only on Create. Neither difference reaches this function — it is
- * given a list and four callbacks — which is what keeps the tag's shape decided once rather than
- * once per surface.
- *
- * The rows are [CustomActionFields] unchanged: the same two fields, the same remove button, the
- * same layout. The only thing a kind adds to a screen is its heading and its Add button.
- *
- * **[keyPrefix] is not decoration.** Two kinds' sections draw rows with the same ids — both start
- * from `custom1` and `custom2` — so a key of the id alone would let the video section's second row
- * be reused as the image section's, and the text state inside [SettingsTextField] is seeded per
- * stored value. The key has to name the list the row belongs to, not just the row.
- */
-@Composable
-internal fun AssetControlTagEditor(
-    heading: String,
-    tags: List<CustomAction>,
-    keyPrefix: Any,
-    onRename: (id: String, displayName: String) -> Unit,
-    onRewire: (id: String, webhookValue: String) -> Unit,
-    onRemove: (id: String) -> Unit,
-    onAdd: () -> Unit
-) {
-    Spacer(Modifier.height(ListeaDimens.RowGap))
-    Text(heading, style = MaterialTheme.typography.titleSmall)
-
-    tags.forEachIndexed { index, action ->
-        key(keyPrefix, action.id) {
-            CustomActionFields(
-                title = "Custom action ${index + 1}",
-                action = action,
-                onDisplayNameCommit = { onRename(action.id, it) },
-                onWebhookValueCommit = { onRewire(action.id, it) },
-                onRemove = { onRemove(action.id) }
-            )
-        }
-    }
-
-    Spacer(Modifier.height(ListeaDimens.RowGap))
-    TextButton(onClick = onAdd) {
-        Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.size(ListeaDimens.RowGap))
-        Text("Add custom action")
-    }
-    HelperText(
-        "The display name is what you see on the chips. The webhook value is what future payloads " +
-            "send. Items already marked keep their selection, and removing an action only takes it " +
-            "off the bar — nothing marked with it is changed."
-    )
-}
-
-/** One kind's tags, as the Settings template manager draws them: the editor over stored state. */
-@Composable
-private fun AssetControlSection(
-    kind: AssetKind,
-    settings: AppSettings,
-    viewModel: ListsViewModel
-) {
-    AssetControlTagEditor(
-        heading = assetControlHeading(kind),
-        tags = settings.assetControlTags[kind].orEmpty(),
-        keyPrefix = kind,
-        onRename = { id, name -> viewModel.setCustomActionDisplayName(kind, id, name) },
-        onRewire = { id, value -> viewModel.setCustomActionWebhookValue(kind, id, value) },
-        onRemove = { id -> viewModel.removeCustomAction(kind, id) },
-        onAdd = { viewModel.addCustomAction(kind) }
-    )
-}
-
-/**
  * One custom action's two fields: what it is called, and what it sends.
  *
  * Side by side where both stay readable, stacked where they would not. The threshold is about the
  * fields rather than the device: a text field narrower than this stops showing enough of its own
  * value to edit it, and two cramped fields are worse than two full-width ones.
  *
- * `internal` rather than private because there are two callers since v0.5.0 and they are not both on
- * this screen: Settings edits the tags an install starts with, and the Create Tasks dialog edits the
- * tags one run is to be given. The second is a *draft* — its own local state, committed only on
- * Create — which is why this takes an action and three callbacks rather than reading or writing
- * anything, and why both callers can share it without either owning it.
+ * `internal` rather than private because it is drawn on a screen that is not this one — a template's
+ * page, over the buttons a version offers. Since v0.5.4 that page is the only caller: Settings used
+ * to draw this over the tags an install starts with, and the import dialog over the tags one run was
+ * to be given, and both of those surfaces are gone because a button now lives in the template it
+ * belongs to rather than in two places that could disagree.
+ *
+ * It takes an action and callbacks rather than reading or writing anything, which is what the
+ * template page needs from it: what the page holds is a *draft* — an edit nothing has written yet —
+ * so the fields must not be the thing that decides when it lands.
+ *
+ * **[buttonType] is what a template has and the old configured tag did not.** A [CustomAction] is
+ * the projection the two shapes shared — an id, a name, a wire value — and a button adds what it
+ * *records*, so the type row is drawn only when a caller says there is one. **Defaulting the
+ * callbacks and not the type is deliberate**: a caller that has a type to show always has something
+ * to call, and a caller that has none cannot accidentally be given the row.
+ *
+ * **[commitAsYouType] is the difference between an edit that is stored and one that is not.** A
+ * field whose value is already in the store must not write on every keystroke — that is why
+ * [SettingsTextField] waits for Done or for focus to leave — but a draft field has nothing to
+ * protect, and waiting would lose the last thing typed to a tap that does not move focus on touch.
  */
 @Composable
 internal fun CustomActionFields(
@@ -989,7 +963,10 @@ internal fun CustomActionFields(
     action: CustomAction,
     onDisplayNameCommit: (String) -> Unit,
     onWebhookValueCommit: (String) -> Unit,
-    onRemove: () -> Unit
+    onRemove: () -> Unit,
+    buttonType: ButtonType? = null,
+    onButtonTypeChange: (ButtonType) -> Unit = {},
+    commitAsYouType: Boolean = false
 ) {
     Spacer(Modifier.height(ListeaDimens.RowGap))
     Row(
@@ -1013,13 +990,15 @@ internal fun CustomActionFields(
                     label = "Display name",
                     value = action.displayName,
                     onCommit = onDisplayNameCommit,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.weight(1f),
+                    commitAsYouType = commitAsYouType
                 )
                 SettingsTextField(
                     label = "Webhook value",
                     value = action.webhookValue,
                     onCommit = onWebhookValueCommit,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.weight(1f),
+                    commitAsYouType = commitAsYouType
                 )
             }
         } else {
@@ -1027,24 +1006,72 @@ internal fun CustomActionFields(
                 SettingsTextField(
                     label = "Display name",
                     value = action.displayName,
-                    onCommit = onDisplayNameCommit
+                    onCommit = onDisplayNameCommit,
+                    commitAsYouType = commitAsYouType
                 )
                 SettingsTextField(
                     label = "Webhook value",
                     value = action.webhookValue,
-                    onCommit = onWebhookValueCommit
+                    onCommit = onWebhookValueCommit,
+                    commitAsYouType = commitAsYouType
                 )
             }
         }
     }
+
+    // Drawn only where something has a type to choose, which is a button on a stored template. A
+    // configured tag is not a button — it has no type and never had, because there is nothing in
+    // this app that reads one — so Settings' tag rows and the Create Tasks dialog's are unchanged
+    // by the row below appearing here.
+    buttonType?.let { selected ->
+        Spacer(Modifier.height(ListeaDimens.RowGap))
+        Text("Records", style = MaterialTheme.typography.bodySmall)
+        ActionGroup {
+            ButtonType.entries.forEach { type ->
+                FilterChip(
+                    selected = type == selected,
+                    onClick = { onButtonTypeChange(type) },
+                    label = { Text(buttonTypeLabel(type), maxLines = 1) }
+                )
+            }
+        }
+        HelperText(buttonTypeHelp(selected))
+    }
+}
+
+/**
+ * What a [ButtonType] is called where a user picks one.
+ *
+ * Both types store the same thing today — the button's id being in an Asset's selection set — so
+ * the names describe what they *mean* rather than what they hold, and are not allowed to pretend to
+ * a difference in storage. `boolean` is the `★` kind; a tag is a label whose meaning the export
+ * decides. The line under the chips says the rest, because a user choosing between two things that
+ * behave identically deserves to be told why the choice exists at all.
+ */
+private fun buttonTypeLabel(type: ButtonType): String = when (type) {
+    ButtonType.BOOLEAN -> "On / off"
+    ButtonType.TAG -> "Tag"
+}
+
+private fun buttonTypeHelp(type: ButtonType): String = when (type) {
+    ButtonType.BOOLEAN ->
+        "A button that means itself, like ★. What it records is that it was pressed."
+    ButtonType.TAG ->
+        "A button whose meaning is decided by whatever reads the export — the app records that " +
+            "it is on and sends the record value above, and does not decide what that means."
 }
 
 /** Two 150dp fields and the gap between them: below this a field stops showing enough to edit. */
 private val CustomActionSideBySideMinWidth = 308.dp
 
-/** The quiet line under a control that explains it, in one place so they all match. */
+/**
+ * The quiet line under a control that explains it, in one place so they all match.
+ *
+ * `internal` since v0.5.4, because the template pages explain as much as this screen does and a
+ * second copy of "bodySmall in onSurfaceVariant" is how two pages come to look like two apps.
+ */
 @Composable
-private fun HelperText(text: String, tone: StatusTone = StatusTone.Neutral) {
+internal fun HelperText(text: String, tone: StatusTone = StatusTone.Neutral) {
     Text(
         text,
         style = MaterialTheme.typography.bodySmall,
@@ -1056,8 +1083,16 @@ private fun HelperText(text: String, tone: StatusTone = StatusTone.Neutral) {
     )
 }
 
+/**
+ * One labelled switch.
+ *
+ * `internal` rather than private as of v0.5.6, because the three export-wide switches moved to a
+ * page of their own in `ExportsScreen.kt` and a switch is a switch wherever it is drawn. It is the
+ * same control and the same callbacks; only the file it is written in stopped being the only one
+ * that could call it.
+ */
 @Composable
-private fun SwitchRow(
+internal fun SwitchRow(
     label: String,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
@@ -1097,14 +1132,19 @@ private fun SwitchRow(
  * Blank input is refused rather than stored: an empty action name would leave an unlabelled chip
  * and an empty wire value would put `""` in a webhook array. The field says so and the stored
  * value is left alone. [allowEmpty] is for the default URL, where empty legitimately means "none".
+ *
+ * `internal` since v0.5.4: a template's page edits buttons with the same two fields, and a button's
+ * display name is a display name. [commitAsYouType] is for the one caller whose [value] is a draft
+ * rather than a stored row — see [CustomActionFields].
  */
 @Composable
-private fun SettingsTextField(
+internal fun SettingsTextField(
     label: String,
     value: String,
     onCommit: (String) -> Unit,
     modifier: Modifier = Modifier,
-    allowEmpty: Boolean = false
+    allowEmpty: Boolean = false,
+    commitAsYouType: Boolean = false
 ) {
     // Seeded per stored value so an external change lands, without fighting the keyboard.
     var text by remember(value) { mutableStateOf(value) }
@@ -1112,6 +1152,18 @@ private fun SettingsTextField(
 
     fun commit() {
         if (error == null && text.trim() != value) onCommit(text)
+    }
+
+    /**
+     * Every keystroke is the answer, for a field whose value nothing has stored yet.
+     *
+     * The same guard as [commit], reached from the other side: a caller that re-seeds this field
+     * from what it commits will hold `text` and `value` equal, so the commit is skipped rather than
+     * written back at the user. Text that differs only by whitespace is not committed either, which
+     * is what lets a trailing space be typed without the value moving under it.
+     */
+    fun commitNow(candidate: String) {
+        if (error == null && candidate.trim() != value) onCommit(candidate)
     }
 
     // Held through [rememberUpdatedState] so disposal writes what is in the field at that moment,
@@ -1122,7 +1174,10 @@ private fun SettingsTextField(
 
     OutlinedTextField(
         value = text,
-        onValueChange = { text = it },
+        onValueChange = {
+            text = it
+            if (commitAsYouType) commitNow(it)
+        },
         label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         singleLine = true,
         isError = error != null,

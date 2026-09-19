@@ -35,18 +35,28 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import com.example.listea.data.WebhookRecordSummary
+import com.example.listea.data.ExportRecordSummary
+import com.example.listea.domain.ExportKind
 import org.json.JSONObject
 
 /**
- * Every webhook body Listea has built, what became of it, and the two things you can do about one.
+ * Every export Listea has performed, what became of it, and the two things you can do about one.
  *
  * It began as a place for failures — a failed delivery used to leave nothing behind but a dialog
  * the user had already dismissed, and the round it described was gone. Keeping only failures then
  * turned out to be its own gap: "did that round go out?" is the question people actually have,
  * and a page that answers it only when the answer is no is a page you cannot trust. So a record
- * is written for every delivery that reached a verdict — sent, failed, refused by a switched-off
- * webhook, or declined when the app asked — and this page shows all of them.
+ * is written for every attempt that reached a verdict — sent, written, failed, refused by a
+ * switched-off webhook, or declined when the app asked — and this page shows all of them.
+ *
+ * **One history and not one per method**, which is the shape v0.5.6 chose (*两种都记*). A round
+ * over a List whose Todos disagree splits into several exports, and a reader asking *what did that
+ * review do?* wants one answer rather than a page per mechanism. The `kind` column says which
+ * method carried each row, so the two are still tellable apart at a glance.
+ *
+ * **A text export is recorded too**, and that is not bookkeeping for its own sake: without a row,
+ * a txt export is unfalsifiable — the user cannot tell whether the file was written, and a List's
+ * *Last export* line would have nothing to say exactly when the effective method is txt.
  *
  * Records are written by the delivery path, never here; this screen only replays them or throws
  * them away. Resending posts to the default URL in Settings, deliberately without asking whether
@@ -55,7 +65,7 @@ import org.json.JSONObject
  * the result land in the same top-level dialogs every other delivery uses.
  */
 @Composable
-fun WebhookHistoryScreen(
+fun ExportHistoryScreen(
     modifier: Modifier,
     viewModel: ListsViewModel,
     onBack: () -> Unit
@@ -69,8 +79,8 @@ fun WebhookHistoryScreen(
 
     ListeaNestedScaffold(
         modifier = modifier,
-        title = "Webhook history",
-        backLabel = "Settings",
+        title = "Export history",
+        backLabel = "Exports",
         onBack = onBack,
         trailing = {
             Text(
@@ -92,7 +102,7 @@ fun WebhookHistoryScreen(
                         textAlign = TextAlign.Center
                     )
                     Text(
-                        "Every webhook Listea builds is kept here with its payload — sent or " +
+                        "Every export Listea performs is kept here with its body — delivered or " +
                             "not — until you delete it.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -112,18 +122,26 @@ fun WebhookHistoryScreen(
             verticalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
         ) {
             items(records, key = { it.id }) { record ->
-                WebhookRecordCard(
+                ExportRecordCard(
                     record = record,
                     onOpen = { openRecordId = record.id },
                     onDelete = { viewModel.deleteWebhookRecord(record.id) },
-                    onResend = { viewModel.resendWebhookRecord(record.id) }
+                    onResend = { viewModel.resendWebhookRecord(record.id) },
+                    // *Resend* means *post this again*, which only says anything about a kind
+                    // whose delivery is a POST. A written text file has no receiver to send it
+                    // back to, and pressing the button would have pushed a tab-separated report
+                    // at whatever URL happened to be in Settings.
+                    //
+                    // An unreadable kind hides it too, and that is the failing-closed rule rather
+                    // than an oversight: a row nobody can name is not one to guess a mechanism for.
+                    canResend = ExportKind.fromKey(record.kind) == ExportKind.WEBHOOK
                 )
             }
         }
     }
 
     openRecordId?.let { id ->
-        WebhookPayloadDialog(
+        ExportBodyDialog(
             viewModel = viewModel,
             recordId = id,
             onDismiss = { openRecordId = null }
@@ -145,11 +163,13 @@ fun WebhookHistoryScreen(
  * button that disappears exactly when the payload is known-good.
  */
 @Composable
-private fun WebhookRecordCard(
-    record: WebhookRecordSummary,
+private fun ExportRecordCard(
+    record: ExportRecordSummary,
     onOpen: () -> Unit,
     onDelete: () -> Unit,
-    onResend: () -> Unit
+    onResend: () -> Unit,
+    /** Whether this record has a receiver to be sent to again; see the call site. */
+    canResend: Boolean
 ) {
     OutlinedCard(
         onClick = onOpen,
@@ -177,16 +197,20 @@ private fun WebhookRecordCard(
                     overflow = TextOverflow.Ellipsis
                 )
                 StatusLine(
-                    listOf(
+                    listOfNotNull(
+                        // Named first, because it is the one fact a reader cannot infer: a round
+                        // that split has a row per method, and two rows a second apart otherwise
+                        // look like the same thing said twice.
+                        ExportKind.fromKey(record.kind)?.label,
                         webhookEventLabel(record.event),
-                        record.listTitle,
+                        record.listTitle.ifEmpty { null },
                         countOfItems(record.itemCount)
                     ).joinToString(" · ")
                 )
                 StatusLine(record.detail, tone = recordTone(record.outcome))
             }
             TextButton(onClick = onDelete) { Text("Delete", maxLines = 1) }
-            TextButton(onClick = onResend) { Text("Resend", maxLines = 1) }
+            if (canResend) TextButton(onClick = onResend) { Text("Resend", maxLines = 1) }
         }
     }
 }
@@ -200,7 +224,10 @@ private fun WebhookRecordCard(
  * like a problem. An outcome from some future version reads neutrally rather than alarmingly.
  */
 private fun recordTone(outcome: String): StatusTone = when (outcome) {
-    NoticeOutcome.SENT.name -> StatusTone.Positive
+    // Written counts as success for the same reason SENT does: the round left the app. The two
+    // are separate outcomes because a POST has a code and a file has a name, not because one of
+    // them went less well than the other.
+    NoticeOutcome.SENT.name, NoticeOutcome.WRITTEN.name -> StatusTone.Positive
     NoticeOutcome.FAILED.name -> StatusTone.Warning
     else -> StatusTone.Neutral
 }
@@ -213,7 +240,7 @@ private fun recordTone(outcome: String): StatusTone = when (outcome) {
  * the stored text is what gets sent, so a body this cannot parse is shown raw rather than hidden.
  */
 @Composable
-private fun WebhookPayloadDialog(
+private fun ExportBodyDialog(
     viewModel: ListsViewModel,
     recordId: Long,
     onDismiss: () -> Unit
@@ -225,7 +252,7 @@ private fun WebhookPayloadDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Payload") },
+        title = { Text("Export body") },
         text = {
             Box(Modifier.heightIn(max = PayloadMaxHeight)) {
                 Text(

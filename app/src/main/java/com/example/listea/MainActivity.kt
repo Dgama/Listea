@@ -82,6 +82,12 @@ import com.example.listea.data.SharedFileState
 import com.example.listea.data.SourceSummary
 import com.example.listea.data.decodeActionIds
 import com.example.listea.domain.AssetKind
+import com.example.listea.domain.ExportChoice
+import com.example.listea.domain.ExportKind
+import com.example.listea.domain.decodeExportChoice
+import com.example.listea.domain.encodeExportChoice
+import com.example.listea.domain.StoredTemplateVersion
+import com.example.listea.domain.TemplateVersionRef
 import com.example.listea.domain.Templates
 import com.example.listea.ui.theme.ListeaTheme
 
@@ -125,6 +131,18 @@ fun ListeaApp(
     }
     var viewingFileUri by rememberSaveable { mutableStateOf<String?>(null) }
     var webhookHistoryOpen by rememberSaveable { mutableStateOf(false) }
+    // The template manager, which is two screens deep: the list, and the one template opened out of
+    // it. Both are held here for the same reason a list's id is — the shell has to know a nested
+    // destination is open, and a restored screen has to come back where it was. The id is a
+    // primitive and not the row, so the detail page re-reads what it edits rather than showing a
+    // snapshot a version written since would have contradicted.
+    var templatesOpen by rememberSaveable { mutableStateOf(false) }
+    var openTemplateId by rememberSaveable { mutableStateOf<String?>(null) }
+    // The export manager, held the same way and for the same reasons: two levels, the list of
+    // methods and the one opened out of it, and the opened one held as a primitive word rather
+    // than as the enum so a restored screen comes back where it was.
+    var exportsOpen by rememberSaveable { mutableStateOf(false) }
+    var openExportKey by rememberSaveable { mutableStateOf<String?>(null) }
 
     // The Source whose catalog is open. Held as saveable primitives rather than the SourceSummary
     // itself: the summary is a read of a row that an import can change, and a restored screen
@@ -244,7 +262,8 @@ fun ListeaApp(
     // hands Back to the browser, which is where "up one folder, then out" now lives.
     val nested = openListId != null || reviewListId != null ||
         quickReview != null || viewingFileUri != null || webhookHistoryOpen ||
-        catalogSourceId != null || previewTaskId != null || openUpstream != null
+        templatesOpen || catalogSourceId != null || previewTaskId != null ||
+        openUpstream != null
 
     // Every grant the app still holds a persisted permission for, which is what "available" means
     // for a card on either tab. Read from the platform rather than remembered in a store: the
@@ -458,7 +477,26 @@ fun ListeaApp(
                     modifier = contentModifier,
                     viewModel = listsViewModel,
                     historyOpen = webhookHistoryOpen,
-                    onHistoryOpenChange = { webhookHistoryOpen = it }
+                    onHistoryOpenChange = { webhookHistoryOpen = it },
+                    templatesOpen = templatesOpen,
+                    // Opening the manager always lands on the list, never on whatever template was
+                    // open when the user last left: the id is restored state, and a restored state
+                    // that skipped the list would put somebody two screens from the tab they tapped.
+                    onTemplatesOpenChange = { open ->
+                        templatesOpen = open
+                        if (open) openTemplateId = null
+                    },
+                    openTemplateId = openTemplateId,
+                    onOpenTemplateChange = { openTemplateId = it },
+                    exportsOpen = exportsOpen,
+                    // Same rule as the template manager: opening it lands on the list, never on
+                    // whatever method was open when the user last left.
+                    onExportsOpenChange = { open ->
+                        exportsOpen = open
+                        if (open) openExportKey = null
+                    },
+                    openExportKind = openExportKey?.let { ExportKind.fromKey(it) },
+                    onOpenExportKindChange = { openExportKey = it?.key }
                 )
             }
         }
@@ -533,17 +571,20 @@ private fun WebhookConfirmDialog(
         title = { Text("Send this webhook?") },
         text = {
             Column {
-                Text(confirmation.listTitle, style = MaterialTheme.typography.bodyLarge)
+                // What caused this, not just what it is about. The dialog can appear over any
+                // screen, and the List it names is not always the one the user was looking at —
+                // see `webhookTriggerLabel` for the pass that found the bare title unreadable.
+                Text(confirmation.triggerLabel, style = MaterialTheme.typography.bodyLarge)
                 Spacer(Modifier.height(ListeaDimens.RowGap))
                 Text(
-                    confirmation.summaryLabel,
+                    confirmation.factsLabel,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.height(ListeaDimens.RowGap))
                 Text(
                     "This would post to " + confirmation.destinationLabel +
-                        ". If you do not send it now, it is kept in the webhook history and " +
+                        ". If you do not send it now, it is kept in the export history and " +
                         "nothing about the items changes.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -619,19 +660,34 @@ private fun WebhookNoticeDialog(current: WebhookNotice, viewModel: ListsViewMode
                     // A switched-off webhook, or one with nothing to carry, is information
                     // rather than failure: neither gets the success tint, nor the alarm of a
                     // delivery that actually went wrong.
+                    //
+                    // A round that exported nothing joins the quiet group rather than the alarmed
+                    // one: nothing was attempted, nothing broke, and the app is only saying what
+                    // it did not do. Colouring the absence of a configuration like a delivery that
+                    // went wrong is how a user learns to ignore the colour.
                     color = when (current.outcome) {
-                        NoticeOutcome.SENT -> MaterialTheme.colorScheme.primary
+                        NoticeOutcome.SENT,
+                        NoticeOutcome.WRITTEN -> MaterialTheme.colorScheme.primary
                         NoticeOutcome.FAILED -> MaterialTheme.colorScheme.error
                         NoticeOutcome.DISABLED,
                         NoticeOutcome.EMPTY,
-                        NoticeOutcome.DECLINED -> MaterialTheme.colorScheme.onSurfaceVariant
+                        NoticeOutcome.DECLINED,
+                        // Kept rather than sent, with nothing wrong: quiet for the same reason a
+                        // decline is. It has no notice of its own — a round set aside because the
+                        // user was elsewhere is never shown — but the outcome is listed here so
+                        // that a future path which does show one cannot colour it as a failure.
+                        NoticeOutcome.DEFERRED,
+                        NoticeOutcome.UNCONFIGURED -> MaterialTheme.colorScheme.onSurfaceVariant
                     }
                 )
                 Spacer(Modifier.height(ListeaDimens.RowGap))
                 Text(
                     buildList {
                         add(current.eventLabel)
-                        current.itemCount?.let { add("$it items") }
+                        // Singular when it is one. The same helper the progress dialog and the
+                        // history rows use, so a round of one item reads the same wherever it is
+                        // reported.
+                        current.itemCount?.let { add(countOfItems(it)) }
                         current.host?.let { add(it) }
                         add(current.timeLabel)
                     }.joinToString(" · "),
@@ -726,8 +782,8 @@ private fun PostWebhookDeleteDialog(
                     Text(
                         "${countLabel(pending.fileCount, "checked file")} stayed on the device, " +
                             "because nothing has received them yet. The round is kept in " +
-                            "Settings › Webhook history — resend it from there, or delete the " +
-                            "checked files yourself from Settings › File management."
+                            "Settings › Exports › Every export — resend it from there, or delete " +
+                            "the checked files yourself from Settings › File management."
                     )
                 }
 
@@ -911,6 +967,7 @@ fun FolderScreen(
 ) {
     val context = LocalContext.current
     val settings by listsViewModel.settings.collectAsStateWithLifecycle()
+    val resolver by listsViewModel.templateResolver.collectAsStateWithLifecycle()
     val arrangements by listsViewModel.arrangements.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val load = remember { LoadJob() }
@@ -1344,7 +1401,7 @@ fun FolderScreen(
                     sharedPath?.let { path ->
                         SharedFileDialog(
                             path = path,
-                            settings = settings,
+                            resolver = resolver,
                             load = { listsViewModel.sharedFileStates(root, path) },
                             onDismiss = { sharedPath = null }
                         )
@@ -1458,25 +1515,50 @@ private fun ImportConfirmDialog(
     var keepTree by rememberSaveable(runKey) { mutableStateOf(seed.keepTree) }
     var importer by rememberSaveable(runKey) { mutableStateOf(seed.importer) }
     var policy by rememberSaveable(runKey) { mutableStateOf(seed.contentPolicy) }
+    // Held as the stored word rather than as the [ExportChoice] itself, for the same reason the
+    // attachment draft is held encoded: nothing in that sealed type is a shape the bundle knows,
+    // and the word is the identical value the Todo will record.
+    var exportWord by rememberSaveable(runKey) {
+        mutableStateOf(encodeExportChoice(seed.exportChoice))
+    }
     // Null is "start fresh" and is the seeded answer, so a user who does not read this far gets the
     // Todo they would have got before histories existed.
     var recoverFrom by rememberSaveable(runKey) { mutableStateOf<String?>(null) }
-    // The draft is held *encoded* rather than as a map, and that is not a workaround for
-    // `rememberSaveable` — it is the same value the run will be given and the Todo will record, so
-    // the draft and the write are one expression rather than two that agree. It also makes the
-    // draft survive a rotation, which a `Map<AssetKind, …>` would not without a custom saver.
-    var controls by rememberSaveable(runKey) {
-        mutableStateOf(encodeAssetControls(seed.assetControls))
-    }
-    val draft = remember(controls) { decodeAssetControls(controls) }
 
-    // One edit, one re-encode. Keyed by kind, because a tag id is only unique within its own kind —
-    // the two sections both start from `custom1` — so an edit that did not name its kind would
-    // rename the other section's tag as well.
-    fun editKind(kind: AssetKind, change: (List<CustomAction>) -> List<CustomAction>) {
-        val current = draft[kind] ?: AssetControlConfig(Templates.MediaAssetControl.ref, emptyList())
-        controls = encodeAssetControls(draft + (kind to current.copy(tags = change(current.tags))))
+    // The attachment draft, held *encoded* rather than as a list of objects, and that is not a
+    // workaround for `rememberSaveable` — it is the identical value the run will be given and the
+    // Todo will record, so the draft and the write are one expression rather than two that agree.
+    // It also survives a rotation without a custom saver, which a `List<TemplateVersionRef>` does
+    // not: nothing in that type is a shape the bundle knows.
+    var attachments by rememberSaveable(runKey) {
+        mutableStateOf(encodeTemplateAttachments(seed.templates))
     }
+    val attached = remember(attachments) { decodeTemplateAttachments(attachments) }
+
+    /**
+     * One template turned on or off, in the order the user attached them.
+     *
+     * **A lineage, not a version** — and turning one on *replaces* whatever this Todo held of it
+     * rather than joining it. That is the whole of this step's rule: a Todo has a template or it
+     * does not, and the version beside it says which one was current when the run happened, not a
+     * choice the user is making here. Attaching `T@2` over a recorded `T@1` is how a template that
+     * has been edited reaches a Todo that had the older version, and it is the only way to, because
+     * the picker offers no version to choose between — see [ImportTemplateAttach].
+     *
+     * Order is preserved rather than sorted, and that is what decides which template governs a file
+     * when two of them admit it — see [TemplateResolver.controlFor]. The dialog refuses to offer two
+     * whose scopes overlap at all, so the case is meant to be unreachable from here; keeping the
+     * user's order is what makes the rule *the order you attached them* rather than an alphabetical
+     * accident, if it is ever reached.
+     */
+    fun setAttached(choice: StoredTemplateVersion, on: Boolean) {
+        attachments = encodeTemplateAttachments(withAttachment(attached, choice, on))
+    }
+
+    // A placeholder for a button that will one day start a template from here. Tapping it says so
+    // rather than doing nothing, because a control that silently does nothing reads as broken, and
+    // what it says points at the page that can do it today.
+    var newTemplateTapped by rememberSaveable(runKey) { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1560,28 +1642,33 @@ private fun ImportConfirmDialog(
                     selected = policy,
                     onSelect = { policy = it }
                 )
-                // Drawn for a refresh too, and for the same reason the tier above is: an asset
-                // control is not a fact about the Source, it is what this run is to be given, and a
-                // refresh is exactly the run that re-stamps every Task it touches.
+                // Drawn for a refresh too, and seeded from the Todo's own stored answer there —
+                // see [ListsViewModel.requestSourceRefresh]. A refresh is exactly the run that
+                // re-stamps a Todo, so it is the one place a wrong write would be invisible.
+                Spacer(Modifier.height(ListeaDimens.RowGap))
+                ExportChoiceRow(
+                    selected = decodeExportChoice(exportWord, inheritable = false),
+                    onSelect = { exportWord = encodeExportChoice(it) }
+                )
+                // Drawn for a refresh too, and for the same reason the tier above is: a template is
+                // not a fact about the Source, it is what this run is to be given, and a refresh is
+                // exactly the run that re-stamps every Task it touches.
                 //
-                // Once per kind the folder actually holds, so a folder of photographs is asked one
-                // question rather than two with one of them meaningless. Nothing is asked at all for
-                // a folder of PDFs and text — no kind there can be configured.
-                request.assetKinds.forEach { kind ->
-                    AssetControlTagEditor(
-                        heading = assetControlHeading(kind),
-                        tags = draft[kind]?.tags.orEmpty(),
-                        keyPrefix = kind,
-                        onRename = { id, displayName -> editKind(kind) { tags ->
-                            tags.map { if (it.id == id) it.copy(displayName = sanitizeActionText(displayName)) else it }
-                        } },
-                        onRewire = { id, webhookValue -> editKind(kind) { tags ->
-                            tags.map { if (it.id == id) it.copy(webhookValue = sanitizeActionText(webhookValue)) else it }
-                        } },
-                        onRemove = { id -> editKind(kind) { tags -> tags.filterNot { it.id == id } } },
-                        onAdd = { editKind(kind) { tags -> tags + nextCustomActionDefaults(tags) } }
-                    )
-                }
+                // It used to draw one tag editor per kind the folder held. It attaches whole
+                // templates now, which is the change v0.5.4 makes: a button's name and its wire value
+                // are edited on the template's own page, and what a run chooses is *which* template
+                // governs its files. So the step is the same one whatever the folder holds — a
+                // folder of PDFs is still offered the templates, and attaching one is how a user
+                // says so; whether any of them admits a PDF is the resolver's answer to give, not
+                // this dialog's to pre-empt.
+                Spacer(Modifier.height(ListeaDimens.RowGap))
+                ImportTemplateAttach(
+                    choices = request.templates,
+                    attached = attached,
+                    newTemplateTapped = newTemplateTapped,
+                    onToggle = ::setAttached,
+                    onNewTemplate = { newTemplateTapped = true }
+                )
                 // Read outside the grouping branch, because a history says nothing about grouping:
                 // what it holds is matched against the new Todo's own `groupPath`s, and a history
                 // whose grouping differs simply matches none of them. Only Create Tasks sets it —
@@ -1598,6 +1685,12 @@ private fun ImportConfirmDialog(
         },
         confirmButton = {
             TextButton(
+                // A run with nothing attached is refused rather than confirmed, and this is the one
+                // gate in the dialog. The alternative is a Todo whose every file draws a chip row
+                // with nothing on it and whose Tasks can carry no mark at all — a thing a user would
+                // discover after importing a folder, not before. The gate is here rather than in the
+                // view model because *nothing is attached* is something only this dialog can fix.
+                enabled = attached.isNotEmpty(),
                 onClick = {
                     onConfirm(
                         ImportOptions(
@@ -1605,11 +1698,8 @@ private fun ImportConfirmDialog(
                             displayName = name,
                             keepTree = keepTree,
                             contentPolicy = policy,
-                            // The draft whole, not only the kinds the folder holds: a kind the
-                            // dialog did not ask about was seeded from the Todo's own answer or
-                            // from Settings, and dropping it here would clear the configuration of
-                            // every kind absent from *this* folder's scan.
-                            assetControls = draft
+                            templates = attached,
+                            exportChoice = decodeExportChoice(exportWord, inheritable = false)
                         ),
                         // Resolved here rather than in the ViewModel, because the id is what
                         // survives a configuration change and the object is what the report needs.
@@ -1624,6 +1714,170 @@ private fun ImportConfirmDialog(
             TextButton(onClick = onDismiss) { Text("Cancel") }
         }
     )
+}
+
+/**
+ * The attach step: which templates govern the files this run is about to create Tasks over.
+ *
+ * **The successor to the per-kind tag editors that stood here**, and the shape of the change
+ * v0.5.4 makes. Those drew one editor per kind the scan found and let a user rename and re-wire a
+ * tag inside the dialog; this draws the templates that exist and lets a user say which of them
+ * apply. Editing a button moved to the template's own page, and what happens *here* is the choice
+ * that page cannot make — this Todo, these files, this template.
+ *
+ * **The step is drawn whatever the folder holds.** The editors it replaced were drawn only for
+ * kinds the folder actually had, because a tag edited for a kind that is not there would be a
+ * question about nothing. That rule belonged to a per-kind control, not to this one: a template
+ * governs a *set* of kinds, so "is any of this folder's material admitted" is a question about the
+ * templates and their scopes, and a dialog that hid the step would be answering it silently. A
+ * folder of PDFs is offered them and the user decides.
+ *
+ * **Two whose scopes overlap cannot both be chosen**, and the second one is shown disabled with the
+ * reason rather than hidden. *First attached wins* is the resolver's rule and is the right one for
+ * a model; it is not one to hand a user, who would get two chips for one file and no way to tell
+ * which template drew which. Disabled rather than absent, because a template that vanishes from a
+ * list is a template the user thinks was deleted — the same reason this codebase says why a control
+ * is unavailable instead of leaving it out.
+ *
+ * **A row is a template, not a version of one.** The line under a name says what it applies to and
+ * how many buttons it has, and never offers a version to pick between, because a version is not a
+ * usage: it is how a template was when a run happened, kept so a Task can still be read back. A
+ * Todo has *this template* or it does not. Attaching is one per lineage by construction — see
+ * [setAttached] — so the overlap rule above, which reads its answer off what is ticked, can no
+ * longer be shown a conflict it cannot see.
+ *
+ * **A template this Todo holds at an older version is ticked, and says so.** That is the one case
+ * where the version is on screen, and it is there because the alternative is a lie: the row would
+ * read as *not attached* for a template the Todo is attached to, and ticking it to fix that would
+ * write a second reference rather than move the first. The line names both versions, so a refresh
+ * that is about to carry a Todo forward says so before it does rather than after.
+ *
+ * **`New template` does nothing yet, on purpose.** It is here so the shape of the choice is visible
+ * from the start — add one that exists, or start one — and it says so when tapped rather than
+ * sitting there inert, which reads as broken and teaches nothing. What it points at is real: the
+ * template pages under Settings, which are where a template is started today.
+ */
+@Composable
+private fun ImportTemplateAttach(
+    choices: List<StoredTemplateVersion>,
+    attached: List<TemplateVersionRef>,
+    newTemplateTapped: Boolean,
+    onToggle: (StoredTemplateVersion, Boolean) -> Unit,
+    onNewTemplate: () -> Unit
+) {
+    // By lineage, not by reference — see [heldVersionOf], which is where that reading lives so that
+    // it can be tested. A Todo holding version 1 *is* attached to a picker offering version 2.
+    val attachedLineages = attached.mapTo(mutableSetOf()) { it.templateId }
+    // Read off the ticked rows rather than off `attached`, and the two are the same set by different
+    // routes: a ticked row is a lineage the Todo holds, and [choices] carries its *current* version —
+    // which is the version a run writes, so it is the scope that governs the files. A stored
+    // reference to an older version deliberately contributes nothing here, because leaving the row
+    // ticked replaces it.
+    val attachedScopes = choices.filter { it.ref.templateId in attachedLineages }.map { it.scope }
+
+    Column {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "Add a template",
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.weight(1f)
+            )
+            TextButton(onClick = onNewTemplate) { Text("New template") }
+        }
+        Text(
+            "A template decides which buttons this Todo's files offer. Its buttons are edited on " +
+                "the template's own page under Settings.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        if (newTemplateTapped) {
+            Spacer(Modifier.height(ListeaDimens.RowGap))
+            Text(
+                "Starting a new template from here is not in this release. Templates are made and " +
+                    "edited under Settings → Templates.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        if (choices.isEmpty()) {
+            // Unreachable on a real install — every database has the built-in — and said rather than
+            // left blank, because a step that draws nothing is a step the user cannot tell from one
+            // that failed to load.
+            Spacer(Modifier.height(ListeaDimens.RowGap))
+            Text(
+                "There are no templates to attach.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        choices.forEach { choice ->
+            val held = heldVersionOf(attached, choice.ref.templateId)
+            val isAttached = held != null
+            val clash = !isAttached &&
+                attachedScopes.any { scopesOverlap(it, choice.scope) }
+            ImportTemplateRow(
+                choice = choice,
+                isAttached = isAttached,
+                clash = clash,
+                // The version this Todo holds of the template this row is, when it is not the one
+                // the row would attach. Null in the two ordinary cases, and in the clash case, which
+                // is not attached to anything.
+                heldVersion = held?.takeIf { it != choice.ref.version },
+                onToggle = { onToggle(choice, it) }
+            )
+        }
+    }
+}
+
+/** One template, as a tick and what ticking it would mean. */
+@Composable
+private fun ImportTemplateRow(
+    choice: StoredTemplateVersion,
+    isAttached: Boolean,
+    clash: Boolean,
+    heldVersion: Int?,
+    onToggle: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Checkbox(
+            checked = isAttached,
+            // A clashing template is refused rather than unluckily resolved. See
+            // [ImportTemplateAttach] for why it is shown at all.
+            enabled = !clash,
+            onCheckedChange = onToggle
+        )
+        Column(Modifier.weight(1f)) {
+            Text(choice.name, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                if (clash) {
+                    "Governs the same files as one already attached"
+                } else {
+                    templateScopeLabel(choice.scope) + " · " +
+                        countLabel(choice.buttons.size, "button")
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            // The one place a version is said out loud, and it is said because the run is about to
+            // move the Todo and the user should know before it does rather than after. The row is
+            // already ticked, so there is nothing to press: leaving it alone *is* the instruction,
+            // and unticking it is the way to refuse.
+            if (heldVersion != null) {
+                Text(
+                    "Held at version $heldVersion. This run will attach version " +
+                        choice.ref.version + ".",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
 }
 
 /** "one Todo" / "3 Todos", so the notice above reads as a sentence rather than as a form field. */
@@ -1703,6 +1957,66 @@ internal fun ContentPolicyChoice(
             onSelect = { onSelect(ContentPolicy.DROP) }
         )
     }
+}
+
+/**
+ * Where this Todo's decisions go when a round over it ends.
+ *
+ * **A single choice, and that is the model rather than a simplification.** The plural case is real
+ * — a List holding Tasks from several Todos exports more than once, because each Todo answers for
+ * its own — but it is a sum over the Todos a round touched, computed when the round ends, and not
+ * something any one row holds.
+ *
+ * The same rows-in-a-column shape as [ContentPolicyChoice], and for its reason: the difference
+ * between the answers is what a user has to read in order to give one, and *webhook* and *txt* are
+ * not words that explain themselves. Each detail line says what will actually appear, because a
+ * user choosing between two mechanisms is really choosing between a POST somewhere and a file in
+ * their album.
+ *
+ * **Three answers where the spec named two.** *Don't export* is not decoration: a two-option group
+ * has no way to say *this Todo exports nothing*, and *nothing* has to be sayable — it is the
+ * default for a new Todo, the answer for a stored word this build cannot read, and the only way to
+ * correct a choice made at import. Every other control in this dialog carries its neutral answer,
+ * so a group without one would be the only thing here a user cannot unset.
+ */
+@Composable
+internal fun ExportChoiceRow(
+    selected: ExportChoice,
+    onSelect: (ExportChoice) -> Unit
+) {
+    Column {
+        Text(
+            "When a round over this Todo finishes",
+            style = MaterialTheme.typography.bodyMedium
+        )
+        ImportImporterRow(
+            label = "Don't export",
+            detail = "nothing leaves the app from this Todo",
+            selected = selected == ExportChoice.Nothing,
+            onSelect = { onSelect(ExportChoice.Nothing) }
+        )
+        ExportKind.entries.forEach { kind ->
+            ImportImporterRow(
+                label = kind.label,
+                detail = exportKindDetail(kind),
+                selected = selected == ExportChoice.By(kind),
+                onSelect = { onSelect(ExportChoice.By(kind)) }
+            )
+        }
+    }
+}
+
+/**
+ * What choosing one mechanism will actually look like, in the user's terms rather than the wire's.
+ *
+ * The txt line spells the folder out of the constant it is written to rather than repeating it, so
+ * a user reading this is told where their files really go. It said `DCIM/Listea/…` while the
+ * writer had already moved — which is how a screen can be wrong about a destination nobody can
+ * reach.
+ */
+private fun exportKindDetail(kind: ExportKind): String = when (kind) {
+    ExportKind.WEBHOOK -> "webhook · POSTs the round to the address set in Settings › Exports"
+    ExportKind.TXT -> "txt · writes one file per round into $ListeaExportRelativePath/"
 }
 
 /**
@@ -2027,8 +2341,8 @@ private fun CurrentFolderCard(
                 }
                 // Which list is involved, so a Sublist says whose subtree it is part of.
                 folderOwnerTitle(status)?.let { StatusLine(it) }
-                // Only a folder that owns its list outright has a webhook to report.
-                statusWebhookLabel(status)?.let { StatusLine(it) }
+                // Only a folder that owns its list outright has an export to report.
+                statusExportLabel(status)?.let { StatusLine(it) }
                 // The Todo that made a Task of this folder. This is the one surface where a List
                 // title and a Todo are named on the same card, which is what the prefix is for.
                 folderOwnerLabel(owners)?.let { StatusLine(it) }
@@ -2139,10 +2453,10 @@ private fun FolderCard(
                         )
                     }
                 }
-                // Null for a Sublist by construction: the webhook belongs to the ancestor list,
+                // Null for a Sublist by construction: the export belongs to the ancestor list,
                 // and repeating it on every folder underneath would suggest each can deliver
                 // something of its own.
-                statusWebhookLabel(status)?.let { StatusLine(it) }
+                statusExportLabel(status)?.let { StatusLine(it) }
                 // Which Todo made a Task of this folder — and, because a directory card has no List
                 // title on it, this is the only ownership line a directory ever shows.
                 folderOwnerLabel(owners)?.let { StatusLine(it) }
@@ -2259,7 +2573,7 @@ private fun FileRow(
 @Composable
 private fun SharedFileDialog(
     path: String,
-    settings: AppSettings,
+    resolver: TemplateResolver,
     load: suspend () -> List<SharedFileState>,
     onDismiss: () -> Unit
 ) {
@@ -2287,7 +2601,7 @@ private fun SharedFileDialog(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    rows.forEach { row -> SharedFileStateRow(row, settings) }
+                    rows.forEach { row -> SharedFileStateRow(row, resolver) }
                 }
             }
         },
@@ -2297,15 +2611,14 @@ private fun SharedFileDialog(
 
 /** One Todo's line: which Todo, what its Task over this file is called, and what it decided. */
 @Composable
-private fun SharedFileStateRow(state: SharedFileState, settings: AppSettings) {
-    // Resolved over the Task's kinds, not one file's: this row names what a whole Task decided, and
-    // the drill-in is reached from a file that several Tasks may be over.
+private fun SharedFileStateRow(state: SharedFileState, resolver: TemplateResolver) {
+    // Resolved over the whole Task, not one file: this row names what a Task decided, and the
+    // drill-in is reached from a file that several Tasks may be over. The Task's own attachments are
+    // what name the marks, so a button set on a video reads as its label here while a photograph of
+    // the same Task is what is on screen behind the dialog.
     val actions = itemActionLabel(
-        AssetDecisions(
-            isFavorite = state.isFavorite,
-            customActions = decodeActionIds(state.customActions)
-        ),
-        settings.controlForTask(state.assetControls)
+        AssetDecisions(selections = decodeActionIds(state.selections)),
+        resolver.controlForTask(state.assetControls)
     )
 
     Row(

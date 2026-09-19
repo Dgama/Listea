@@ -44,6 +44,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.listea.domain.decodeExportChoice
 import com.example.listea.data.DissolutionReason
 import com.example.listea.data.ListSummary
 import com.example.listea.data.SourceSummary
@@ -319,8 +320,9 @@ private fun ListCard(
                     tone = if (summary.isComplete) StatusTone.Positive else StatusTone.Neutral
                 )
                 StatusLine(
-                    webhookStatusLabel(
-                        enabled = summary.webhookEnabled,
+                    exportStatusLabel(
+                        choice = decodeExportChoice(summary.exportKind, inheritable = true),
+                        enabled = summary.exportOnCompletion,
                         lastDeliveryStatus = summary.lastDeliveryStatus,
                         lastDeliveryCode = summary.lastDeliveryCode
                     )

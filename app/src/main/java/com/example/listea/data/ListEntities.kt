@@ -1,10 +1,12 @@
 package com.example.listea.data
 
+import androidx.compose.runtime.Immutable
 import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import com.example.listea.domain.EXPORT_CHOICE_INHERIT
 import com.example.listea.domain.Templates
 import java.util.UUID
 
@@ -40,9 +42,46 @@ data class ListEntity(
     val createdAt: Long,
     val completedAt: Long? = null,
 
-    /** Optional completion action: one POST webhook. Only fires when enabled and the URL is valid. */
-    val webhookEnabled: Boolean = false,
+    /**
+     * Whether this List exports when it becomes complete.
+     *
+     * **The field is named for the question the switch asks, and its column is not.** The column
+     * stays `webhookEnabled` because renaming one needs SQLite 3.25 and minSdk is 24, and this is
+     * the case where keeping the old word would have been actively misleading: since v0.5.6 the
+     * switch governs *every* kind, not only the POST it was named after, and a reader of
+     * `list.webhookEnabled` sitting beside a Txt dropdown would be reading the exact confusion the
+     * release exists to remove. A column name is a migration's business; a field name is a reader's.
+     *
+     * A question about *when*, answered once here. [exportKind] is the question about *how*, and
+     * the two are independent: a List that has not chosen a kind still exports on completion, by
+     * whatever each of its Todos names.
+     */
+    @ColumnInfo(name = "webhookEnabled")
+    val exportOnCompletion: Boolean = false,
+
+    /**
+     * The URL this List used to post to. **Dead: nothing reads it and nothing writes it.**
+     *
+     * It held a copy of the Settings default, seeded at creation and never refreshed, so changing
+     * the default reached no existing List — the same *copy where a reference was wanted* defect
+     * v0.5.4 removed from `sources.assetControls`, one column over. v0.5.6 removed the copy and
+     * every List reads the default at the moment it exports.
+     *
+     * Kept rather than dropped because dropping one needs SQLite 3.35 and minSdk is 24, and kept
+     * *declared* because Room compares the entity against the table in both directions — a column
+     * the table has and the entity does not is a schema mismatch, not an unused column.
+     */
     val webhookUrl: String = "",
+
+    /**
+     * The mechanism this List's rounds export by, as `domain/Exports.kt` encodes it.
+     *
+     * `inherit` until the user chooses, which is the state a List spends its whole life in unless
+     * it is asked otherwise — and it means *follow the source Todos*, never *export nothing*. `none`
+     * is the word for the latter. See [com.example.listea.domain.decodeExportChoice] for why the two
+     * are different words.
+     */
+    val exportKind: String = EXPORT_CHOICE_INHERIT,
 
     /** Lightweight record of the last attempt, so the UI can show never sent / success / failed. */
     val lastDeliveryAt: Long? = null,
@@ -225,25 +264,36 @@ data class ListItemEntity(
     val sourceSizeBytes: Long? = null,
     val sourceModifiedAt: Long? = null,
 
+    val isFavorite: Boolean = false,
+
+    /** The slot above, in [encodeActionIds]' encoding. Both are dead. See [selections]. */
+    val customActions: String = "",
+
     /**
-     * Slots the query fills, exactly as [isCompleted] is: an action is a decision about a file, and
+     * A slot the query fills, exactly as [isCompleted] is: a button is a decision about a file, and
      * a decision about a file belongs to the Task–Asset pair the file is under.
      *
-     * The queries that load these rows fold the Task's pairs in — `MAX(tas.isFavorite)` and
-     * `GROUP_CONCAT(tas.customActions)` over every Asset the row's Task holds — so a List row over a
-     * Task of several files reads the *union* of what was marked on them. That is the same answer
-     * [unionOf] gives in Kotlin, reached in SQL because a row that re-emits when any pair changes is
-     * worth more here than one that reads a single row. `GROUP_CONCAT` is a union rather than a
-     * concatenation because [decodeActionIds] splits and de-duplicates on the way out.
+     * The query folds the Task's pairs in — `GROUP_CONCAT(tas.selections)` over every Asset the row's
+     * Task holds — so a List row over a Task of several files reads the *union* of what was marked on
+     * them. That is the same answer [unionOf] gives in Kotlin, reached in SQL because a row that
+     * re-emits when any pair changes is worth more here than one that reads a single row.
+     * `GROUP_CONCAT` is a union rather than a concatenation because [decodeActionIds] splits and
+     * de-duplicates on the way out.
      *
-     * [customActions] uses [encodeActionIds]' encoding, which is what makes that fold legible — one
-     * format for one thing in this schema, not two.
+     * [encodeActionIds]' encoding, which is what makes that fold legible — one format for one thing
+     * in this schema, not two. It is the *only* selection slot on this row since v0.5.4, and the two
+     * columns above are what it succeeds: a boolean and a set for one answer, where `★` is a button
+     * like any other. See [TaskStateEntity.isFavorite] for the older pair these were themselves
+     * projected from.
      *
-     * The columns underneath are dead, and so are the `task_state` ones these were projected from
-     * before v0.5.1; [TaskStateEntity.isFavorite] is where that is stated.
+     * **The two columns above stay, exactly as [AssetStateEntity.selections] says of its own.** A
+     * dropped column needs SQLite 3.35 and this app ships minSdk 24, so the alternative is rebuilding
+     * the table this List page reads on every row for no reader's benefit — and they are the only copy
+     * of a mark that exists if this column is ever found to be wrong. The 23 → 24 step adds this one
+     * beside them and writes neither again.
      */
-    val isFavorite: Boolean = false,
-    val customActions: String = ""
+    @ColumnInfo(defaultValue = "''")
+    val selections: String = ""
 )
 
 /**
@@ -252,9 +302,10 @@ data class ListItemEntity(
  * **This table no longer holds a decision.** The job it was built for — one place a decision about
  * a file could live, so a List over a folder and a Quick Review over that same folder could never
  * disagree — is [TaskStateEntity]'s now, reached through [AssetEntity] by the very identity below.
- * The three decision columns on the row are dead; the *fields* are still read, because the queries
- * that resolve a folder review project the Task's state into them, and that projection is the seam
- * the screens read across.
+ * The decision columns on the row are dead; the *fields* are still read, because the queries that
+ * resolve a folder review project the Task's state into them — `ts.isCompleted` and the pair fold —
+ * and that projection is the seam the screens read across. v0.5.4 added one more slot and retired no
+ * column: see [FileReviewStateEntity.selections].
  *
  * What is left is registration: which files a review has a relationship with. The browser is given
  * one tick per registered file by [ListsDao.observeFileCompletion] — an empty tick for a file
@@ -297,14 +348,24 @@ data class FileReviewStateEntity(
     /**
      * Slots the query fills. See the class doc: completion lives on the Task and a mark on the
      * Task's pair with this file, and the queries that resolve a folder review project both in
-     * here — `ts.isCompleted`, and the pairs folded the way
-     * [ListItemEntity.customActions] describes.
+     * here — `ts.isCompleted`, and the pairs folded the way [ListItemEntity.selections] describes.
      */
     val isCompleted: Boolean = false,
     val isFavorite: Boolean = false,
 
-    /** The same slot, in [encodeActionIds]' encoding. */
+    /** The two slots above, the second in [encodeActionIds]' encoding. Both are dead. */
     val customActions: String = "",
+
+    /**
+     * The same slot, folded the way [ListItemEntity.selections] describes.
+     *
+     * The two columns above stay for [ListItemEntity.customActions]' reason — dropping one needs
+     * SQLite 3.35 and this app ships minSdk 24, so it would be a rebuild of a table the folder
+     * browser reads for no reader's benefit, and they are the only copy of a mark an upgrade left
+     * behind.
+     */
+    @ColumnInfo(defaultValue = "''")
+    val selections: String = "",
 
     /**
      * The presence flag, as the columns above it are decisions: a slot a query fills, not a column
@@ -365,8 +426,8 @@ data class FileClaim(
  *
  * [sourceName] and [taskName] are the labels to show rather than the ids to act on; [taskId] is
  * what a caller that means to open the Task needs, and [sourceId] is what it needs to open the
- * Todo. The three decision columns are the same triple [ReviewDecisions] carries, still in storage
- * form — an id list in [customActions], not labels — for the reason that type gives.
+ * Todo. The two decision columns are the same pair [ReviewDecisions] carries, still in storage
+ * form — an id list in [selections], not labels — for the reason that type gives.
  *
  * [isOwnTask] is the capacity, and it is the same fact [FileClaim] carries: true when this Todo's
  * Task *is* this file, false when the Task is over a folder and this file is one of the files it
@@ -381,8 +442,7 @@ data class SharedFileState(
     val taskName: String,
     val isOwnTask: Boolean,
     val isCompleted: Boolean,
-    val isFavorite: Boolean,
-    val customActions: String,
+    val selections: String,
 
     /**
      * The control the Task was imported under, so this row's tags can be *named* rather than
@@ -402,50 +462,54 @@ data class SharedFileState(
  * file. Both produce one of these, and the action bar, the Info sheet and the webhook all read it
  * the same way.
  *
- * [customActions] holds ids, not labels and not wire values. What an id is called and what it is
- * sent as are configuration, resolved from AppSettings at the moment they are needed — which is
- * what lets an action be renamed without rewriting a single row.
+ * [selections] holds ids, not labels and not wire values. What an id is called and what it is sent
+ * as belong to the template version the id came from, resolved at the moment they are needed —
+ * which is what lets a button be renamed, or its wire value changed, without rewriting a row.
  *
- * An id that no longer matches any configured action is kept rather than dropped. Deleting an
- * action is a decision about the bar, not about the files somebody has already marked, and a
- * decision this app has recorded is not something it discards behind the user's back.
+ * An id that no longer matches any button is kept rather than dropped. Removing a button is a
+ * decision about the bar, not about the files somebody has already marked, and a decision this app
+ * has recorded is not something it discards behind the user's back.
  */
 data class ReviewDecisions(
     val isCompleted: Boolean = false,
-    val isFavorite: Boolean = false,
-    val customActions: Set<String> = emptySet()
+    val selections: Set<String> = emptySet()
 )
 
 /**
  * What a **Task–Asset pair** carries: the instance of that Task's asset control on that one file.
  *
- * The other half of [ReviewDecisions], and the half that is the template's. `★` and the tags are
- * what a control *is*, so they are recorded where the control was applied — on the pair — while
- * completion is the Task's own and is recorded once for the Task.
+ * The other half of [ReviewDecisions], and the half that is the template's. The buttons are what a
+ * control *is*, so they are recorded where the control was applied — on the pair — while completion
+ * is the Task's own and is recorded once for the Task.
  *
  * A pair row — a catalog row, a List's row, a folder's file-state, a shared-file state — carries
  * both halves and so still speaks [ReviewDecisions]. The split is between the two **state tables**,
  * [com.example.listea.data.TaskStateEntity] and
  * [com.example.listea.data.AssetStateEntity], and not between the row types that read them.
  *
- * Same encoding and same "an id no longer configured is kept" rule as [ReviewDecisions]: this is
- * the same record, filed under a narrower key.
+ * Same encoding and same "an id no longer offered is kept" rule as [ReviewDecisions]: this is the
+ * same record, filed under a narrower key.
+ *
+ * **One set and not a boolean beside one.** `★` used to be a field of its own here, which made it
+ * the one button a template could not choose, rename or drop; since v0.5.4 it is the button with the
+ * id [com.example.listea.domain.Templates.FAVOURITE_BUTTON_ID], carrying that same string as its
+ * record value, and it is selected like any other. The two columns this replaces were merged into
+ * one by the 23 → 24 step, and [encodeActionIds] is where the merge is defined.
  */
 data class AssetDecisions(
-    val isFavorite: Boolean = false,
-    val customActions: Set<String> = emptySet()
+    val selections: Set<String> = emptySet()
 )
 
 /**
  * The pair's half of a row that carries both, for the callers that fold a Task rather than a file.
  *
- * A conversion and not a second opinion: the two fields are the same values, read off the same row,
- * and this only says which half the reader is about to use. The webhook's one entry per Task is the
- * caller that needs it — a payload names no file, so it reports everything the Task carries while
- * the row it is built from still speaks [ReviewDecisions].
+ * A conversion and not a second opinion: the value is the same one, read off the same row, and this
+ * only says which half the reader is about to use. The webhook's one entry per Task is the caller
+ * that needs it — a payload names no file, so it reports everything the Task carries while the row
+ * it is built from still speaks [ReviewDecisions].
  */
 val ReviewDecisions.assetDecisions: AssetDecisions
-    get() = AssetDecisions(isFavorite = isFavorite, customActions = customActions)
+    get() = AssetDecisions(selections = selections)
 
 /**
  * A Task's pair records, together.
@@ -454,13 +518,12 @@ val ReviewDecisions.assetDecisions: AssetDecisions
  * catalog card, a List's row, the webhook's one entry per Task — and the only honest one: a Task
  * that presents three files and was marked on two of them is marked with what those two carry.
  *
- * `★` if any pair carries it, because it is one action and an item stores one boolean for it; every
- * id any pair holds, because ids are what a pair holds and a union loses none of them.
+ * Every id any pair holds, because ids are what a pair holds and a union loses none of them. There
+ * used to be a second rule here for `★` — "if any pair carries it" — because it was one action with
+ * one boolean behind it; with one set there is nothing for it to be a rule about.
  */
-fun unionOf(decisions: List<AssetDecisions>): AssetDecisions = AssetDecisions(
-    isFavorite = decisions.any { it.isFavorite },
-    customActions = decisions.flatMapTo(mutableSetOf()) { it.customActions }
-)
+fun unionOf(decisions: List<AssetDecisions>): AssetDecisions =
+    AssetDecisions(selections = decisions.flatMapTo(mutableSetOf()) { it.selections })
 
 /**
  * How a set of action ids is stored in one column.
@@ -513,7 +576,7 @@ fun rootRelativePathOf(listPath: String, itemPath: String): String =
  * way it is reading a dead column, and the answer is whatever an older version left there.
  */
 val FileReviewStateEntity.decisions: ReviewDecisions
-    get() = ReviewDecisions(isCompleted, isFavorite, decodeActionIds(customActions))
+    get() = ReviewDecisions(isCompleted, decodeActionIds(selections))
 
 /**
  * The decisions a resolved membership row is carrying.
@@ -522,7 +585,7 @@ val FileReviewStateEntity.decisions: ReviewDecisions
  * that joined the Task's state in, stale on one that did not.
  */
 val ListItemEntity.decisions: ReviewDecisions
-    get() = ReviewDecisions(isCompleted, isFavorite, decodeActionIds(customActions))
+    get() = ReviewDecisions(isCompleted, decodeActionIds(selections))
 
 /**
  * Where a decision is written when the user makes one.
@@ -631,15 +694,15 @@ data class ReviewItem(
     /**
      * The asset control this Task was imported under, as `task_imports.assetControls` holds it.
      *
-     * Raw and undecoded, deliberately. What the middle band needs is *one kind's* configuration, and
-     * the kind is a property of the file on screen rather than of the Task — so the resolution that
-     * turns this string into chips is [AppSettings.controlFor], performed per page, at the one place
-     * that knows which page is showing. A card carrying a resolved list would have had to pick a kind
-     * while building the queue, which is one frame before the user says which file they are looking
-     * at.
+     * Raw and undecoded, deliberately. What the middle band needs is *one file's* answer, and the
+     * file is a property of the page on screen rather than of the Task — so the resolution that
+     * turns this string into chips is [TemplateResolver.controlFor], performed per page, at the one
+     * place that knows which page is showing. A card carrying a resolved list would have had to pick
+     * a file while building the queue, which is one frame before the user says which one they are
+     * looking at.
      *
-     * `""` means the Task has no record — every Task imported before v0.5.0 — and reads as this
-     * app's current default for whatever kind is asked about. See [TaskImportEntity.assetControls].
+     * `""` means the Task has no record, and reads as no chips at all. See
+     * [TaskImportEntity.assetControls].
      *
      * Bounded to the Task's own row, like [rootRelativePath] and for the same reason: a Task a
      * payload names must be answerable without walking back to the Todo that imported it.
@@ -705,19 +768,21 @@ fun ListItemEntity.toReviewItem(
 )
 
 /**
- * One thing the action bar can offer an item.
+ * One thing the action bar can offer an item: a button of a template version, by id.
  *
- * Two kinds, and the difference is who decides what it means. [Favourite] is Listea's own: its
- * label is a star, its wire value is fixed, and it can be neither renamed nor removed. [Custom]
- * is whatever the user has configured — any number of them — and carries nothing but an id,
- * because its label and its wire value are settings that can change without the items changing
- * with them.
+ * **One kind, and the id is the whole of it.** Until v0.5.4 this was a sealed pair — a `Favourite`
+ * object that answered for itself and a `Custom(id)` that asked the settings page what it meant —
+ * and the split was the model saying that one of its two buttons was special. A template's buttons
+ * are a list now and `★` is one of them, so what the bar offers is exactly the ids of that list, and
+ * everything else about a button (what it is called, what it sends, what it records) is answered by
+ * the version the id came from.
  *
- * The order actions are offered and emitted in comes from AppSettings rather than from here: it
- * is deterministic and independent of the order the user toggled them, which is what a receiver
- * needs from the `actions` array.
+ * The order the bar draws and the payload emits comes from that version's button list, not from
+ * here: it is deterministic and independent of the order the user toggled them, which is what a
+ * receiver needs from the `actions` array.
  */
-sealed interface ItemAction {
+@Immutable
+data class ItemAction(val id: String) {
 
     /**
      * Whether [decisions] currently carries this action.
@@ -727,37 +792,23 @@ sealed interface ItemAction {
      * whole answer — a List's row, a catalog card — hands in [unionOf] its pairs, which is the same
      * type and the same question.
      */
-    fun isSetOn(decisions: AssetDecisions): Boolean
+    fun isSetOn(decisions: AssetDecisions): Boolean = id in decisions.selections
 
     /** The same decisions with [enabled] applied, for a write that replaces the whole set. */
-    fun setOn(decisions: AssetDecisions, enabled: Boolean): AssetDecisions
+    fun setOn(decisions: AssetDecisions, enabled: Boolean): AssetDecisions = decisions.copy(
+        selections = if (enabled) decisions.selections + id else decisions.selections - id
+    )
 
-    data object Favourite : ItemAction {
-
-        /** Fixed, because a receiver keying on it should not depend on a settings page. */
-        const val WireName = "favorite"
-
-        /** What it is called anywhere it has to be written rather than drawn. */
-        const val Label = "★"
-
-        override fun isSetOn(decisions: AssetDecisions): Boolean = decisions.isFavorite
-
-        override fun setOn(decisions: AssetDecisions, enabled: Boolean): AssetDecisions =
-            decisions.copy(isFavorite = enabled)
-    }
-
-    data class Custom(val id: String) : ItemAction {
-
-        override fun isSetOn(decisions: AssetDecisions): Boolean = id in decisions.customActions
-
-        override fun setOn(decisions: AssetDecisions, enabled: Boolean): AssetDecisions =
-            decisions.copy(
-                customActions = if (enabled) {
-                    decisions.customActions + id
-                } else {
-                    decisions.customActions - id
-                }
-            )
+    companion object {
+        /**
+         * `★`, which is a button of the built-in like any other and only conventionally first.
+         *
+         * Kept as a name because a handful of surfaces speak about the star *as such* — the chip
+         * row's tint, a test that means "the plain on/off button" — and spelling the id out at each
+         * of them would be five copies of a promise. It is not a special case in the record: it is
+         * selected, stored and sent exactly as a minted button is.
+         */
+        val Favourite = ItemAction(com.example.listea.domain.Templates.FAVOURITE_BUTTON_ID)
     }
 }
 
@@ -791,10 +842,14 @@ data class FolderListScope(
     val completedItems: Int,
 
     /**
-     * Just enough of the webhook state to label a folder card. A delivery always records its
-     * timestamp and status together, so a null [lastDeliveryStatus] means nothing has been sent.
+     * Just enough of the export state to label a folder card. A delivery always records its
+     * timestamp and status together, so a null [lastDeliveryStatus] means nothing has been exported.
+     *
+     * [exportKind] is the raw stored word, for the same reason [TaskExportSource.exportKind] is:
+     * this is the `data` package, and `domain/Exports.kt` is where a word becomes a meaning.
      */
-    val webhookEnabled: Boolean,
+    val exportOnCompletion: Boolean,
+    val exportKind: String,
     val lastDeliveryStatus: String?,
     val lastDeliveryCode: Int?
 ) {
@@ -828,7 +883,7 @@ data class SourceItemRef(
  * sends *that* rather than something rebuilt out of state that has since moved on.
  */
 @Entity(tableName = "webhook_history")
-data class WebhookRecordEntity(
+data class ExportRecordEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val event: String,
     val listTitle: String,
@@ -842,7 +897,24 @@ data class WebhookRecordEntity(
     val outcome: String,
 
     /** How it went, in the same words the dialog used at the time. */
-    val detail: String
+    val detail: String,
+
+    /**
+     * The mechanism this attempt used, as `domain/Exports.kt` encodes it.
+     *
+     * **Declared last on purpose**, so a fresh database's column order matches a migrated one's:
+     * `ALTER TABLE ADD COLUMN` appends, and this project has already been bitten once by a
+     * `SELECT *` reader seeing a different order on the two (`ListsDao.getSourceItems`). Room
+     * compares columns as a map and would not care; a human reading a `SELECT *` would.
+     *
+     * The table is named `webhook_history` and its rows are no longer all webhooks. The user chose
+     * *两种都记* — record both — and recording only POSTs would have made a text export
+     * unfalsifiable: the user could not tell whether the file was written, and a List's *Last
+     * export* line would have had nothing to say exactly when the effective kind was txt. The table
+     * keeps its name for the reason v0.5.4's decision 8 gave about a column: renaming one is a
+     * rebuild for a word, and the word is in the migration's history either way.
+     */
+    val kind: String = com.example.listea.domain.ExportKind.WEBHOOK.key
 )
 
 /**
@@ -851,14 +923,17 @@ data class WebhookRecordEntity(
  * A payload is as big as the round it covers, so the history observes this instead and reads the
  * body itself only when the user opens one.
  */
-data class WebhookRecordSummary(
+data class ExportRecordSummary(
     val id: Long,
     val event: String,
     val listTitle: String,
     val itemCount: Int,
     val at: Long,
     val outcome: String,
-    val detail: String
+    val detail: String,
+
+    /** Which mechanism made the attempt, so a history row can say what it was without opening it. */
+    val kind: String
 )
 
 /** One file found by a recursive folder scan, before it becomes a [ListItemEntity]. */
@@ -888,8 +963,9 @@ data class ListSummary(
     val totalItems: Int,
     val completedItems: Int,
 
-    /** Same webhook fields the Folder cards show, so both screens read identically. */
-    val webhookEnabled: Boolean,
+    /** Same export fields the Folder cards show, so both screens read identically. */
+    val exportOnCompletion: Boolean,
+    val exportKind: String,
     val lastDeliveryStatus: String?,
     val lastDeliveryCode: Int?,
 

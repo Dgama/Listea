@@ -1,7 +1,9 @@
 package com.example.listea
 
 import com.example.listea.data.ScannedFile
-import com.example.listea.domain.AssetKind
+import com.example.listea.domain.ExportChoice
+import com.example.listea.domain.ExportKind
+import com.example.listea.domain.TemplateVersionRef
 
 /**
  * The importer layer: a pure grouping rule that turns a folder snapshot into planned Tasks.
@@ -55,17 +57,38 @@ data class ImportOptions(
     val contentPolicy: ContentPolicy = ContentPolicy.Default,
 
     /**
-     * The asset control the dialog collected, per file kind, for the run this describes.
-     *
-     * Empty means nothing was chosen, which is the behaviour-preserving value: it encodes to the
-     * column default, every Task resolves back to the app's own tags, and an install that never
-     * opens the new section behaves exactly as it did before there was one.
+     * The templates the dialog attached, in the order the user attached them.
      *
      * An instruction *for this run* rather than a record of one, exactly as [contentPolicy] is —
      * see `applyImport`, which passes it into the run rather than reading it back from the row it
      * is about to write. The two travel together for the same reason.
+     *
+     * **Empty means nothing was attached, and that is a refusal rather than a default.** It is what
+     * the dialog will not let a user confirm on, and what a caller with no dialog to show gets: a
+     * Task whose files no template governs draws no chips at all, which is legible, rather than a
+     * built-in standing in for a choice nobody made, which is not. This field used to be a per-kind
+     * tag map with exactly that fallback, and dropping it is the change v0.5.4 makes.
+     *
+     * A *reference* per entry rather than a copy of the buttons: what a Task was judged under is
+     * [TemplateVersionRef], and the buttons it offers are resolved from the template tables at the
+     * moment somebody looks — see [TemplateResolver]. That is what lets a template be edited
+     * without a re-import, and what makes `…asset-control@1` go on meaning version 1.
      */
-    val assetControls: Map<AssetKind, AssetControlConfig> = emptyMap()
+    val templates: List<TemplateVersionRef> = emptyList(),
+
+    /**
+     * How this Todo's decisions leave the app, chosen here and written back to the row.
+     *
+     * Defaults to [ExportChoice.Nothing] — *nothing was chosen, so nothing is sent* — and that is
+     * deliberately not the same answer as an existing Todo's, which migrates to
+     * [ExportKind.WEBHOOK] (v0.5.6 decision 12): preserving what a Todo already did is one
+     * question, and what a brand-new Todo should do is another.
+     *
+     * A single value and never a set. The plural case is real — a List holding Tasks from several
+     * Todos exports more than once — but it is a **sum over the Todos a round touched**, computed
+     * when the round ends, and not something stored on any row.
+     */
+    val exportChoice: ExportChoice = ExportChoice.Nothing
 )
 
 /**

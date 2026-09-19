@@ -676,10 +676,10 @@ fun TaskCompletionBar(
  * inside one Task changes the row — and [decisions] is that same pair's record, so a chip ticked on
  * one page is not ticked on the next.
  *
- * v0.5.0 fixed the first of those and left the second reading the Task: an [AppSettings] with no
- * notion of kind cannot be wrong about a file it was never told about, and a Task-level record
- * cannot be right about a file it was never told about either. Both are why the pair is passed in
- * as a pair, and why neither argument can be reached for from the item.
+ * v0.5.0 fixed the first of those and left the second reading the Task: a control resolved without
+ * being told which file it was for cannot be wrong about one, and a Task-level record cannot be
+ * right about one either. Both are why the pair is passed in as a pair, and why neither argument
+ * can be reached for from the item.
  */
 @Composable
 fun ReviewAssetControls(
@@ -766,8 +766,8 @@ private val CustomActionLabelMaxWidth = 88.dp
  * photograph is being shown; resolving per file would make the badge read "unknown id" for a tag
  * the user can see, or drop it entirely. That is the one place the chip row and this row
  * legitimately differ, and the difference is the design rather than a drift —
- * [AppSettings.controlForTask] is the resolver for this and [AppSettings.controlFor] the one for
- * the chips.
+ * [TemplateResolver.controlForTask] is the resolver for this and [TemplateResolver.controlFor] the
+ * one for the chips.
  *
  * The two are taken as arguments rather than read off a `ReviewItem` since v0.5.1, which is the
  * same move v0.5.0 made when it replaced `AppSettings` with a resolved control: a composable left

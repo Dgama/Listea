@@ -46,6 +46,7 @@ fun ListItemViewerScreen(
     initialItemId: Long,
     listTitle: String,
     settings: AppSettings,
+    resolver: TemplateResolver,
     onClose: () -> Unit
 ) {
     val context = LocalContext.current
@@ -148,7 +149,7 @@ fun ListItemViewerScreen(
         // neighbour's tags — see [ReviewItemInfoSheet].
         val page = assets.getOrNull(currentAsset)
         ReviewItemInfoSheet(
-            info = reviewItemInfo(item, page?.decisions ?: AssetDecisions(), settings, listTitle),
+            info = reviewItemInfo(item, page?.decisions ?: AssetDecisions(), resolver, listTitle),
             asset = page,
             onDismiss = { infoOpen = false }
         )

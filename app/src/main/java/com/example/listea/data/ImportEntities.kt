@@ -5,6 +5,7 @@ import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
 import com.example.listea.ContentPolicy
+import com.example.listea.domain.EXPORT_CHOICE_NONE
 
 /**
  * The v14 tables: where a Task came from, and where a Task's content is measured.
@@ -123,24 +124,50 @@ data class SourceEntity(
     val followUpstream: Boolean = false,
 
     /**
-     * The asset control this Todo was last imported under, per file kind, encoded.
+     * The templates this Todo is attached to, as `encodeTemplateAttachments` writes them.
      *
      * The answer the Create Tasks dialog collected, kept so the next run opens on what the user
-     * said rather than on what Settings happens to default to now — exactly the role
-     * [contentPolicy] plays, and stored here for the same reason: a Todo with no Tasks yet still
-     * has to be able to say what its next run will use, and a value derived from its Tasks could
-     * not.
+     * said rather than on what the picker happens to offer now — exactly the role [contentPolicy]
+     * plays, and stored here for the same reason: a Todo with no Tasks yet still has to be able to
+     * say what its next run will use, and a value derived from its Tasks could not.
      *
-     * **`""` means nothing was ever chosen, not "no tags".** Every row that predates v0.5.0 holds
-     * `""`, and the whole of that upgrade rests on it being read as *this app's current default for
-     * the kind* rather than as an empty tag set. Reading it the other way strips the tag row off
-     * every Asset of every Todo already on the device, silently. `Settings.controlFor` is the only
-     * thing that should ever interpret this, and it is the only place that gets it right.
+     * **A name it kept and a payload it did not.** The column held a per-kind configuration until
+     * v0.5.4 and holds a list of `templateId \t version` lines now; keeping the old name is the
+     * whole of decision 8, because *what this Todo is configured with* is what it has always meant.
+     * The templates themselves live in `templates` / `template_versions`, so editing one appends
+     * there and changes nothing here — which is what lets a Task go on being judged by the version
+     * it was imported under after the template has moved on.
+     *
+     * **`""` means nothing is attached, and that is not what it used to mean.** It was *this app's
+     * current default for the kind*; it is *no chips at all* now, which is decision 9 and the
+     * largest behaviour change of the release. With several templates to choose from, "nobody
+     * picked one" and "pick the default" stopped being the same fact — and reading it the old way
+     * would draw a template nobody chose over a file. `TemplateResolver` is the only thing that
+     * should ever interpret this.
      *
      * See [TaskImportEntity.assetControls] for what this is not: this is what the Todo *asked* for,
      * the other is what a Task *got*.
      */
     val assetControls: String = "",
+
+    /**
+     * How this Todo's decisions leave the app, as `domain/Exports.kt` encodes it.
+     *
+     * **The Todo's own answer, and the reason the plural case exists at all.** A List may hold Tasks
+     * from several Todos with several different answers, and a round over such a List exports once
+     * per Todo — a sum computed when the round ends, not a set stored here. The List can overrule
+     * this with its own [ListEntity.exportKind]; when it does, it overrules it for the whole round.
+     *
+     * `webhook` rather than `none` as the column default, which is the *migration's* default and not
+     * a new Todo's. A Todo that posted before the upgrade must post after it, or the release would
+     * silently stop work the user had set up; a Todo being created now is a choice being made, and
+     * `MIGRATION_24_25` is the only thing that reads this default.
+     *
+     * Stored as the key, with an unrecognised string reading back as *export nothing* — the same
+     * failing-closed shape [contentPolicy] has, and the sharper reason here is that the failure mode
+     * is the network.
+     */
+    val exportKind: String = EXPORT_CHOICE_NONE,
 
     val lastImportAt: Long? = null,
     val lastImportStatus: String? = null
@@ -189,23 +216,24 @@ data class TaskImportEntity(
     val lastSeenAt: Long,
 
     /**
-     * The asset control this Task was imported under, per file kind, encoded.
+     * The templates this Task was imported under, as `encodeTemplateAttachments` writes them.
      *
      * **This is the copy review reads**, and the reason it exists rather than being looked up from
      * [SourceEntity.assetControls] on demand. A Task must be able to say what it is judged with at
-     * the moment it is judged, without walking back to its Todo; and a later edit to Settings, or
+     * the moment it is judged, without walking back to its Todo; and a later edit to a template, or
      * to the Todo, must not silently re-label Tasks that were already imported and possibly already
      * judged. What a Task offers is a fact about its import, like [groupPath], and it belongs with
      * the rest of them.
      *
      * It is *re-stamped by every run*, from the answer that run was given rather than from the
-     * Todo's row — see `ImportOptions.assetControls`. So the two can disagree after a Settings edit,
+     * Todo's row — see `ImportOptions.templates`. So the two can disagree after a template edit,
      * and that disagreement is the point: the Todo is what the next run will get, the Task is what
      * this one did. The Todo card reports the Tasks' value, because that is what the user will
      * actually see when they open one.
      *
-     * `""` reads as this app's current default for the kind, for the same reason and with the same
-     * consequence as [SourceEntity.assetControls].
+     * `""` reads as no templates at all, with the same consequence as
+     * [SourceEntity.assetControls] — and a version this build cannot decode is skipped rather than
+     * half-read, so a row written by a later release draws an empty bar rather than a guess.
      */
     val assetControls: String = ""
 )
@@ -384,8 +412,7 @@ data class DissolvedSnapshotRow(
     val importerKind: String,
     val isCompleted: Boolean,
     val assetPath: String?,
-    val isFavorite: Boolean,
-    val customActions: String
+    val selections: String
 )
 
 /**

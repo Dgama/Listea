@@ -93,9 +93,16 @@ value class ReviewEventId(val value: String) {
  * Identity of a Template *lineage* — `builtin.media.rapid-review`, and whatever else is defined
  * later.
  *
- * The odd one out among these: not generated, because a Template is defined in code and its id is
- * a fixed string that has to keep meaning the same thing across releases. Nothing mints one at
- * runtime; [Templates] is the only place they come from.
+ * The odd one out among these, and it has changed sides. A lineage is not generated, because its id
+ * is a fixed string that has to keep meaning the same thing across releases — [Templates] is where
+ * the built-in ones come from, and they are the ones a schema default or an old row can name.
+ *
+ * **Since v0.5.4 a lineage is also minted, and never from a name.** The release that made a
+ * template a stored row mints one wherever there is a configuration that would otherwise be lost —
+ * the upgrade gives each Todo's own buttons a lineage of its own — and the id is a fresh UUID while
+ * the *name* is taken from the Todo. So the two halves of this comment now have to be read together:
+ * a lineage is not derived from anything, and an id that was minted is opaque on purpose, because
+ * the name beside it is the part a person may change.
  */
 @JvmInline
 value class TemplateId(val value: String)

@@ -1,5 +1,6 @@
 package com.example.listea.data
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
@@ -196,6 +197,22 @@ data class AssetStateEntity(
     /** The configured actions this pair carries, as ids, in [encodeActionIds]' encoding. */
     val customActions: String = "",
 
+    /**
+     * The buttons this pair carries, as ids, in [encodeActionIds]' encoding.
+     *
+     * The successor to the two columns above: the 23 → 24 step fills it from them, and nothing will
+     * write those again. It is one set rather than a boolean beside a set because `★` is a button
+     * like any other now — a column of its own was a column that existed to explain one value, which
+     * is the shape of a model missing a rule.
+     *
+     * **The two old columns stay.** Dropping a column needs SQLite 3.35 and this app ships minSdk 24,
+     * so the alternative is a table rebuild for no reader's benefit — the same call v13 made, and the
+     * same one [isFavorite] records. They keep whatever the step wrote into them, are read by nothing,
+     * and are the only copy of a mark that exists if this column is ever found to be wrong.
+     */
+    @ColumnInfo(defaultValue = "''")
+    val selections: String = "",
+
     val updatedAt: Long
 )
 
@@ -207,7 +224,7 @@ data class AssetStateEntity(
  * surface is about.
  */
 val AssetStateEntity.decisions: AssetDecisions
-    get() = AssetDecisions(isFavorite, decodeActionIds(customActions))
+    get() = AssetDecisions(decodeActionIds(selections))
 
 /**
  * One submitted review: what was decided, when, under which template, and from where.

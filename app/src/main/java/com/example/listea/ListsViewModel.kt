@@ -27,7 +27,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.example.listea.data.AssetDecisions
 import com.example.listea.data.CatalogRow
-import com.example.listea.data.DecisionTarget
 import com.example.listea.data.DissolutionReport
 import com.example.listea.data.DissolvedHistory
 import com.example.listea.data.FileReviewStateEntity
@@ -53,17 +52,28 @@ import com.example.listea.data.SourceSummary
 import com.example.listea.data.TaskStateEntity
 import com.example.listea.data.UpstreamEntity
 import com.example.listea.data.decisions
-import com.example.listea.data.encodeActionIds
 import com.example.listea.data.rootRelativePathOf
 import com.example.listea.data.taskDecisions
 import com.example.listea.data.toReviewAsset
 import com.example.listea.data.TaskAssetControls
+import com.example.listea.data.TemplateEntity
+import com.example.listea.data.TemplateStore
+import com.example.listea.data.TemplateVersionEntity
 import com.example.listea.data.toReviewItem
-import com.example.listea.data.WebhookRecordEntity
-import com.example.listea.data.WebhookRecordSummary
+import com.example.listea.data.ExportRecordEntity
+import com.example.listea.data.ExportRecordSummary
 import com.example.listea.domain.AssetKind
+import com.example.listea.domain.ExportChoice
+import com.example.listea.domain.ExportKind
 import com.example.listea.domain.ReviewContext
+import com.example.listea.domain.decodeExportChoice
+import com.example.listea.domain.encodeExportChoice
 import com.example.listea.domain.ReviewResponse
+import com.example.listea.domain.StoredTemplateVersion
+import com.example.listea.domain.TemplateButton
+import com.example.listea.domain.TemplateScope
+import com.example.listea.domain.TemplateVersionRef
+import com.example.listea.domain.Templates
 
 /** What the Folder screen should be showing about a pending "create list from folder" action. */
 sealed interface FolderListRequest {
@@ -175,15 +185,20 @@ sealed interface ImportFolderRequest {
         val histories: List<DissolvedHistory> = emptyList(),
 
         /**
-         * The configurable file kinds the scan found, in declaration order, so the dialog asks its
-         * asset-control question once per kind the folder actually holds.
+         * Every template there is to attach, in the order the attach step offers them.
          *
-         * Computed from the tree the walk already produced rather than by a second walk, and carried
-         * on the request rather than looked up by the dialog because the dialog has no tree: the
-         * walk's result lives in [PendingImport], which the screen cannot see. Empty is a folder of
-         * nothing configurable — PDFs, text — and draws no section at all.
+         * Read once, when the folder was walked, and carried on the request rather than looked up
+         * by the dialog. Two reasons and the second is the one that decided it: the dialog has no
+         * store to read from, and a picker built from a flow would spend its first frame saying
+         * there are no templates on a device that has one — the same failure the template list's
+         * nullable flow exists to avoid, arriving on the screen where it would be acted on.
+         *
+         * [ImportOptions.templates] is what the dialog *chose*; this is what there was to choose
+         * from, and the two are deliberately not the same field: an attachment naming a template
+         * this list does not hold is a real state — a deleted template, a version a later build
+         * wrote — and a dialog that read its own answer back off its own choices could not show it.
          */
-        val assetKinds: List<AssetKind> = emptyList()
+        val templates: List<StoredTemplateVersion> = emptyList()
     ) : ImportFolderRequest
 
     /** The run is writing. */
@@ -609,7 +624,7 @@ class ListsViewModel @JvmOverloads constructor(
      * Every delivery ever recorded, newest first. Observed rather than fetched so the history
      * page and the Settings entry that leads to it can never disagree about how much there is.
      */
-    val webhookHistory: StateFlow<List<WebhookRecordSummary>> = dao.observeWebhookHistory()
+    val webhookHistory: StateFlow<List<ExportRecordSummary>> = dao.observeWebhookHistory()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** How much history there is, without loading a single payload to count it. */
@@ -619,6 +634,72 @@ class ListsViewModel @JvmOverloads constructor(
     /** How much of it is still owed to a receiver — the part worth drawing attention to. */
     val pendingWebhookCount: StateFlow<Int> = dao.observePendingWebhookCount()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+
+    /**
+     * The templates, for the two pages Settings reaches them through.
+     *
+     * **Built on first use rather than in the constructor**, and not only to save the work. This is
+     * the one thing on this ViewModel that reaches past the [ListsDao] it is handed, so it is the
+     * one thing a test that injects a fake DAO would be made to open the app's real database file
+     * for — and none of those tests looks at a template.
+     */
+    private val templateStore: TemplateStore by lazy {
+        TemplateStore(ListeaDatabase.get(getApplication()))
+    }
+
+    /**
+     * Every template lineage, by name. Observed, because the page edits what the list shows.
+     *
+     * **Null until the table has been read**, and the null is load-bearing rather than a
+     * placeholder. This app has no spinner anywhere, so an empty list would have to stand in for
+     * *there are none* — and the template list would spend its first frame telling the user there
+     * are no templates on an install that always has one. Null is also the only thing that lets the
+     * page behind a row say *this template is gone* rather than *nothing has been read yet*, which
+     * are opposite facts a row's absence cannot tell apart on its own.
+     */
+    val templates: StateFlow<List<TemplateEntity>?> by lazy {
+        templateStore.templates
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+    }
+
+    /**
+     * Every version of every template, oldest first within each, with the same null rule.
+     *
+     * The whole table rather than one lineage's versions, because the list screen names each row's
+     * current version and that is one read for all of them; a page picks its own lineage out by the
+     * last entry carrying its id.
+     */
+    val templateVersions: StateFlow<List<TemplateVersionEntity>?> by lazy {
+        templateStore.versions
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+    }
+
+    /**
+     * The two tables as one lookup: what a Task attached to a template actually offers. See
+     * [TemplateResolver].
+     *
+     * **Half of this release lives in this flow.** Every surface that draws a chip, a badge or a
+     * payload used to ask [AppSettings], which answered from a DataStore tag list with a built-in
+     * fallback; the answer is a row's now, and this is the one place rows are turned into something
+     * a screen can be given. It is a resolver value rather than a pair of lists so that a screen
+     * takes *the lookup* and cannot help but resolve the same way as the screen beside it.
+     *
+     * **Not null, unlike the two above**, and for the opposite reason. Those are null to say *not
+     * read yet* to a page that would otherwise report an empty install; a resolver has no such
+     * page, and every caller only ever uses it to answer for a file. So the seed is
+     * [TemplateResolver.Empty] — which is *no template governs anything* — and the first real read
+     * replaces it. A chip row drawn in the frame before the tables land is a chip row with no chips,
+     * which is one frame of an empty row rather than a claim about the templates.
+     *
+     * Both flows are observed together because a resolver built from one of them would be a resolver
+     * that offered a template's buttons before its scope: the two tables are read in one transaction
+     * by [TemplateStore] and are only ever meaningfully consumed as a pair.
+     */
+    val templateResolver: StateFlow<TemplateResolver> by lazy {
+        combine(templates, templateVersions) { lineages, versions ->
+            TemplateResolver.of(lineages.orEmpty(), versions.orEmpty())
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), TemplateResolver.Empty)
+    }
 
     private val _sourceFreshness = MutableStateFlow<ListFreshness?>(null)
     val sourceFreshness: StateFlow<ListFreshness?> = _sourceFreshness.asStateFlow()
@@ -676,6 +757,19 @@ class ListsViewModel @JvmOverloads constructor(
      * checkbox, a folder's Quick Review — is never mistaken for a round's work.
      */
     private val openReviewRounds = mutableSetOf<Long>()
+
+    /**
+     * How many rounds are open that belong to no List — a folder round, which has no id to be named
+     * by.
+     *
+     * Counted rather than tracked, because the only question ever asked of it is *is anything being
+     * reviewed right now*; a folder has no second question to answer, and a set of nothing would be
+     * a set. It exists because [CompletionScope.AnotherRound] is about the **screen** the user is
+     * on and not about the Lists involved: a List completing while a folder's Quick Review is open
+     * is the same interruption as one completing during another List's review, and the Tasks are
+     * frequently the same Tasks, so it is not a rare side effect either.
+     */
+    private var openFolderRounds = 0
 
     /** Scan result waiting for confirmation. Nothing is written until it is committed. */
     private var pendingFolderList: PendingFolderList? = null
@@ -1259,14 +1353,14 @@ class ListsViewModel @JvmOverloads constructor(
      * outside it.
      */
     fun setItemCompleted(item: ReviewItem, completed: Boolean) = launchDb {
-        // The transition and whether a round is open are read under one lock. The exit that closes
-        // the round is a separate coroutine racing this one, and only the lock guarantees it cannot
-        // close it between the write and the decision.
-        val (transitioned, inRound) = writeOrder.withLock {
+        // The transition and which round each completing List is in are read under one lock. The
+        // exit that closes a round is a separate coroutine racing this one, and only the lock
+        // guarantees it cannot close it between the write and the decision.
+        val (transitioned, scopes) = writeOrder.withLock {
             val ids = dao.setTaskCompleted(item.taskId, completed, now())
-            ids to ids.filterTo(mutableSetOf()) { it in openReviewRounds }
+            ids to ids.associateWith { scopeOf(it) }
         }
-        transitioned.forEach { onCompletionTransition(it, true, it in inRound) }
+        transitioned.forEach { onCompletionTransition(it, true, scopes.getValue(it)) }
     }
 
     /**
@@ -1292,14 +1386,13 @@ class ListsViewModel @JvmOverloads constructor(
         val decisions = item.taskDecisions
         val response = ReviewResponse.MediaReview(
             completed = true,
-            favorite = decisions.isFavorite,
-            customActions = decisions.customActions
+            selections = decisions.selections
         )
-        val (transitioned, inRound) = writeOrder.withLock {
+        val (transitioned, scopes) = writeOrder.withLock {
             val ids = dao.submitReview(item.taskId, response, terms.template, terms.context, now())
-            ids to ids.filterTo(mutableSetOf()) { it in openReviewRounds }
+            ids to ids.associateWith { scopeOf(it) }
         }
-        transitioned.forEach { onCompletionTransition(it, true, it in inRound) }
+        transitioned.forEach { onCompletionTransition(it, true, scopes.getValue(it)) }
     }
 
     /**
@@ -1454,13 +1547,16 @@ class ListsViewModel @JvmOverloads constructor(
         }
 
         val label = folderLabelFor(rootUri, folderPath)
+        // Read before the options are built rather than after, because the options are seeded from
+        // it: what a new Todo starts on is the built-in *as it stands now*, and that is a row.
+        val attachable = attachableTemplates()
         val options = ImportOptions(
             importer = ImporterKind.FILE_AS_TASK,
             displayName = label,
             // Seeded from Settings rather than from any Todo, because there is no Todo yet: this is
             // the answer the user usually gives, offered here so they do not have to give it again.
             contentPolicy = settings.value.defaultContentPolicy,
-            assetControls = settings.value.defaultControlConfigs()
+            templates = listOf(seededAttachment(attachable))
         )
         pendingImport = PendingImport(rootUri, folderPath, tree, options)
         _importFolderRequest.value = ImportFolderRequest.Confirm(
@@ -1473,7 +1569,7 @@ class ListsViewModel @JvmOverloads constructor(
             // words in the same dialog rather than as a path and a name.
             existingTodos = dao.sourcesAt(rootUri, folderPath).map { it.displayName },
             histories = dao.dissolvedHistoriesAt(rootUri, folderPath),
-            assetKinds = assetKindsPresent(tree.files.map { it.name })
+            templates = attachable
         )
     }
 
@@ -1510,7 +1606,19 @@ class ListsViewModel @JvmOverloads constructor(
             // This Todo's own answer, not Settings': a refresh is about a Todo that exists and has
             // already said what a change to its material means.
             contentPolicy = ContentPolicy.fromKey(source.contentPolicy),
-            assetControls = settings.value.controlConfigsFor(source.assetControls)
+            // The same read, and it is the Todo's own answer for the same reason. A refresh opens
+            // on the templates the Todo is attached to, so the attach step shows what is already
+            // true and a user changes it deliberately rather than re-choosing from scratch.
+            //
+            // Decoded through the tolerant reader, so a Todo imported before this release opens on
+            // the built-in it was configured with rather than on nothing — see
+            // [decodeTemplateAttachments] for the two shapes it accepts.
+            templates = decodeTemplateAttachments(source.assetControls),
+            // The same rule a third time: how this Todo exports is the Todo's own answer, and a
+            // refresh offers it unchanged rather than re-deciding it. `inheritable = false`
+            // because this is a Todo's column — `inherit` on one is *nothing*, which is the
+            // answer that fails closed.
+            exportChoice = decodeExportChoice(source.exportKind, inheritable = false)
         )
         pendingImport = PendingImport(source.rootUri, source.relativePath, tree, options, source.id)
         _importFolderRequest.value = ImportFolderRequest.Confirm(
@@ -1519,7 +1627,7 @@ class ListsViewModel @JvmOverloads constructor(
             folderCount = tree.directories.size,
             refresh = true,
             options = options,
-            assetKinds = assetKindsPresent(tree.files.map { it.name })
+            templates = attachableTemplates()
             // Deliberately no histories: a refresh runs over a Todo that is still here, and a
             // recovery overwrites a Task's judgment. Loading a history into a live Todo would take
             // the decisions made since and quietly replace them with older ones. Recovery is for a
@@ -1638,6 +1746,13 @@ class ListsViewModel @JvmOverloads constructor(
         // one place, and the fallback is the same one the folder would have been offered under, so
         // a user who clears the field gets what they were shown.
         val name = options.displayName.trim().ifEmpty { sourceNameFor(pending.folderPath) }
+
+        // Encoded once, here, and the same string goes to all three writes below — the Todo's row,
+        // the run, and the Todo's row again. The dialog collected *references*; what every column
+        // holds is the one canonical spelling of them, so no two of those writes can disagree about
+        // how a list of attachments is written down.
+        val assetControls = encodeTemplateAttachments(options.templates)
+
         val source = if (pending.sourceId == null) {
             dao.registerSource(
                 rootUri = pending.rootUri,
@@ -1646,7 +1761,8 @@ class ListsViewModel @JvmOverloads constructor(
                 importerKind = importer,
                 keepTree = options.keepTree,
                 contentPolicy = options.contentPolicy,
-                assetControls = options.assetControls,
+                assetControls = assetControls,
+                exportKind = encodeExportChoice(options.exportChoice),
                 followUpstream = settings.value.followUpstreamNewTodos,
                 now = now()
             )
@@ -1671,9 +1787,9 @@ class ListsViewModel @JvmOverloads constructor(
                 // The dialog's answer, not the row's: the write-back below records it, and a run
                 // that waited for that write would apply the tier the user just replaced.
                 contentPolicy = options.contentPolicy,
-                // Same rule, same reason: the Tasks this run produces are stamped from this map, so
-                // it has to be what the user just chose rather than what the Todo happens to hold.
-                assetControls = options.assetControls
+                // Same rule, same reason: the Tasks this run produces are stamped from this string,
+                // so it has to be what the user just chose rather than what the Todo holds.
+                assetControls = assetControls
             )
         }.getOrNull()
 
@@ -1689,7 +1805,11 @@ class ListsViewModel @JvmOverloads constructor(
             importerKind = importer,
             keepTree = options.keepTree,
             contentPolicy = options.contentPolicy,
-            assetControls = options.assetControls
+            assetControls = assetControls,
+            // The dialog's answer, written back here rather than in `runImport` above, for the
+            // same reason `contentPolicy` is: the run is about this folder's Tasks, and the
+            // choice is a standing answer about the Todo that outlives it.
+            exportKind = encodeExportChoice(options.exportChoice)
         )
 
         _importVersion.value += 1
@@ -1737,7 +1857,15 @@ class ListsViewModel @JvmOverloads constructor(
             displayName = source.displayName,
             keepTree = source.keepTree,
             contentPolicy = ContentPolicy.fromKey(source.contentPolicy),
-            assetControls = settings.value.controlConfigsFor(source.assetControls)
+            // The same decode [requestSourceRefresh] does, because this is that dialog's answer
+            // taken without the dialog: a run nobody was asked about re-attaches exactly what the
+            // Todo already names, so following an upstream changes the material and never the
+            // buttons.
+            templates = decodeTemplateAttachments(source.assetControls),
+            // And the same rule for the choice, which matters more here than anywhere else: a
+            // sync has no dialog, so a Todo that did not carry its own answer through this call
+            // would be silently reset to *export nothing* by the act of following its upstream.
+            exportChoice = decodeExportChoice(source.exportKind, inheritable = false)
         )
         applyImport(
             pending = PendingImport(
@@ -1761,6 +1889,63 @@ class ListsViewModel @JvmOverloads constructor(
      */
     private fun sourceNameFor(folderPath: String): String =
         folderPath.substringAfterLast('/').ifEmpty { "Picked folder" }
+
+    /**
+     * The templates a dialog may offer to attach, read once.
+     *
+     * Goes through [templateStore] rather than through [templateResolver], and the difference is the
+     * one that matters here: the resolver is an observed value a screen recomposes over, while this
+     * answers a question asked *inside* a coroutine that is building a dialog. A flow read from
+     * there would either suspend on a first emission that has not happened or answer with the null
+     * seed, and either way the picker would be built from something other than the tables.
+     *
+     * Built by [TemplateResolver.of] anyway, so *which version of a template is current* has one
+     * definition — the resolver's — rather than a second one here that could come to differ from
+     * what a Task attached to that version would resolve to.
+     */
+    private suspend fun attachableTemplates(): List<StoredTemplateVersion> {
+        val (lineages, versions) = templateStore.snapshot()
+        return TemplateResolver.of(lineages, versions).attachable
+    }
+
+    /**
+     * What a Todo with nothing to go on is attached to: the built-in, at the version it is *now*.
+     *
+     * **Not the registry's reference, which is version 1 and always will be.** Every Todo this app
+     * has ever made offered the built-in's buttons, so a new one opening on them is the
+     * behaviour-preserving default — but *the built-in's buttons* is a question about a row, and the
+     * row moves. Seeding the constant meant a user who added a button to the built-in got it nowhere:
+     * a new Todo opened attached to version 1, the picker offered version 2 under the same name, and
+     * because it matched on the whole reference it drew that row *unticked* — so ticking it added a
+     * second reference for one template instead of moving the first, and first-match resolution
+     * handed every file the older one. The new button was unreachable, silently.
+     *
+     * Fallible rather than guaranteed, hence the fallback: a lineage is offered only while its current
+     * version's buttons decode, so a built-in that has been edited into something unreadable drops
+     * out of the list — and then the registry's own reference is the better answer than nothing,
+     * because it is at least the buttons the app has always had, and the attach step draws no row for
+     * it either way. Unreachable today by any path but a hand-edited database.
+     */
+    private fun seededAttachment(attachable: List<StoredTemplateVersion>): TemplateVersionRef =
+        attachable
+            .firstOrNull { it.ref.templateId == Templates.AssetControlSeed.ref.templateId }
+            ?.ref
+            ?: Templates.AssetControlSeed.ref
+
+    /**
+     * The resolver for the two tables as they stand, read once, for a coroutine rather than a screen.
+     *
+     * [templateResolver] is the same answer and is deliberately not what this reads. That flow is
+     * `WhileSubscribed`, so it holds nothing at all while no screen is watching — and a webhook
+     * fires from a background round, which is exactly a moment when nobody is. Reading `.value`
+     * there would answer [TemplateResolver.Empty] often enough to matter, and the payload's
+     * `actions` array would then name stored ids instead of wire values depending on whether the
+     * user happened to have the app open. A delivery's body must not turn on that.
+     */
+    private suspend fun resolverNow(): TemplateResolver {
+        val (lineages, versions) = templateStore.snapshot()
+        return TemplateResolver.of(lineages, versions)
+    }
 
     /**
      * What a folder is called: its own name, as the device gives it, or else the path's last
@@ -1828,8 +2013,7 @@ class ListsViewModel @JvmOverloads constructor(
                 dao.createListFromTasks(
                     title = title.trim().ifEmpty { "New list" },
                     taskIds = taskIds,
-                    webhookEnabled = defaults.defaultWebhookEnabled,
-                    webhookUrl = defaults.defaultWebhookUrl,
+                    exportOnCompletion = defaults.defaultWebhookEnabled,
                     now = now()
                 )
             }.getOrNull()
@@ -1888,8 +2072,7 @@ class ListsViewModel @JvmOverloads constructor(
                 replacedListIds = pending.replacedIds,
                 // Same template as a manual list gets, including when this replaces an
                 // overlapping list: there is one default, not one per kind of list.
-                webhookEnabled = defaults.defaultWebhookEnabled,
-                webhookUrl = defaults.defaultWebhookUrl,
+                exportOnCompletion = defaults.defaultWebhookEnabled,
                 now = now()
             )
         }
@@ -2222,26 +2405,28 @@ class ListsViewModel @JvmOverloads constructor(
     }
 
     /**
-     * The tags of one file kind, edited from Settings.
+     * Writes an edited template: its name, and one more version when its answer changed.
      *
-     * [kind] is a parameter rather than something inferred, because since v0.5.0 the tags belong to
-     * a kind: the Settings screen draws one section per kind the asset-control definition is
-     * compatible with, and each section edits only its own. There is deliberately no "all kinds"
-     * form — a control that edited both at once would make *"video has two tags and images have
-     * three"*, which is the whole reason the sections exist, impossible to express.
+     * The only write the template pages make, and it is made here rather than in the screen for the
+     * reason the store gives — *was anything actually different* is a question for the rows, not for
+     * a copy of them. Nothing about which of the two writes happens is decided by the UI: it hands
+     * over what was edited into and the store works it out.
+     *
+     * **What this writes governs every Todo attached to it, immediately.** That is the change
+     * v0.5.4 makes: [templateResolver] rebuilds from these two tables, so a button renamed here
+     * reads renamed on the next recomposition of every surface drawing a chip of that template —
+     * including the files of Tasks imported before the edit. Nothing is re-imported and no row is
+     * rewritten: a Task holds a *reference*, and the buttons are whatever the reference points at
+     * now. The one thing that does not move is a completed review's snapshot, which is held at the
+     * version it was submitted under.
      */
-    fun addCustomAction(kind: AssetKind) = launchDb { settingsStore.addCustomAction(kind) }
-
-    fun setCustomActionDisplayName(kind: AssetKind, id: String, name: String) = launchDb {
-        settingsStore.updateCustomAction(kind, id, displayName = name)
-    }
-
-    fun setCustomActionWebhookValue(kind: AssetKind, id: String, value: String) = launchDb {
-        settingsStore.updateCustomAction(kind, id, webhookValue = value)
-    }
-
-    fun removeCustomAction(kind: AssetKind, id: String) = launchDb {
-        settingsStore.removeCustomAction(kind, id)
+    fun updateTemplate(
+        templateId: String,
+        name: String,
+        scope: TemplateScope,
+        buttons: List<TemplateButton>
+    ) = launchDb {
+        templateStore.update(templateId, name, scope, buttons)
     }
 
     fun setDefaultWebhookEnabled(enabled: Boolean) = launchDb {
@@ -2337,23 +2522,91 @@ class ListsViewModel @JvmOverloads constructor(
         dao.setReviewPosition(listId, itemId)
     }
 
-    fun setWebhookEnabled(listId: Long, enabled: Boolean) = launchDb {
-        dao.setWebhookEnabled(listId, enabled)
-    }
-
-    fun setWebhookUrl(listId: Long, url: String) = launchDb {
-        dao.setWebhookUrl(listId, url)
+    /** *Export when this list is completed.* About **when**, and independent of [setExportKind]. */
+    fun setExportOnCompletion(listId: Long, enabled: Boolean) = launchDb {
+        dao.setExportOnCompletion(listId, enabled)
     }
 
     /**
-     * Explicit user action, so it sends regardless of the enabled toggle and never touches state.
+     * Which mechanism this List's rounds use, as `domain/Exports.kt` encodes it.
      *
-     * The one delivery that does not ask first, along with a resend: pressing a button labelled
-     * *Test webhook* is the confirmation. It still shows the progress dialog, because a test
-     * payload is as big as the list and takes just as long.
+     * About **how**, and independent of the switch above. *Inherit* is the state a List spends its
+     * whole life in unless asked otherwise: it does not mean *export nothing*, it means *decide one
+     * group at a time from the Todos these Tasks came from* — which is the release's headline rule.
      */
-    fun testWebhook(listId: Long) = launchDb {
-        deliver(listId, EVENT_WEBHOOK_TEST, requireEnabled = false, confirm = false)
+    fun setListExportKind(listId: Long, choice: ExportChoice) = launchDb {
+        dao.setListExportKind(listId, encodeExportChoice(choice))
+    }
+
+    /**
+     * Explicit user action, so it posts regardless of the enabled toggle and never touches state.
+     *
+     * **A payload of its own and not a List's**, as of v0.5.6. It used to send whatever List the
+     * user happened to be looking at, which made the button a statement about that List wearing a
+     * setting's clothes — and it lived on the List's card, next to a URL that is no longer there.
+     * The button now sits on the webhook method's own page in Settings and posts a payload naming
+     * nothing, because the only question it answers is *can this URL receive?*.
+     *
+     * The one export that does not ask first, along with a resend: pressing a button labelled
+     * *Send a test payload* is the confirmation. It still shows the progress dialog, because a
+     * receiver can be slow and the seconds in between otherwise look like nothing happening.
+     */
+    fun testWebhook() = launchDb {
+        val current = settingsStore.read()
+        val url = current.defaultWebhookUrl.trim()
+
+        fun tell(outcome: NoticeOutcome, httpCode: Int?, error: String?) = announce(
+            listTitle = "",
+            event = EVENT_EXPORT_TEST,
+            url = url,
+            kind = ExportKind.WEBHOOK,
+            defaultWebhook = true,
+            itemCount = 1,
+            outcome = outcome,
+            httpCode = httpCode,
+            error = error
+        )
+
+        val urlProblem = webhookUrlError(url)
+        if (urlProblem != null) {
+            tell(NoticeOutcome.FAILED, null, urlProblem)
+            return@launchDb
+        }
+
+        val payload = ExportPayload(
+            event = EVENT_EXPORT_TEST,
+            listId = 0,
+            listTitle = "",
+            completedAt = null,
+            sourceId = null,
+            sourceTitle = null,
+            at = now(),
+            items = listOf(
+                ExportItemView(
+                    publicId = "test",
+                    title = "Test",
+                    isCompleted = true,
+                    relativePath = null,
+                    actions = emptyList()
+                )
+            )
+        )
+        val result = post(
+            WebhookProgress(
+                event = EVENT_EXPORT_TEST,
+                listTitle = "",
+                host = webhookHost(url),
+                itemCount = 1,
+                defaultWebhook = true
+            ),
+            url,
+            buildWebhookPayload(payload)
+        )
+        tell(
+            if (result.status == DeliveryStatus.SUCCESS) NoticeOutcome.SENT else NoticeOutcome.FAILED,
+            result.httpCode,
+            result.error
+        )
     }
 
     /**
@@ -2426,8 +2679,13 @@ class ListsViewModel @JvmOverloads constructor(
             list = folderPayloadList(rootUri, folderPath),
             rows = rows,
             event = event,
-            requireEnabled = true,
-            useDefaultWebhook = true,
+            // There is no List, so there is nothing above the Todos to defer to. `Inherit` is the
+            // choice that means *decide this one group at a time, from the Todos these Tasks came
+            // from*, which is exactly what a folder round has always done.
+            listChoice = ExportChoice.Inherit,
+            // No List switch to consult either. A folder round is gated by the export-wide
+            // switches its callers already read, and then by the Todo each group came from.
+            requireRoundEnabled = false,
             recordAgainstList = false,
             assetControls = controls,
             // Both callers are automatic - a queue that ran out, or a review being left - so a
@@ -2448,36 +2706,6 @@ class ListsViewModel @JvmOverloads constructor(
         sourceRootUri = rootUri,
         sourceRelativePath = folderPath
     )
-
-    /**
-     * A review item as a row, purely so the one payload builder can serialise it. Never inserted:
-     * a folder-resolved file is not a member of any list and must not become one by accident.
-     */
-    private fun ReviewItem.toPayloadRow(sortOrder: Int) = ListItemEntity(
-        id = id,
-        publicId = publicId,
-        listId = 0,
-        // Never inserted. The foreign key that makes a stored membership name a real Task is the
-        // only thing that would care, and it never sees this row — it is built, serialised and
-        // dropped. This is not a sentinel meaning "broken row"; the row does not exist.
-        taskId = "",
-        title = title,
-        isCompleted = isCompleted,
-        sortOrder = sortOrder,
-        createdAt = 0,
-        sourceUri = sourceUri,
-        sourceRelativePath = relativePath,
-        rootRelativePath = (target as? DecisionTarget.File)?.relativePath,
-        sourceMissing = sourceMissing,
-        // The fold, and not any one page's. A payload row is one entry for the whole Task, so the
-        // marks it reports are every mark the Task carries — the same rule by which the payload has
-        // always been able to name a tag set on a file that is not the one on screen. The pair the
-        // tag was set on is not reconstructed here and is not sent: a receiver is told what the
-        // Task says, once.
-        isFavorite = taskDecisions.isFavorite,
-        customActions = encodeActionIds(taskDecisions.customActions)
-    )
-
 
     /**
      * A List review round is starting: entering the screen, or "Review again" from the end of one.
@@ -2503,15 +2731,52 @@ class ListsViewModel @JvmOverloads constructor(
             event = EVENT_REVIEW_EXITED,
             requireEnabled = true,
             queueIds = queueIds,
-            useDefaultWebhook = false,
             confirm = true
         )
+    }
+
+    /**
+     * A folder review is starting: entering Quick Review's queue.
+     *
+     * The counterpart of [onReviewStarted] for the round that has no List. It exists for
+     * [CompletionScope.AnotherRound]: a List completing under a folder review is the same
+     * interruption as one completing under another List's, and the Tasks are often literally the
+     * same Tasks — a file imported by two Todos is in both Lists — so this is reached by ordinary
+     * use rather than by a corner case.
+     *
+     * Nothing else is keyed off it. A folder round reports through [onFolderReviewExited] and never
+     * through a completion, so the count only ever answers *is somebody reviewing something*.
+     */
+    fun onFolderReviewStarted() = launchDb {
+        writeOrder.withLock { openFolderRounds++ }
+    }
+
+    /**
+     * The folder review's screen is gone, so the round is over whatever happened on it.
+     *
+     * **Paired with [onFolderReviewStarted] by the composition and not by a gesture**, which is the
+     * whole of why it is a separate call: Quick Review has two ways to end — its queue runs out, or
+     * the user leaves — and only the second goes through [onFolderReviewExited]. Leaving that as the
+     * only place the count came back would leak it on the first path, and a leaked count does not
+     * fail quietly: *a folder round is open* is what makes a completing List keep its payload
+     * instead of asking, so one finished Quick Review would leave every later completion in the app
+     * answering for itself, for good.
+     *
+     * The start and the end are one `DisposableEffect` on the screen's own session key for that
+     * reason: a round is the screen, the composition disposes exactly once per session, and no
+     * future exit path has to remember to close it.
+     */
+    fun onFolderReviewEnded() = launchDb {
+        writeOrder.withLock { openFolderRounds = (openFolderRounds - 1).coerceAtLeast(0) }
     }
 
     /**
      * The same, for a folder review, which has no list and so delivers through the default
      * webhook. Gated on [AppSettings.quickReviewWebhookEnabled] as well, since that switch is
      * what lets a folder round send anything at all.
+     *
+     * Only the report lives here. The round's bookkeeping is [onFolderReviewEnded]'s, because this
+     * is called on one of the two ways a round ends and the count has to come back on both.
      */
     fun onFolderReviewExited(
         rootUri: String,
@@ -2524,13 +2789,51 @@ class ListsViewModel @JvmOverloads constructor(
     }
 
     /**
+     * Where a List's completion landed relative to whatever is on screen.
+     *
+     * The distinction the completion action turns on, and the reason it is a value rather than a
+     * boolean: there are three answers and only two of them are about *this* List. What a
+     * completion should do depends on whether a round is open, and — if one is — on whether it is
+     * this List's.
+     */
+    private enum class CompletionScope {
+        /** Nothing is being reviewed. The completion is reported on its own behalf, as it always was. */
+        Unattended,
+
+        /** This List is under review: its round reports the completion, narrowed to the round. */
+        ThisRound,
+
+        /**
+         * A round is open on something else entirely — another List, or a folder.
+         *
+         * Nobody on that screen asked for this, and this List's business is not what they are
+         * looking at. See [NoticeOutcome.DEFERRED] for what happens instead of sending or asking.
+         */
+        AnotherRound
+    }
+
+    /**
+     * Which of the three a completing List is in, read under the same lock as the write that
+     * completed it.
+     *
+     * Read inside the lock and not after it, for the reason [openReviewRounds] gives: the exit that
+     * closes a round is a separate coroutine racing the write, and only the lock keeps a round that
+     * was open when the item was checked from having closed by the time the decision is made.
+     */
+    private fun scopeOf(listId: Long): CompletionScope = when {
+        listId in openReviewRounds -> CompletionScope.ThisRound
+        openReviewRounds.isNotEmpty() || openFolderRounds > 0 -> CompletionScope.AnotherRound
+        else -> CompletionScope.Unattended
+    }
+
+    /**
      * The single place the completion action fires. [transitioned] comes from the DAO transaction
      * that performed the edit, so a list that merely stays complete never delivers again.
      */
     private suspend fun onCompletionTransition(
         listId: Long,
         transitioned: Boolean,
-        insideReviewRound: Boolean = false
+        scope: CompletionScope = CompletionScope.Unattended
     ) {
         if (!transitioned) return
 
@@ -2543,9 +2846,21 @@ class ListsViewModel @JvmOverloads constructor(
         // Gated on the exit report actually being switched on. With it off there is no second
         // payload to prefer, and staying silent here would lose the completion altogether — it has
         // always fired independently of any of the review switches, and still does.
-        if (insideReviewRound && settingsStore.read().webhookOnReviewExit) return
+        if (scope == CompletionScope.ThisRound && settingsStore.read().webhookOnReviewExit) return
 
-        deliver(listId, EVENT_LIST_COMPLETED, requireEnabled = true, confirm = true)
+        // The user is in the middle of a round on something else, so they are not asked and this is
+        // not sent — but it is not dropped either. The payload is built and kept, exactly as a
+        // declined one is, and the List is left saying *not sent*. The user comes back to a List
+        // that has a round waiting in its history rather than to a dialog they had to answer from
+        // inside someone else's review, which is the whole of what the user asked for: *"行为和
+        // 结果预期相匹配。用户在一个list里动作，不要反馈给用户另一个list的结果"*.
+        deliver(
+            listId = listId,
+            event = EVENT_LIST_COMPLETED,
+            requireEnabled = true,
+            confirm = true,
+            assumeNotNow = scope == CompletionScope.AnotherRound
+        )
     }
 
     /**
@@ -2553,25 +2868,27 @@ class ListsViewModel @JvmOverloads constructor(
      *
      * [queueIds] narrows the payload to the items a review actually covered, in stored order;
      * null means the whole list, which is what a completion and the test button send.
-     * [useDefaultWebhook] posts to the app's default URL instead of the list's own — Quick
-     * Review, which has no webhook configuration of its own — and in that case the caller has
-     * already checked the switch that stands in for the list's enabled toggle, so it passes
-     * `requireEnabled = false`.
+     *
+     * There is no longer a *which URL* to choose between — the List's own copy is gone as of
+     * v0.5.6 and every webhook reads the app default — so what used to be `useDefaultWebhook` has
+     * nothing left to decide and is not a parameter. The List's **kind** is, and it comes off the
+     * row read under the lock below.
      *
      * Every attempt that reaches a verdict is recorded against the list and announced, including
      * one abandoned over an unusable URL. That an empty default URL fails loudly here is the
      * point: it is the case the user most needs telling about.
      *
      * [confirm] is what separates a delivery the app decided to make from one the user pressed a
-     * button for. See [deliverPayload].
+     * button for. [assumeNotNow] is the narrower case of one the app decided *not* to put to them,
+     * and both are [deliverPayload]'s.
      */
     private suspend fun deliver(
         listId: Long,
         event: String,
         requireEnabled: Boolean,
         queueIds: List<Long>? = null,
-        useDefaultWebhook: Boolean = false,
-        confirm: Boolean
+        confirm: Boolean,
+        assumeNotNow: Boolean = false
     ) {
         // The whole payload is read in one pass under the ordering lock, so an item write from
         // the swipe that triggered this has certainly landed and the list and its items cannot
@@ -2589,23 +2906,18 @@ class ListsViewModel @JvmOverloads constructor(
             list = stored.list,
             rows = stored.rows,
             event = event,
-            requireEnabled = requireEnabled,
-            useDefaultWebhook = useDefaultWebhook,
+            // The List's choice, decoded here rather than in the dispatcher so that the one place
+            // that reads the column and the one place that acts on it cannot drift. `inheritable`
+            // is true because this is a List: `inherit` on one is a decision, not a dead word.
+            listChoice = decodeExportChoice(stored.list.exportKind, inheritable = true),
+            requireRoundEnabled = requireEnabled,
             recordAgainstList = true,
             confirm = confirm,
+            assumeNotNow = assumeNotNow,
             assetControls = stored.controls.associate { it.taskId to it.assetControls }
         )
     }
 
-    /**
-     * Posts one payload, whatever assembled it.
-     *
-     * Split out from [deliver] when Quick Review stopped belonging to a List: a folder review has
-     * a real round to report and a real body to keep, but no list row to record a delivery
-     * against, so [recordAgainstList] is the one thing that differs. Everything the user sees —
-     * the notice, the history record, the empty-payload and switched-off cases — is deliberately
-     * identical, because from the user's side it is the same webhook doing the same job.
-     */
     /**
      * One list round's whole payload input, read in one pass under [writeOrder].
      *
@@ -2620,127 +2932,384 @@ class ListsViewModel @JvmOverloads constructor(
         val controls: List<TaskAssetControls>
     )
 
+    /**
+     * One round's delivery, whatever asked for it. **The release's headline rule, implemented.**
+     *
+     * [listChoice] is what the List decided, decoded from `lists.exportKind` by the caller —
+     * [ExportChoice.By] when the List named a mechanism, [ExportChoice.Nothing] when it said
+     * nothing exports, and [ExportChoice.Inherit] when it deferred to its Todos. A folder round
+     * passes [ExportChoice.Inherit] too, for the honest reason: there is no List, so there is
+     * nothing above the Todos to defer to.
+     *
+     * [requireRoundEnabled] applies the List's own switch — the card's *Export when this list is
+     * completed* — and it is the one thing here that is about the **List** rather than about a
+     * mechanism. It survives into the plural case because a round that does not happen cannot be
+     * split, so it is asked once, of the round, and never per group. A folder round passes `false`
+     * and is gated by the switches its own callers already read.
+     *
+     * The order is the user's own, and the code is their sentence: *"浏览退出或者完成 -> 触发 export
+     * -> 检查 list 当前是否有配置 export -> 没有，则统计此次 payload 涉及的 task 的来源 -> 按照来源
+     * todo 整理成多份 payload -> 按照 todo 各自配置的 payload 输出"*.
+     *
+     * [assumeNotNow] is the app answering *Not now* on the user's behalf, for a round they are not
+     * present for — a List that completed under somebody else's review. It changes two things and
+     * both follow from the same fact: nothing is sent, and **nothing is shown**, because a notice
+     * about a List the user is not looking at is the same interruption the dialog would have been.
+     * The round is kept, the List is left saying *not sent*, and the history is where it will be
+     * found. Every outcome is silenced and not merely the confirmation — a failure here is still a
+     * failure, recorded as one, to be read when the round is.
+     */
     private suspend fun deliverPayload(
         list: ListEntity,
         rows: List<ListItemEntity>,
         event: String,
-        requireEnabled: Boolean,
-        useDefaultWebhook: Boolean,
+        listChoice: ExportChoice,
+        requireRoundEnabled: Boolean,
         recordAgainstList: Boolean,
         confirm: Boolean,
+        assumeNotNow: Boolean = false,
         assetControls: Map<String, String> = emptyMap()
     ) {
         val current = settingsStore.read()
         val listId = list.id
+        val url = current.defaultWebhookUrl.trim()
+
+        // The one door every notice in this method goes through, so a round that is being kept
+        // quietly cannot leak one out of the branch nobody remembered. The notice is still built
+        // and still returned — [keepRound] writes its words into the history, which is the whole
+        // of the report this round gets.
+        fun queued(notice: WebhookNotice): WebhookNotice = if (assumeNotNow) notice else raise(notice)
+
         // Action wire values resolved now, not when the chips were tapped: an item's boolean
         // means "slot 1 is selected", and what slot 1 is called is current configuration — which
         // since v0.5.0 also means the *control* is current, because it is what names the slots.
+        //
+        // `webhookItems` is the one switch that narrows *what* leaves rather than *how*, so it
+        // runs once on the round rather than per group: a group is a subset of a round, and the
+        // same filter applied twice is the same filter.
         val items = webhookItems(rows, current)
 
-        // Built before the branches below rather than just before the POST: a delivery that
-        // never leaves is exactly the one whose body has to be kept.
-        val payload = buildWebhookPayload(event, list, items, current, assetControls)
+        // The List said nothing exports. Silence is the answer, and deliberately without a notice:
+        // the user set this up, and telling someone what they chose not to have happen is the
+        // noise a declined confirmation already refuses to make.
+        if (listChoice is ExportChoice.Nothing) return
 
-        // Whichever webhook this is, both halves of its configuration come from the same place:
-        // the app default is switched on by the app's own setting, a list's by the list's own.
-        val enabled = if (useDefaultWebhook) current.defaultWebhookEnabled else list.webhookEnabled
-        val url = (if (useDefaultWebhook) current.defaultWebhookUrl else list.webhookUrl).trim()
+        // One clock read for the round, so a file named `…-143022` cannot contain a header that
+        // says a different second — and so the two are assertable together rather than being a
+        // thing that is usually right.
+        val at = now()
 
-        fun describe(outcome: NoticeOutcome, itemCount: Int?, httpCode: Int?, error: String?) =
-            noticeOf(list.title, event, url, useDefaultWebhook, itemCount, outcome, httpCode, error)
+        // The round's payload, in the shape the pre-split code already had: only the origin moves.
+        suspend fun payloadOf(rowsToSend: List<ListItemEntity>, sourceId: String?, sourceTitle: String?) =
+            ExportPayload(
+                event = event,
+                listId = list.id,
+                listTitle = list.title,
+                completedAt = list.completedAt,
+                sourceId = sourceId,
+                sourceTitle = sourceTitle,
+                at = at,
+                items = rowsToSend.map {
+                    exportItemView(list, it, assetControls[it.taskId].orEmpty(), resolverNow())
+                }
+            )
 
-        fun tell(outcome: NoticeOutcome, itemCount: Int?, httpCode: Int?, error: String?) =
-            raise(describe(outcome, itemCount, httpCode, error))
+        // No delivery is recorded against the list for a switched-off List — there was no attempt
+        // — but the user is still told, and the body is still kept. A List quietly completing with
+        // no export is exactly the case that otherwise looks identical to one that silently
+        // failed, and the round inside it is worth just as much.
+        //
+        // The body is rendered by the List's own kind when it named one, and by the webhook
+        // otherwise. It describes the round rather than a delivery — which is what it is for, and
+        // what the record's `kind` column then says which rendering of it this is.
+        // The mechanism the *round* would have used, for the two outcomes that end before any
+        // group exists: the List's own kind when it named one, and the webhook otherwise — the same
+        // fallback the body below is rendered by, so a notice and the payload it describes agree.
+        val roundKind = (listChoice as? ExportChoice.By)?.kind ?: ExportKind.WEBHOOK
 
-        // Every verdict is kept, in the same words the user was just given, so the history says
-        // exactly what the dialog said. Successes included: a history that holds only failures
-        // cannot answer "did that round actually go out?", which is the question people have.
-        // Nothing is kept for a payload with nothing in it - there would be nothing to resend.
-        suspend fun keep(notice: WebhookNotice) {
-            if (items.isEmpty()) return
-            dao.insertWebhookRecord(
-                WebhookRecordEntity(
-                    event = event,
-                    listTitle = list.title,
+        if (requireRoundEnabled && !list.exportOnCompletion) {
+            val kind = roundKind
+            val payload = payloadOf(items, null, null)
+            val notice = queued(
+                noticeOf(
+                    list.title, event, url, kind = kind, defaultWebhook = true,
                     itemCount = items.size,
-                    payload = payload,
-                    at = now(),
-                    outcome = notice.outcome.name,
-                    detail = notice.outcomeLabel
+                    outcome = NoticeOutcome.DISABLED, httpCode = null, error = null
                 )
             )
-        }
-
-        // No delivery is recorded against the list for a switched-off webhook — there was no
-        // attempt — but the user is still told, and the body is still kept. A list quietly
-        // completing with no delivery is exactly the case that otherwise looks identical to a
-        // delivery that silently failed, and the round inside it is worth just as much.
-        if (requireEnabled && !enabled) {
-            keep(tell(NoticeOutcome.DISABLED, null, null, null))
+            keepRound(list, event, kind, payload, bodyOf(kind, url, payload), notice)
             return
         }
 
-        val urlProblem = webhookUrlError(url)
-        if (urlProblem != null) {
-            if (recordAgainstList) {
-                dao.recordDelivery(listId, now(), DeliveryStatus.FAILED.name, null, urlProblem)
-            }
-            keep(tell(NoticeOutcome.FAILED, null, null, urlProblem))
-            return
-        }
-
-        // A usable webhook with nothing to put in it: a review left without a single swipe, or a
-        // payload narrowed to checked items when none are. An empty items array would tell a
-        // receiver a round happened when none did, so this is reported rather than posted, and
-        // nothing is recorded, because nothing was attempted.
+        // A usable configuration with nothing to put in it: a review left without a single swipe,
+        // or a payload narrowed to checked items when none are. Each group would render an empty
+        // payload, and an empty items array would tell a receiver a round happened when none did —
+        // so this is reported rather than delivered, and nothing is recorded, because nothing was
+        // attempted.
         if (items.isEmpty()) {
-            tell(NoticeOutcome.EMPTY, 0, null, null)
+            queued(
+                noticeOf(
+                    list.title, event, url, kind = roundKind, defaultWebhook = true, itemCount = 0,
+                    outcome = NoticeOutcome.EMPTY, httpCode = null, error = null
+                )
+            )
             return
         }
 
-        val describing = WebhookProgress(
-            event = event,
-            listTitle = list.title,
-            host = webhookHost(url),
-            itemCount = items.size,
-            defaultWebhook = useDefaultWebhook
-        )
+        // Task -> the Todo it came from, in one query for the whole round rather than one per
+        // group. A Task with no row in `task_imports` is absent from the map rather than mapped to
+        // a null kind, which is what lets the planner tell *no Todo owns this* from *a Todo whose
+        // kind could not be read*.
+        val sources = writeOrder.withLock {
+            dao.getExportSources(items.map { it.taskId }.distinct())
+        }.associateBy { it.taskId }
 
-        // Everything is settled and something really is about to leave the device - so this is
-        // where an automatic delivery asks. Deliberately after the checks above and not before:
-        // a switched-off webhook or an unusable URL is not a decision to put to the user, and
-        // asking whether to send only to answer that it was off anyway would be theatre.
+        val groups = planExports(items, listChoice) { row ->
+            sources[row.taskId]?.let { stored ->
+                ExportSource(
+                    id = stored.sourceId,
+                    title = stored.sourceName,
+                    // A Todo's word decoded as a Todo's: `inherit` on one is Nothing, because a
+                    // Todo has nothing above it to follow. This is decision 6's asymmetry, met at
+                    // the one place the two columns' vocabularies touch.
+                    kind = (decodeExportChoice(stored.exportKind, inheritable = false)
+                        as? ExportChoice.By)?.kind
+                )
+            }
+        }
+
+        // Every Todo this round touched said nothing exports, so there is no group to deliver and
+        // no payload to keep. **The round is reported anyway, and that is the point.**
         //
-        // Declining is not a failure and costs nothing. The payload is kept exactly as a failed
-        // one is, so a round refused here can still be sent later from the history, and nothing
-        // about the items - least of all whether they are checked - is touched either way. There
-        // is no notice for it: the user just pressed the button, and telling them what they did
-        // is noise.
-        if (confirm && !awaitConfirmation(describing)) {
-            keep(describe(NoticeOutcome.DECLINED, items.size, null, null))
+        // This used to return in silence, which made a round that exported nothing indistinguishable
+        // from one that exported and failed to tell anyone: no file, no POST, no record, no word.
+        // Quick Review's promise is that finishing a round produces a result — that is what "send
+        // when leaving a review" is for — so the user has to be told which of the two they got. The
+        // notice is the cheap half of the fix the user chose: nothing is stored, because there is no
+        // payload whose kind would mean anything and a row reading *exported by nothing, to nowhere*
+        // would be a record of an attempt that was never made. See UNCONFIGURED.
+        //
+        // Note that the *List* saying nothing is deliberately still silent, above: that is an answer
+        // the user gave on this very List, while this is a configuration gap they cannot see from
+        // the screen they finished on.
+        if (groups.isEmpty()) {
+            queued(
+                noticeOf(
+                    list.title, event, url, kind = roundKind, defaultWebhook = true,
+                    itemCount = items.size,
+                    outcome = NoticeOutcome.UNCONFIGURED, httpCode = null, error = null
+                )
+            )
             return
         }
 
-        val result = post(describing, url, payload)
-        if (recordAgainstList) {
-            dao.recordDelivery(listId, now(), result.status.name, result.httpCode, result.error)
+        val notices = mutableListOf<WebhookNotice>()
+
+        // The answer to this round's one question, kept so that the second group of a split round
+        // does not ask it again: a round is one thing the user agreed to, and two dialogs for it
+        // would be the app asking twice whether it may do the single thing it was told to do.
+        var roundAnswer: Boolean? = null
+
+        groups.forEach { group ->
+            val payload = payloadOf(group.items, group.sourceId, group.sourceTitle)
+            val body = bodyOf(group.kind, url, payload)
+
+            fun describe(
+                outcome: NoticeOutcome,
+                httpCode: Int?,
+                error: String?,
+                location: String? = null
+            ) = noticeOf(
+                listTitle = list.title,
+                event = event,
+                url = url,
+                kind = group.kind,
+                defaultWebhook = group.sourceId == null,
+                itemCount = group.items.size,
+                outcome = outcome,
+                httpCode = httpCode,
+                error = error,
+                location = location
+            )
+
+            fun tell(
+                outcome: NoticeOutcome,
+                httpCode: Int?,
+                error: String?,
+                location: String? = null
+            ): WebhookNotice = queued(describe(outcome, httpCode, error, location))
+                .also { notices += it }
+
+            // A webhook with nowhere to go is the failure the user most needs telling about, and
+            // it is recorded against the List as every other failure is: the round happened, and
+            // the reason it did not leave is configuration the user can fix.
+            val urlProblem = if (group.kind == ExportKind.WEBHOOK) webhookUrlError(url) else null
+            if (urlProblem != null) {
+                if (recordAgainstList) {
+                    dao.recordDelivery(listId, now(), DeliveryStatus.FAILED.name, null, urlProblem)
+                }
+                keepRound(list, event, group.kind, payload, body, tell(NoticeOutcome.FAILED, null, urlProblem))
+                return@forEach
+            }
+
+            val exporter = exporterFor(group.kind, url, getApplication())
+            if (exporter == null) {
+                keepRound(
+                    list, event, group.kind, payload, body,
+                    tell(NoticeOutcome.FAILED, null, "there is nowhere for this to go")
+                )
+                return@forEach
+            }
+
+            // A webhook switch that is off is not a failure and not a decision to put to the user:
+            // nothing is attempted, so there is nothing to confirm and nothing to retry. Only the
+            // webhook kind has such a switch — a file write needs no permission to happen.
+            if (group.kind == ExportKind.WEBHOOK && !current.defaultWebhookEnabled) {
+                keepRound(list, event, group.kind, payload, body, tell(NoticeOutcome.DISABLED, null, null))
+                return@forEach
+            }
+
+            // Everything is settled and something really is about to leave — so this is where an
+            // automatic delivery asks. Deliberately after the checks above and not before: a
+            // switched-off webhook or an unusable URL is not a decision to put to the user, and
+            // asking whether to export only to answer that it was off anyway would be theatre.
+            //
+            // `asksBeforeDelivering` is what keeps a file write out of it. Asking before every
+            // round would train the user to tap through the one dialog that matters.
+            //
+            // Declining is not a failure and costs nothing. The payload is kept exactly as a
+            // failed one is, so a round refused here can still be sent later from the history, and
+            // nothing about the items — least of all whether they are checked — is touched either
+            // way. There is no notice for it: the user just pressed the button, and telling them
+            // what they did is noise. The List is told all the same — see the record below.
+            //
+            // Sits exactly here, and not before the three checks above, so that *the app is
+            // answering for the user* means the same thing it means when the user answers: this is
+            // the point past which something would actually go. A URL that cannot be used, or a
+            // webhook that is switched off, is still recorded as the failure and the state it is
+            // — dismissing a List's export as *not now* because its URL happens to be blank would
+            // file a configuration problem under a choice the user never made.
+            if (assumeNotNow) {
+                val held = describe(NoticeOutcome.DEFERRED, null, null)
+                if (recordAgainstList) {
+                    dao.recordDelivery(listId, now(), DeliveryStatus.NOT_SENT.name, null, null)
+                }
+                keepRound(list, event, group.kind, payload, body, held)
+                return@forEach
+            }
+
+            if (confirm && exporter.asksBeforeDelivering) {
+                val allowed = roundAnswer ?: awaitConfirmation(
+                    WebhookProgress(
+                        event = event,
+                        listTitle = list.title,
+                        host = webhookHost(url),
+                        itemCount = group.items.size,
+                        defaultWebhook = group.sourceId == null
+                    )
+                ).also { roundAnswer = it }
+                if (!allowed) {
+                    // The same record as the branch above, from the same answer: the user said
+                    // *not now*, so the List's last export is a payload that did not leave. Kept
+                    // as a delivery of its own rather than left as whatever came before, which
+                    // would have the List claiming its most recent export succeeded when the most
+                    // recent thing that happened to it was this.
+                    if (recordAgainstList) {
+                        dao.recordDelivery(listId, now(), DeliveryStatus.NOT_SENT.name, null, null)
+                    }
+                    keepRound(list, event, group.kind, payload, body, describe(NoticeOutcome.DECLINED, null, null))
+                    return@forEach
+                }
+            }
+
+            val attempt = exporter.deliver(payload, body)
+            val notice = when (attempt) {
+                is ExportAttempt.Delivered -> {
+                    if (recordAgainstList) {
+                        dao.recordDelivery(
+                            listId, now(), DeliveryStatus.SUCCESS.name, attempt.httpCode, null
+                        )
+                    }
+                    tell(exporter.deliveredOutcome, attempt.httpCode, null, attempt.location)
+                }
+                is ExportAttempt.Failed -> {
+                    if (recordAgainstList) {
+                        dao.recordDelivery(listId, now(), DeliveryStatus.FAILED.name, null, attempt.detail)
+                    }
+                    tell(NoticeOutcome.FAILED, null, attempt.detail)
+                }
+                ExportAttempt.Skipped -> tell(NoticeOutcome.DISABLED, null, null)
+            }
+            keepRound(list, event, group.kind, payload, body, notice)
         }
-        val succeeded = result.status == DeliveryStatus.SUCCESS
-        val notice = tell(
-            outcome = if (succeeded) NoticeOutcome.SENT else NoticeOutcome.FAILED,
-            itemCount = items.size,
-            httpCode = result.httpCode,
-            error = result.error
-        )
-        keep(notice)
 
         // What the round leaves on the device, once the round itself has been reported.
         //
-        // Only for a delivery the app decided to make, which is the same test [confirm] already
-        // stands for: the Test button sends a list the user is looking at rather than a round
-        // they just finished, and offering to delete its files off the back of a button labelled
-        // *Test* would be indefensible. A resend never reaches here at all.
-        if (confirm) offerPostWebhookDeletion(current, list, items, notice)
+        // **Once per round and not once per group.** The offer is about the files the round
+        // covered, and a round that split into two payloads did not cover two sets of files.
+        // [offerPostWebhookDeletion] reads one notice to decide whether it is an offer or a
+        // report, so a round in which any group failed reports rather than offers — deleting the
+        // files a group described before anybody had received them would destroy the only copy of
+        // what that group was about.
+        //
+        // Only for a delivery the app decided to make, which is what [confirm] already stands for:
+        // the Test button sends a List the user is looking at rather than a round they just
+        // finished, and offering to delete its files off the back of a button labelled *Test*
+        // would be indefensible. A resend never reaches here at all.
+        //
+        // And never for a round the user was not present for. [assumeNotNow] is a promise that this
+        // List says nothing on their screen, and that has to include the reports this offer turns
+        // into when a group failed or was switched off — a *these files were not sent* dialog over
+        // somebody else's review is the interruption the whole branch exists to prevent.
+        if (confirm && notices.isNotEmpty() && !assumeNotNow) {
+            offerPostWebhookDeletion(
+                current,
+                list,
+                items,
+                notices.firstOrNull { !it.succeeded } ?: notices.last()
+            )
+        }
+    }
+
+    /**
+     * The body one group produces, rendered by the kind that would have delivered it.
+     *
+     * Built before the branches that use it rather than just before the delivery: the payload that
+     * never leaves is exactly the one whose body has to be kept. For a webhook with no URL there is
+     * no exporter, and the JSON is still what was going to be posted — which is why the fallback is
+     * the webhook body rather than nothing.
+     */
+    private fun bodyOf(kind: ExportKind, url: String, payload: ExportPayload): String =
+        exporterFor(kind, url, getApplication())?.render(payload) ?: buildWebhookPayload(payload)
+
+    /**
+     * Keeps one group's round in the history, in the same words the user was just given.
+     *
+     * Successes included: a history that holds only failures cannot answer *did that round actually
+     * go out?*, which is the question people have. Nothing is kept for a group with nothing in it —
+     * there would be nothing to resend.
+     */
+    private suspend fun keepRound(
+        list: ListEntity,
+        event: String,
+        kind: ExportKind,
+        payload: ExportPayload,
+        body: String,
+        notice: WebhookNotice
+    ) {
+        if (payload.items.isEmpty()) return
+        dao.insertWebhookRecord(
+            ExportRecordEntity(
+                event = event,
+                listTitle = list.title,
+                itemCount = payload.items.size,
+                payload = body,
+                at = now(),
+                outcome = notice.outcome.name,
+                detail = notice.outcomeLabel,
+                kind = kind.key
+            )
+        )
     }
 
     /**
@@ -2827,6 +3396,9 @@ class ListsViewModel @JvmOverloads constructor(
             listTitle = record.listTitle,
             event = record.event,
             url = url,
+            // The record's own kind, so a replayed round is described as what it was. Only a
+            // webhook record is offered a Resend at all; a txt one never reaches here.
+            kind = ExportKind.fromKey(record.kind) ?: ExportKind.WEBHOOK,
             defaultWebhook = true,
             itemCount = record.itemCount,
             outcome = outcome,
@@ -2887,8 +3459,9 @@ class ListsViewModel @JvmOverloads constructor(
      *
      * Every delivery that was actually attempted gets its own notice: two of them for one list in
      * one moment means two things really happened, and collapsing them would hide one. Results
-     * where *nothing* was attempted collapse per list instead, because a list's webhook and the
-     * default webhook both being switched off is one thing to say, not two.
+     * where *nothing* was attempted collapse per list instead, because one reason for a quiet
+     * round — the webhook being switched off, nothing to send, nothing configured to send it —
+     * repeated across a split round is one thing to say, not one per group.
      *
      * Returns what it built, collapsed or not, so a caller that also has to file the result away
      * describes it in exactly the words the user was given.
@@ -2897,13 +3470,17 @@ class ListsViewModel @JvmOverloads constructor(
         listTitle: String,
         event: String,
         url: String,
+        kind: ExportKind,
         defaultWebhook: Boolean,
         itemCount: Int?,
         outcome: NoticeOutcome,
         httpCode: Int?,
-        error: String?
+        error: String?,
+        location: String? = null
     ): WebhookNotice = raise(
-        noticeOf(listTitle, event, url, defaultWebhook, itemCount, outcome, httpCode, error)
+        noticeOf(
+            listTitle, event, url, kind, defaultWebhook, itemCount, outcome, httpCode, error, location
+        )
     )
 
     /**
@@ -2918,23 +3495,31 @@ class ListsViewModel @JvmOverloads constructor(
         listTitle: String,
         event: String,
         url: String,
+        kind: ExportKind,
         defaultWebhook: Boolean,
         itemCount: Int?,
         outcome: NoticeOutcome,
         httpCode: Int?,
-        error: String?
+        error: String?,
+        location: String? = null
     ): WebhookNotice = WebhookNotice(
         event = event,
         listTitle = listTitle,
-        // The URL that was actually used, which for Quick Review is the app default rather
-        // than anything on the list.
-        host = webhookHost(url),
+        kind = kind,
+        // The URL that was actually used, which since v0.5.6 is always the app default - there is
+        // no list URL left to prefer.
+        //
+        // Null when the round was not going anywhere over the wire. A text export has no host, and
+        // a URL sitting in Settings because it is used by *other* rounds is not this round's
+        // destination - showing it on a txt notice names a machine the file never went near.
+        host = if (kind == ExportKind.WEBHOOK) webhookHost(url) else null,
         itemCount = itemCount,
         outcome = outcome,
         httpCode = httpCode,
         error = error,
         defaultWebhook = defaultWebhook,
-        at = now()
+        at = now(),
+        location = location
     )
 
     /** Queues one for acknowledgement, collapsed against what is already waiting, and returns it. */

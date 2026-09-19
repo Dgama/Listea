@@ -31,6 +31,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -64,6 +66,10 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import com.example.listea.domain.ExportChoice
+import com.example.listea.domain.LIST_EXPORT_CHOICES
+import com.example.listea.domain.decodeExportChoice
+import com.example.listea.domain.listExportChoiceLabel
 import com.example.listea.data.DissolutionReason
 import com.example.listea.data.FolderDiff
 import com.example.listea.data.ItemAction
@@ -118,6 +124,7 @@ fun ListDetailScreen(
 
     val freshness by viewModel.sourceFreshness.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val resolver by viewModel.templateResolver.collectAsStateWithLifecycle()
     val arrangements by viewModel.arrangements.collectAsStateWithLifecycle()
 
     // The same two sources the Folder browser reads, under this list's own key, so "same filter
@@ -165,6 +172,7 @@ fun ListDetailScreen(
             initialItemId = openedId,
             listTitle = current.list.title,
             settings = settings,
+            resolver = resolver,
             onClose = { viewingItemId = null }
         )
         return
@@ -231,24 +239,25 @@ fun ListDetailScreen(
                 }
             }
 
-            // 2. Progress — the count, the way into Review, and the webhook completion drives.
+            // 2. Progress — the count and the way into Review, and nothing else.
             item {
-                ProgressCard(
-                    detail = current,
-                    onReview = onReview,
-                    webhook = {
-                        WebhookSection(
-                            list = current.list,
-                            onEnabledChange = { viewModel.setWebhookEnabled(listId, it) },
-                            onUrlChange = { viewModel.setWebhookUrl(listId, it) },
-                            onTest = { viewModel.testWebhook(listId) }
-                        )
-                    }
+                ProgressCard(detail = current, onReview = onReview)
+                Spacer(Modifier.height(ListeaDimens.RowGap))
+            }
+
+            // 3. Export — what this List does about exporting, which is its own question and its
+            // own card. It used to share Progress's, and the two are different kinds of statement:
+            // how far along the List is, versus where its decisions go when the round ends.
+            item {
+                ExportCard(
+                    list = current.list,
+                    onChoiceChange = { viewModel.setListExportKind(listId, it) },
+                    onCompletionChange = { viewModel.setExportOnCompletion(listId, it) }
                 )
                 Spacer(Modifier.height(ListeaDimens.SectionGap))
             }
 
-            // 3. Items — ListItems only. A folder-backed list holds its source files, however
+            // 4. Items — ListItems only. A folder-backed list holds its source files, however
             // deep they sit; the folders they came from are not items and never appear here.
             item {
                 // The header keeps the list's whole item count behind it: the controls that
@@ -285,10 +294,10 @@ fun ListDetailScreen(
                         item = item,
                         settings = settings,
                         // Resolved here rather than inside the row, because [ReviewItem] carries the
-                        // record and not the control: the row would have to be handed both settings
-                        // and the item anyway, and a row that resolved for itself would be a second
-                        // place the union rule was written down.
-                        control = settings.controlForTask(item.assetControls),
+                        // record and not the templates it is attached to: the row would have to be
+                        // handed both the resolver and the item anyway, and a row that resolved for
+                        // itself would be a second place the union rule was written down.
+                        control = resolver.controlForTask(item.assetControls),
                         onToggle = { viewModel.setItemCompleted(item, it) },
                         onOpen = { viewingItemId = item.id },
                         onDelete = { item.rowId?.let { viewModel.deleteItem(listId, it) } }
@@ -471,19 +480,17 @@ private fun countLine(count: Int, noun: String): String =
     "$count $noun" + if (count == 1) "" else "s"
 
 /**
- * How far along the list is, and the two things that act on that: Review, and the webhook that a
- * completion delivers. The count speaks for itself — no "in progress" restating what "12 / 20"
- * already says.
+ * How far along the list is, and the one thing that acts on that: Review. The count speaks for
+ * itself — no "in progress" restating what "12 / 20" already says.
  *
- * The webhook sits at the bottom of this card and expands in place. Because the whole page is one
- * scroll surface, opening it pushes the items down the page rather than squeezing them into
- * whatever height is left over.
+ * It carried the export controls until v0.5.6, at the bottom of the same card. They are now
+ * [ExportCard], and the split is not cosmetic: this card says *how far along*, and the other says
+ * *where the decisions go when the round ends*. Two questions, two cards.
  */
 @Composable
 private fun ProgressCard(
     detail: ListDetail,
-    onReview: () -> Unit,
-    webhook: @Composable () -> Unit
+    onReview: () -> Unit
 ) {
     SectionCard(title = "Progress") {
         Row(
@@ -512,9 +519,108 @@ private fun ProgressCard(
                 modifier = Modifier.fillMaxWidth()
             )
         }
-        HorizontalDivider(Modifier.padding(top = ListeaDimens.CompactGap))
-        webhook()
     }
+}
+
+/**
+ * What this List does about exporting, which is a statement about **this List** and never about
+ * HTTP: the mechanism is one answer among several, and the next kind will not be a webhook at all.
+ *
+ * Three controls, and each answers one of the three questions the model has to answer here:
+ *
+ * - **Where** — the dropdown. *Same as the Todos* is the state a List is in until the user says
+ *   otherwise, and it is what makes a List holding Tasks from several Todos export more than once,
+ *   once per Todo's own answer. The options come from [LIST_EXPORT_CHOICES], so the set a user can
+ *   pick from and the set the dispatcher can act on are one list.
+ * - **When** — *Export when this list is completed*, which is the List's own round switch and the
+ *   only thing on this card the dispatcher consults before splitting a round.
+ * - **How it went** — *Last export*, one line, because a List whose exports are failing should say
+ *   so here rather than only in a history three screens away.
+ *
+ * The URL field and the Test button that used to live here are gone, and deliberately: a List that
+ * held its own URL was a copy of a setting that lives elsewhere, seeded once and never updated, so
+ * changing the default reached no existing List. Every webhook now reads the app default, and the
+ * Test button moved to where that default is configured.
+ */
+@Composable
+private fun ExportCard(
+    list: ListEntity,
+    onChoiceChange: (ExportChoice) -> Unit,
+    onCompletionChange: (Boolean) -> Unit
+) {
+    var menuOpen by rememberSaveable { mutableStateOf(false) }
+    var expanded by rememberSaveable { mutableStateOf(true) }
+    val choice = decodeExportChoice(list.exportKind, inheritable = true)
+
+    SectionCard(title = "Export") {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded }
+                .padding(vertical = ListeaDimens.RowGap),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
+        ) {
+            Text("Method", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+            StatusLine(listExportChoiceLabel(choice))
+            Icon(
+                if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                contentDescription = if (expanded) "Collapse" else "Expand",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        if (expanded) {
+            Box {
+                OutlinedButton(onClick = { menuOpen = true }, modifier = Modifier.fillMaxWidth()) {
+                    Text(listExportChoiceLabel(choice), maxLines = 1)
+                }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    LIST_EXPORT_CHOICES.forEach { option ->
+                        DropdownMenuItem(
+                            text = { Text(listExportChoiceLabel(option)) },
+                            onClick = {
+                                menuOpen = false
+                                onChoiceChange(option)
+                            }
+                        )
+                    }
+                }
+            }
+            Text(
+                exportChoiceHelp(choice),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = ListeaDimens.CompactGap)
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = ListeaDimens.RowGap),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "Export when this list is completed",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f)
+                )
+                Switch(
+                    checked = list.exportOnCompletion,
+                    onCheckedChange = onCompletionChange
+                )
+            }
+            HorizontalDivider(Modifier.padding(vertical = ListeaDimens.CompactGap))
+            StatusLine(exportLabel(list))
+        }
+    }
+}
+
+/** One sentence under the dropdown, saying what the answer it is showing actually does. */
+private fun exportChoiceHelp(choice: ExportChoice): String = when (choice) {
+    ExportChoice.Inherit ->
+        "Each Todo this list holds decides for itself, so one round can export more than once."
+    ExportChoice.Nothing -> "Nothing leaves this list, whatever its Todos are set to."
+    is ExportChoice.By -> "Every export from this list goes by " + choice.kind.label.lowercase() + "."
 }
 
 /**
@@ -630,84 +736,6 @@ private fun changesSummary(diff: FolderDiff): String = buildList {
     if (diff.newlyMissingCount > 0) add(countLine(diff.newlyMissingCount, "missing file"))
     if (diff.restoredPaths.isNotEmpty()) add(countLine(diff.restoredPaths.size, "restored file"))
 }.joinToString(" · ")
-
-/**
- * The list's optional completion action. Collapsed by default so the items stay the focus.
- * Nothing here sends anything on its own: delivery is triggered by the ViewModel when the
- * database reports a real incomplete -> complete transition, or by the Test button.
- */
-@Composable
-private fun WebhookSection(
-    list: ListEntity,
-    onEnabledChange: (Boolean) -> Unit,
-    onUrlChange: (String) -> Unit,
-    onTest: () -> Unit
-) {
-    var expanded by rememberSaveable { mutableStateOf(false) }
-    // Seeded once per list so incoming database updates never fight with typing.
-    var urlText by remember(list.id) { mutableStateOf(list.webhookUrl) }
-    val urlProblem = webhookUrlError(urlText)
-
-    // The shared browse-row wording, minus the prefix the header already provides: one
-    // description of webhook state, formatted once, wherever it is shown.
-    val status = webhookStatusLabel(
-        enabled = list.webhookEnabled,
-        lastDeliveryStatus = list.lastDeliveryStatus,
-        lastDeliveryCode = list.lastDeliveryCode
-    ).removePrefix("Webhook · ")
-
-    Column(Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { expanded = !expanded }
-                .padding(vertical = ListeaDimens.RowGap),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
-        ) {
-            Text("Webhook", style = MaterialTheme.typography.titleSmall)
-            StatusLine(status, modifier = Modifier.weight(1f))
-            Icon(
-                if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                contentDescription = if (expanded) "Collapse" else "Expand",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-
-        if (expanded) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    "Send when this list is completed",
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.weight(1f)
-                )
-                Switch(checked = list.webhookEnabled, onCheckedChange = onEnabledChange)
-            }
-            OutlinedTextField(
-                value = urlText,
-                onValueChange = { urlText = it; onUrlChange(it) },
-                label = { Text("POST URL") },
-                singleLine = true,
-                isError = urlText.isNotBlank() && urlProblem != null,
-                supportingText = urlProblem?.let { problem -> { Text(problem) } },
-                keyboardOptions = KeyboardOptions(
-                    keyboardType = KeyboardType.Uri,
-                    imeAction = ImeAction.Done
-                ),
-                modifier = Modifier.fillMaxWidth()
-            )
-            ActionGroup {
-                OutlinedButton(onClick = onTest, enabled = urlProblem == null) {
-                    Text("Test webhook", maxLines = 1)
-                }
-                StatusLine(deliveryLabel(list))
-            }
-        }
-    }
-}
 
 /**
  * One item: check it, look at it, or remove it. Opening it is a tap on the text.

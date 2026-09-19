@@ -7,14 +7,25 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.SQLiteConnection
 import androidx.sqlite.SQLiteStatement
+import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.execSQL
+import com.example.listea.domain.AssetKind
+import com.example.listea.domain.ButtonType
+import com.example.listea.domain.TEMPLATE_BUTTONS_VERSION
+import com.example.listea.domain.TemplateButton
+import com.example.listea.domain.TemplateId
+import com.example.listea.domain.TemplateScope
+import com.example.listea.domain.TemplateVersionRef
+import com.example.listea.domain.Templates
+import com.example.listea.domain.encodeTemplateButtons
+import com.example.listea.domain.encodeTemplateScope
 import java.util.UUID
 
 @Database(
     entities = [
         ListEntity::class,
         ListItemEntity::class,
-        WebhookRecordEntity::class,
+        ExportRecordEntity::class,
         FileReviewStateEntity::class,
         TaskEntity::class,
         AssetEntity::class,
@@ -28,14 +39,25 @@ import java.util.UUID
         LegacySourceTaskEntity::class,
         LegacyTaskIdEntity::class,
         UpstreamEntity::class,
-        DissolvedTaskStateEntity::class
+        DissolvedTaskStateEntity::class,
+        TemplateEntity::class,
+        TemplateVersionEntity::class
     ],
-    version = 23,
+    version = 25,
     exportSchema = true
 )
 abstract class ListeaDatabase : RoomDatabase() {
 
     abstract fun listsDao(): ListsDao
+
+    abstract fun templateDao(): TemplateDao
+
+    /**
+     * The templates' write side, separate from the read one on purpose — see [TemplateWriteDao].
+     * Both are on the database rather than one behind the other, because the split is which
+     * *caller* may do what, and Room's accessors are the only place that is expressed.
+     */
+    abstract fun templateWriteDao(): TemplateWriteDao
 
     companion object {
         /** V3 added the optional webhook action and its last-delivery record to each list. */
@@ -349,7 +371,7 @@ abstract class ListeaDatabase : RoomDatabase() {
          * drop a column in 3.35, which is Android 14, and this app runs on 7.
          *
          * The ids the old columns become are `custom1` and `custom2`, which is exactly what
-         * [DefaultCustomActions] is configured with. That is what makes this upgrade invisible:
+         * [Templates.DefaultTagButtons] is built with. That is what makes this upgrade invisible:
          * an item marked C1 yesterday resolves to the action still called C1 today, keeps its
          * label, and goes out under the same wire value.
          *
@@ -975,12 +997,20 @@ abstract class ListeaDatabase : RoomDatabase() {
                         "isCompleted INTEGER NOT NULL, recordVersion INTEGER NOT NULL, " +
                         "records TEXT NOT NULL, dissolvedAt INTEGER NOT NULL)"
                 )
+                // `1` written out, and **not** [DISSOLVED_RECORDS_VERSION]. A migration is frozen at
+                // what it wrote the day it shipped; a constant is not. This step wrote the
+                // flag-version's shape — an empty payload, which is the admission recorded above —
+                // and it must go on saying so. Interpolated, it would have started claiming version 2
+                // the moment v0.5.4 added one, which is this step asserting a payload in an encoding
+                // no release ever produced here. The two read the same today because an empty payload
+                // is empty under both, which is exactly why the difference would go unnoticed until
+                // the day one of them changed what empty means.
                 connection.execSQL(
                     "INSERT INTO dissolved_task_state_new " +
                         "(id, sourceId, sourceName, rootUri, sourcePath, groupPath, " +
                         " importerKind, isCompleted, recordVersion, records, dissolvedAt) " +
                         "SELECT id, sourceId, sourceName, rootUri, sourcePath, groupPath, " +
-                        " importerKind, isCompleted, $DISSOLVED_RECORDS_VERSION, '', dissolvedAt " +
+                        " importerKind, isCompleted, 1, '', dissolvedAt " +
                         "FROM dissolved_task_state"
                 )
                 connection.execSQL("DROP TABLE dissolved_task_state")
@@ -1040,6 +1070,398 @@ abstract class ListeaDatabase : RoomDatabase() {
                 )
             }
         }
+
+        /**
+         * The step that gives a template a row, gives a pair's marks one place to live, and turns
+         * every Todo's and Task's configuration into a reference to the template that answers it.
+         *
+         * **It creates two tables and three columns, and it rewrites two columns.** The additions are
+         * additive: every `isFavorite` and `customActions` goes on holding what it held, so the merge
+         * into `selections` can be checked against the rows it came from. Two of the three are the
+         * projection slots `list_items` and `file_review_state` fill from the pair table; only
+         * `task_asset_state.selections` is a record. The rewrites
+         * are not, and they are the half of this release that has no second chance — see
+         * [rewriteAssetControls].
+         *
+         * **Why the rewrite is this step and not a later one.** The plan had it as a separate
+         * 23 → 24 → 25 pair, so that a build could exist in which the tables are seeded and nothing
+         * yet depends on them. That build is the one this codebase's own rule refuses: the resolver
+         * reads a reference while the columns still hold a configuration, and the two disagree about
+         * what the column means. Version 24 has never shipped and no device holds a database written
+         * by a build that is not this one, so the two steps are one step and there is no version in
+         * between for anything to be wrong in.
+         *
+         * **A database that is already at 24 does not run this again.** The maintainer's phone is
+         * one: it was carried to 24 by the build that ran the additive half alone, and it holds no
+         * `sources` or `task_imports` row at all, so there is nothing for the rewrite to be needed
+         * for. Rows in the old shape that a future device somehow keeps are still read, with their
+         * tags dropped — [decodeTemplateAttachments] is the tolerant reader that makes that true, and
+         * this is the step that makes it the fallback rather than the ordinary path.
+         *
+         * **The `★` is merged by id rather than special-cased.** It enters the set as `favorite` and
+         * is sorted with everything else by [encodeActionIds], so the string written here is the
+         * string the app writes. A step that put it first, or that concatenated the two columns in
+         * SQL, would produce a form the app never produces and every reader would have to normalise.
+         */
+        internal val MIGRATION_23_24 = object : Migration(23, 24) {
+            override fun migrate(connection: SQLiteConnection) {
+                val now = System.currentTimeMillis()
+
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS templates (id TEXT NOT NULL, name TEXT NOT NULL, " +
+                        "createdAt INTEGER NOT NULL, PRIMARY KEY(id))"
+                )
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS template_versions (templateId TEXT NOT NULL, " +
+                        "version INTEGER NOT NULL, scope TEXT NOT NULL, buttons TEXT NOT NULL, " +
+                        "buttonsVersion INTEGER NOT NULL, createdAt INTEGER NOT NULL, " +
+                        "PRIMARY KEY(templateId, version), " +
+                        "FOREIGN KEY(templateId) REFERENCES templates(id) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE)"
+                )
+                seedBuiltInAssetControl(connection, now)
+
+                connection.execSQL(
+                    "ALTER TABLE task_asset_state ADD COLUMN selections TEXT NOT NULL DEFAULT ''"
+                )
+                // The other two projection slots, and the same `ALTER` rather than a rebuild. Neither
+                // table's old pair is dropped, for the reason `AssetStateEntity.selections` gives: it
+                // needs SQLite 3.35 and this app ships minSdk 24, so dropping one would be a rebuild of
+                // a table a List page and the folder browser read on every row — and the pair is the
+                // only copy of a mark that exists if the merged column is ever found to be wrong. The
+                // two are read by nothing and are written by nothing after this step; the queries fill
+                // *these* slots from the pair table, which is where a decision lives now.
+                connection.execSQL(
+                    "ALTER TABLE list_items ADD COLUMN selections TEXT NOT NULL DEFAULT ''"
+                )
+                connection.execSQL(
+                    "ALTER TABLE file_review_state ADD COLUMN selections TEXT NOT NULL DEFAULT ''"
+                )
+                backfillSelections(connection)
+                rewriteAssetControls(connection, now)
+            }
+        }
+
+        /**
+         * The step that stops calling one mechanism the model.
+         *
+         * Three columns and one `UPDATE`, and the `UPDATE` is the whole reason this is not purely
+         * additive. Read it as two different questions:
+         *
+         * - **A Todo is being preserved.** A Todo that posted before the upgrade must post after it,
+         *   or the release silently stops work the user set up — so the column default is `webhook`,
+         *   which is what every existing Todo was doing. A Todo created *now* is a choice being
+         *   made, and the dialog offers `none` first; that asymmetry is deliberate and lives in the
+         *   Kotlin default (`SourceEntity.exportKind`), not here.
+         * - **A List is being asked what it used to do.** `webhookEnabled` is the switch the user
+         *   actually touched, and it is the only honest signal. `webhookUrl` is **not**: it was
+         *   seeded from the settings default at creation, so every List made while a default was
+         *   set holds one whether or not anybody ever switched it on, and a rule keyed on it would
+         *   pin nearly every List to the webhook. A List that had the switch on becomes `webhook`,
+         *   which is exactly what it did — it posted regardless of its Todos; one that did not
+         *   keeps `inherit`, and follows its Todos from here on.
+         *
+         * `lists.webhookUrl` is **not** dropped and **not** cleared. Dropping a column needs SQLite
+         * 3.35 and this app ships minSdk 24; the column is left holding what it held and is read by
+         * nothing from this version on. `list_items.isCompleted` and `task_state.isFavorite` are the
+         * precedent, and the trade is the same one: an unused column costs a few bytes per row, and
+         * a rebuild costs a table the List page reads on every row.
+         *
+         * The literals are written out rather than interpolated from `ExportKind` / `ExportChoice`.
+         * A migration records what it did on the day it ran, and a later release that renames a key
+         * must not retroactively change what this step wrote on somebody's device.
+         */
+        internal val MIGRATION_24_25 = object : Migration(24, 25) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
+                    "ALTER TABLE sources ADD COLUMN exportKind TEXT NOT NULL DEFAULT 'webhook'"
+                )
+                connection.execSQL(
+                    "ALTER TABLE lists ADD COLUMN exportKind TEXT NOT NULL DEFAULT 'inherit'"
+                )
+                connection.execSQL(
+                    "ALTER TABLE webhook_history ADD COLUMN kind TEXT NOT NULL DEFAULT 'webhook'"
+                )
+                connection.execSQL(
+                    "UPDATE lists SET exportKind = 'webhook' WHERE webhookEnabled = 1"
+                )
+            }
+        }
+
+        /**
+         * The built-in, written by [builtInAssetControlRows] — the same statements a database
+         * *created* at this version gets, bound the way a migration's connection binds them.
+         *
+         * One description of those rows with two callers, because they have to be there wherever the
+         * tables are, and a migration is only how *one* of the two ways a database comes to exist
+         * gets them. See [SeedBuiltInOnCreate] for the other.
+         */
+        private fun seedBuiltInAssetControl(connection: SQLiteConnection, now: Long) {
+            for ((sql, args) in builtInAssetControlRows(now)) {
+                runStatement(connection, sql, args)
+            }
+        }
+
+        /**
+         * One statement, bound and stepped.
+         *
+         * The binding a migration's connection needs rather than the one a DAO's would: a
+         * [SQLiteConnection] takes its arguments positionally and by type, and [builtInAssetControlRows]
+         * describes its rows as `Any?` so that the seed and the minted templates below can be written
+         * once rather than twice.
+         */
+        private fun runStatement(connection: SQLiteConnection, sql: String, args: List<Any?>) {
+            connection.prepare(sql).use { statement ->
+                args.forEachIndexed { index, arg ->
+                    when (arg) {
+                        is Long -> statement.bindLong(index + 1, arg)
+                        is Int -> statement.bindLong(index + 1, arg.toLong())
+                        else -> statement.bindText(index + 1, arg as String)
+                    }
+                }
+                statement.step()
+            }
+        }
+
+        /**
+         * Every pair's marks, merged into one set.
+         *
+         * The read is drained before a single write goes out, for the reason [backfill] gives: a
+         * cursor stepping over a table while that table is being updated is the kind of thing SQLite
+         * is entitled to have an opinion about, and a pair table is thousands of rows, not millions.
+         */
+        private fun backfillSelections(connection: SQLiteConnection) {
+            val merged = mutableListOf<Pair<String, String>>()
+
+            connection.prepare(
+                "SELECT assetId, isFavorite, customActions FROM task_asset_state"
+            ).use { row ->
+                while (row.step()) {
+                    val ids = decodeActionIds(row.getText(2)).toMutableSet()
+                    if (row.getLong(1) != 0L) ids += Templates.FAVOURITE_BUTTON_ID
+                    merged += row.getText(0) to encodeActionIds(ids)
+                }
+            }
+
+            connection.prepare(
+                "UPDATE task_asset_state SET selections = ? WHERE assetId = ?"
+            ).use { write ->
+                for ((assetId, selections) in merged) {
+                    write.bindText(1, selections)
+                    write.bindText(2, assetId)
+                    write.step()
+                    write.reset()
+                }
+            }
+        }
+
+        /**
+         * Both `assetControls` columns, from the configuration a Todo asked for to the template it
+         * is attached to.
+         *
+         * **What the old shape could say and the new one cannot, and where it goes.** A configuration
+         * named a kind, the built-in control, and that kind's tags — so it could say *images and
+         * videos are governed differently*, which is a thing a list of attachments can only say by
+         * attaching two templates. So each distinct tag list becomes one template scoped to the kinds
+         * that carried it, which is what makes a Todo configured two ways hold two templates rather
+         * than one that has to be wrong about a kind.
+         *
+         * **A group identical to the built-in attaches the built-in.** Decision 11 of
+         * `docs/iterations/v0.5.4-plan.md`, and the reason the ordinary upgrade is silent: a Todo
+         * that never edited anything, or that edited only one kind, keeps one attachment naming a
+         * template whose buttons are the ones it had. "Identical" is the encoded form of the whole
+         * button list including `★`, so it is decided by comparing strings rather than by a guess
+         * about which fields matter.
+         *
+         * **A Todo whose two kinds differ therefore produces two templates**, in the column's own
+         * order — image before video, because that is the order the old encoder wrote kinds in and
+         * the order first-match resolution reads. This is the shape change
+         * [docs/iterations/v0.5.4.md] §The scope describes, arriving on rows that predate it.
+         *
+         * Both tables are read before either is written, so a `task_imports` row is rewritten from
+         * what its Todo held and not from what this step has just written to it.
+         */
+        private fun rewriteAssetControls(connection: SQLiteConnection, now: Long) {
+            val seed = Templates.AssetControlSeed
+            val seedButtons = encodeTemplateButtons(seed.buttons)
+            // The `★` a minted template carries, taken from the seed rather than rebuilt: the two
+            // have to be the same button for a mark on one to mean a mark on the other.
+            val star = seed.buttons.firstOrNull { it.id == Templates.FAVOURITE_BUTTON_ID }
+            val minted = mutableMapOf<MintedTemplate, TemplateVersionRef>()
+
+            /**
+             * One row's configuration, as the attachment string that replaces it.
+             *
+             * The groups keep the kinds' declaration order because a `LinkedHashMap` does, and the
+             * kinds are folded in as they are met: a tag list shared by both kinds is one template
+             * governing both, not two templates that happen to say the same thing.
+             */
+            fun attachmentsFor(encoded: String, todoName: String): String {
+                val groups = LinkedHashMap<String, Pair<Set<AssetKind>, List<TemplateButton>>>()
+
+                for ((kind, tags) in decodeLegacyAssetControls(encoded)) {
+                    val buttons = listOfNotNull(star) + tags
+                    val key = encodeTemplateButtons(buttons)
+                    // Re-putting a key `LinkedHashMap` already holds updates it in place, so a tag
+                    // list both kinds carry stays where it was first met rather than moving to the
+                    // end of the column.
+                    val kinds = groups[key]?.first.orEmpty() + kind
+                    groups[key] = kinds to buttons
+                }
+
+                return groups.values.joinToString("\n") { (kinds, buttons) ->
+                    val ref = if (encodeTemplateButtons(buttons) == seedButtons) {
+                        seed.ref
+                    } else {
+                        val wanted = MintedTemplate(
+                            name = todoName,
+                            kinds = kinds,
+                            buttons = buttons
+                        )
+                        minted.getOrPut(wanted) {
+                            insertMintedTemplate(connection, wanted, now)
+                        }
+                    }
+                    "${ref.templateId.value}\t${ref.version}"
+                }
+            }
+
+            val sourceRewrites = mutableListOf<Pair<String, String>>()
+            connection.prepare(
+                "SELECT id, displayName, assetControls FROM sources WHERE assetControls <> ''"
+            ).use { row ->
+                while (row.step()) {
+                    sourceRewrites += row.getText(0) to attachmentsFor(row.getText(2), row.getText(1))
+                }
+            }
+
+            val importRewrites = mutableListOf<Pair<String, String>>()
+            connection.prepare(
+                // The Todo's name rather than the Task's, because a minted template is named for
+                // the thing that chose the configuration — and a Task's own name is its file. The
+                // Task's is the fallback for a row whose Source is gone, which is a row nothing can
+                // name better.
+                "SELECT i.taskId, COALESCE(s.displayName, i.displayName), i.assetControls " +
+                    "FROM task_imports i LEFT JOIN sources s ON s.id = i.sourceId " +
+                    "WHERE i.assetControls <> ''"
+            ).use { row ->
+                while (row.step()) {
+                    importRewrites += row.getText(0) to attachmentsFor(row.getText(2), row.getText(1))
+                }
+            }
+
+            connection.prepare("UPDATE sources SET assetControls = ? WHERE id = ?").use { write ->
+                for ((id, attachments) in sourceRewrites) {
+                    write.bindText(1, attachments)
+                    write.bindText(2, id)
+                    write.step()
+                    write.reset()
+                }
+            }
+            connection.prepare("UPDATE task_imports SET assetControls = ? WHERE taskId = ?")
+                .use { write ->
+                    for ((taskId, attachments) in importRewrites) {
+                        write.bindText(1, attachments)
+                        write.bindText(2, taskId)
+                        write.step()
+                        write.reset()
+                    }
+                }
+        }
+
+        /**
+         * A template this step mints, as the whole of what one would say.
+         *
+         * The key rather than the id, because two rows that agree on all three fields are asking for
+         * one template: a Todo's Tasks each carry the Todo's own configuration, so a key that left
+         * the name out would mint one template per import, and a key that left the buttons out would
+         * merge two that differ. Nothing distinguishes two identical templates from one, so sharing
+         * is invisible — and it is what keeps the picker from listing a Todo twenty times.
+         */
+        private data class MintedTemplate(
+            val name: String,
+            val kinds: Set<AssetKind>,
+            val buttons: List<TemplateButton>
+        )
+
+        /**
+         * Writes one minted template, and answers the reference to it: version 1, because a template
+         * this step creates has no history to append to.
+         *
+         * Scoped to the kinds that carried the tag list and to nothing else, so it governs exactly
+         * the files the configuration it replaces governed.
+         */
+        private fun insertMintedTemplate(
+            connection: SQLiteConnection,
+            template: MintedTemplate,
+            now: Long
+        ): TemplateVersionRef {
+            val id = UUID.randomUUID().toString()
+            runStatement(
+                connection,
+                "INSERT INTO templates (id, name, createdAt) VALUES (?, ?, ?)",
+                listOf(id, template.name, now)
+            )
+            runStatement(
+                connection,
+                "INSERT INTO template_versions " +
+                    "(templateId, version, scope, buttons, buttonsVersion, createdAt) " +
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                listOf(
+                    id,
+                    1,
+                    encodeTemplateScope(TemplateScope.ofKinds(template.kinds)),
+                    encodeTemplateButtons(template.buttons),
+                    // `1`, for the reason `MIGRATION_21_22` gives for its own: a migration writes the
+                    // version it shipped with. Unlike [builtInAssetControlRows], which the creation
+                    // callback shares and which therefore has to mean "the version this build writes",
+                    // this function has one caller and it is a step that will still be running when
+                    // `TEMPLATE_BUTTONS_VERSION` is no longer 1.
+                    1,
+                    now
+                )
+            )
+            return TemplateVersionRef(TemplateId(id), 1)
+        }
+
+        /**
+         * One row's per-kind configuration, as the release before this one wrote it.
+         *
+         * `kind \t templateId \t version \t tags`, one line per kind, the tags joined by `|` as
+         * `id:name:recordValue`. Frozen here rather than shared with a runtime reader, because the
+         * two have different jobs: this reads the whole thing once, to keep what it said, while
+         * [decodeTemplateAttachments] salvages only the *reference* out of a row like this at
+         * runtime — the fallback for a database this step has already run on.
+         *
+         * **The template id and version are not read**, deliberately. Every configuration ever
+         * written named the one control this app has ever shipped, so what a row adds to the
+         * built-in is its tags and its kinds and nothing else. A row naming a control this build has
+         * never heard of is therefore read as the built-in's, which is the reading the old runtime
+         * gave it too — the fallback `AppSettings.controlFor` applied before this release replaced it.
+         *
+         * As tolerant as its siblings: a kind this build does not know costs its own line, a tag with
+         * an empty id or one carrying a comma — what a record stores ids with — is dropped, and a
+         * name or value that is absent stays empty rather than being invented.
+         */
+        private fun decodeLegacyAssetControls(
+            text: String
+        ): List<Pair<AssetKind, List<TemplateButton>>> =
+            text.split('\n').mapNotNull { line ->
+                if (line.isBlank()) return@mapNotNull null
+                val fields = line.split('\t')
+                val kind = AssetKind.fromKey(fields.getOrNull(0)?.trim()) ?: return@mapNotNull null
+                kind to fields.getOrNull(3).orEmpty().split('|').mapNotNull { tag ->
+                    val parts = tag.split(':')
+                    val id = parts.getOrNull(0)?.trim().orEmpty()
+                    if (id.isEmpty() || id.contains(',')) return@mapNotNull null
+                    TemplateButton(
+                        id = id,
+                        name = parts.getOrNull(1).orEmpty(),
+                        type = ButtonType.TAG,
+                        recordValue = parts.getOrNull(2).orEmpty()
+                    )
+                }
+            }
 
         /** The unfinished memberships of `lists.id`, as both of the statements above ask for them. */
         private const val UNFINISHED_ITEMS_OF_LIST =
@@ -1321,6 +1743,84 @@ abstract class ListeaDatabase : RoomDatabase() {
             indices.forEach(connection::execSQL)
         }
 
+        /**
+         * The built-in asset control as statements and values: the two rows that make it a template
+         * rather than a constant.
+         *
+         * The values come from [Templates.AssetControlSeed] and are written through the encoders
+         * rather than spelled out in SQL, so the row a device gets is the row the app would write —
+         * the same argument the test suite makes for pinning the payload formats.
+         *
+         * `INSERT OR IGNORE` rather than `INSERT`, so a database that already holds these two rows is
+         * left alone instead of refusing to open. That is what lets one description serve both
+         * callers, and it is the only reason it can: a migration runs once per database, but a
+         * creation callback is not the only thing that might have written here first.
+         */
+        internal fun builtInAssetControlRows(now: Long): List<Pair<String, List<Any?>>> {
+            val seed = Templates.AssetControlSeed
+            return listOf(
+                "INSERT OR IGNORE INTO templates (id, name, createdAt) VALUES (?, ?, ?)" to
+                    listOf(seed.ref.templateId.value, seed.name, now),
+                "INSERT OR IGNORE INTO template_versions " +
+                    "(templateId, version, scope, buttons, buttonsVersion, createdAt) " +
+                    "VALUES (?, ?, ?, ?, ?, ?)" to
+                    listOf(
+                        seed.ref.templateId.value,
+                        seed.ref.version,
+                        encodeTemplateScope(seed.scope),
+                        encodeTemplateButtons(seed.buttons),
+                        TEMPLATE_BUTTONS_VERSION,
+                        now
+                    )
+            )
+        }
+
+        /**
+         * Keeps *every install has the built-in* true, rather than trusting two callers to make it so.
+         *
+         * There are two ways a database comes to exist at this version and only one of them is a
+         * migration. `MIGRATION_23_24` seeds a database that was already at 23; a fresh install never
+         * runs a migration at all, because Room *creates* every table at the version the app ships —
+         * so a built-in that only the migration wrote would be missing for exactly the people who had
+         * never upgraded. [onCreate] is that second writer.
+         *
+         * **[onOpen]'s guard is not belt and braces; it is the reason this can be a callback at all.**
+         * The property was found broken in the field — a database at 24 with both tables and no rows,
+         * created by a build that predated the callback, which no migration will ever visit again and
+         * no seed will ever reach. Two writers that each have to remember is not an invariant, it is a
+         * convention; a guard that repairs the empty state is the invariant. It costs one count per
+         * open and it is a no-op in every state the app can reach — the migration has already run by
+         * the time [onOpen] is called, so an upgraded database counts one and is left alone.
+         *
+         * **The guard is "no templates at all", not "no built-in".** Nothing in the app deletes a
+         * template — there is no delete, and `TemplateStore` has no method that could become one — so
+         * the only way to reach an empty table is to have never been given the built-in. That is what
+         * makes reseeding safe, and it is the thing to re-read on the day a template can be deleted:
+         * at that point this becomes a resurrection and the guard has to go, or narrow to the id.
+         */
+        internal val SeedBuiltIn: RoomDatabase.Callback =
+            object : RoomDatabase.Callback() {
+
+                override fun onCreate(db: SupportSQLiteDatabase) {
+                    writeBuiltIn(db)
+                }
+
+                override fun onOpen(db: SupportSQLiteDatabase) {
+                    if (countTemplates(db) == 0L) writeBuiltIn(db)
+                }
+
+                private fun writeBuiltIn(db: SupportSQLiteDatabase) {
+                    for ((sql, args) in builtInAssetControlRows(System.currentTimeMillis())) {
+                        db.execSQL(sql, args.toTypedArray())
+                    }
+                }
+
+                private fun countTemplates(db: SupportSQLiteDatabase): Long =
+                    db.query("SELECT COUNT(*) FROM templates").use { row ->
+                        if (row.moveToFirst()) row.getLong(0) else 0L
+                    }
+            }
+
         @Volatile
         private var instance: ListeaDatabase? = null
 
@@ -1330,7 +1830,7 @@ abstract class ListeaDatabase : RoomDatabase() {
                     context.applicationContext,
                     ListeaDatabase::class.java,
                     "listea.db"
-                ).addMigrations(
+                ).addCallback(SeedBuiltIn).addMigrations(
                     MIGRATION_1_2,
                     MIGRATION_2_3,
                     MIGRATION_3_4,
@@ -1352,7 +1852,9 @@ abstract class ListeaDatabase : RoomDatabase() {
                     MIGRATION_19_20,
                     MIGRATION_20_21,
                     MIGRATION_21_22,
-                    MIGRATION_22_23
+                    MIGRATION_22_23,
+                    MIGRATION_23_24,
+                    MIGRATION_24_25
                 )
                     .build()
                     .also { instance = it }
