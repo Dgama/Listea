@@ -25,11 +25,11 @@ Building, testing and finding your way around the code.
 You need Android Studio, or a standalone Android SDK, with **API level 37** installed. Gradle comes
 from the wrapper in the repository.
 
-**The release names in these docs are iteration names, not the packaged version.** Prose here, in the
-release notes and in `docs/iterations/` refers to rounds as v0.5.6 and back; `app/build.gradle.kts`
-still declares `versionName = "0.1.0"` with `versionCode = 1`, and neither has been bumped since the
-first build. Nothing in the app reads either value, so the two never disagree on a screen — but a
-build handed to someone carries `0.1.0` whatever the round that produced it was called.
+**The release names in these docs are the packaged version.** Prose here, in the release notes and in
+`docs/iterations/` refers to rounds as v0.5.6 and back, and since 2026-10-11 `app/build.gradle.kts`
+declares the same name: `versionName = "0.5.6"`, with `versionCode` derived from that one literal so
+it cannot fall behind it. Nothing in the app reads either value, so they never disagree on a screen
+— but a build handed to someone now says which round produced it.
 
 Two project-level settings worth knowing, both in `gradle.properties`:
 
@@ -466,10 +466,12 @@ tested on a device. Until someone does that, published builds are debug builds �
 Signing is not configured in the repository, and `*.jks`, `*.keystore` and `keystore.properties` are
 gitignored. A keystore and its passwords are credentials, not source.
 
-Neither has the version been bumped: `versionName = "0.1.0"` and `versionCode = 1` are the values
-`app/build.gradle.kts` has carried since the first build — see [Environment](#environment) — so two
-APKs published from different rounds claim the same version. While they are files on a releases page
-that costs nothing; anything that keys on the version to tell two builds apart has nothing to read.
+The version travels with the round: `app/build.gradle.kts` holds one literal, and `versionCode` is
+that name flattened as `major * 10_000 + minor * 100 + patch`, so bumping the name moves both — see
+[Environment](#environment). That is part of finishing a round. Before 2026-10-11 both had read
+`versionName = "0.1.0"` and `versionCode = 1` since the first build, so two APKs published from
+different rounds claimed the same version and anything keying on it to tell them apart had nothing
+to read.
 
 ---
 
