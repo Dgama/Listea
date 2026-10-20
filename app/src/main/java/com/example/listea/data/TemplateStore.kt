@@ -4,9 +4,11 @@ import androidx.room.withTransaction
 import com.example.listea.domain.TEMPLATE_BUTTONS_VERSION
 import com.example.listea.domain.TemplateButton
 import com.example.listea.domain.TemplateScope
+import com.example.listea.domain.Templates
 import com.example.listea.domain.encodeTemplateButtons
 import com.example.listea.domain.encodeTemplateScope
 import com.example.listea.sanitizeActionText
+import java.util.UUID
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -26,9 +28,14 @@ import kotlinx.coroutines.flow.Flow
  * keeps *Update* from meaning three different things on three surfaces, and it is the reason the
  * comparison can be made against the rows themselves instead of against a copy the UI is holding.
  *
- * There is no create and no delete. A lineage is minted by the step that has something to name —
- * the 23 → 24 migration's per-Todo templates, and the import that attaches one — and the release
- * that lets a user start one from a blank page is not this one.
+ * **A user can start one, as of v0.6.0, and [create] is that.** It was the last missing verb: the
+ * Templates screen could list and edit but never make a second lineage, so a round could only ever
+ * run under the templates an import or an upgrade had minted. What it creates is deliberately not
+ * blank — a template with no scope governs no file and could never be attached — so it starts from
+ * [Templates.AssetControlSeed], the same shape the app's own template has.
+ *
+ * There is still no delete. Removing a lineage would orphan every Task attached to it, and nothing
+ * in this release needs it.
  */
 class TemplateStore(private val database: ListeaDatabase) {
 
@@ -51,6 +58,46 @@ class TemplateStore(private val database: ListeaDatabase) {
      */
     suspend fun snapshot(): Pair<List<TemplateEntity>, List<TemplateVersionEntity>> =
         database.withTransaction { reads.templatesOnce() to reads.versionsOnce() }
+
+    /**
+     * Starts a new lineage at version 1, and returns its id.
+     *
+     * The name is the user's, sanitised exactly as an edit's is; a blank one is refused rather than
+     * stored, because the Templates screen would then show a row with nothing to tap on. The id is
+     * an opaque UUID: unlike an item's public id it never leaves the device except as a reference
+     * inside a payload, and nothing about the template is readable from it.
+     *
+     * **The seed is not an empty bar.** A version whose scope admits no kind cannot be attached —
+     * `TemplateResolver` never offers it — so a blank create would produce a template the user could
+     * name and then not use. [Templates.AssetControlSeed] is the shape the built-in has: image and
+     * video, `★` and two tags. The user edits from there.
+     *
+     * One transaction, because a lineage without a version is a row every reader would have to
+     * special-case.
+     */
+    suspend fun create(name: String): String? {
+        val cleanName = sanitizeActionText(name)
+        if (cleanName.isBlank()) return null
+        val id = UUID.randomUUID().toString()
+        val seed = Templates.AssetControlSeed
+
+        database.withTransaction {
+            writes.insertTemplate(
+                TemplateEntity(id = id, name = cleanName, createdAt = System.currentTimeMillis())
+            )
+            writes.insertVersion(
+                TemplateVersionEntity(
+                    templateId = id,
+                    version = 1,
+                    scope = encodeTemplateScope(seed.scope),
+                    buttons = encodeTemplateButtons(seed.buttons),
+                    buttonsVersion = TEMPLATE_BUTTONS_VERSION,
+                    createdAt = System.currentTimeMillis()
+                )
+            )
+        }
+        return id
+    }
 
     /**
      * Writes what one template's page was edited into.

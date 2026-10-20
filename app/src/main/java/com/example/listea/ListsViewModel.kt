@@ -43,6 +43,8 @@ import com.example.listea.data.ListSummary
 import com.example.listea.data.ListeaDatabase
 import com.example.listea.data.ListsDao
 import com.example.listea.data.newItemPublicId
+import com.example.listea.data.PayloadAssetRow
+import com.example.listea.data.PayloadTaskRow
 import com.example.listea.data.ReviewAsset
 import com.example.listea.data.ReviewItem
 import com.example.listea.data.ScannedFile
@@ -2429,6 +2431,17 @@ class ListsViewModel @JvmOverloads constructor(
         templateStore.update(templateId, name, scope, buttons)
     }
 
+    /**
+     * Starts a template from the shipped shape, at version 1.
+     *
+     * The screen stays where it is: the two flows this view model exposes refresh by themselves, so
+     * the new row appears without navigation plumbing. A blank name is refused by the store and
+     * simply leaves the list as it was.
+     */
+    fun createTemplate(name: String) = launchDb {
+        templateStore.create(name)
+    }
+
     fun setDefaultWebhookEnabled(enabled: Boolean) = launchDb {
         settingsStore.setDefaultWebhookEnabled(enabled)
     }
@@ -2581,13 +2594,21 @@ class ListsViewModel @JvmOverloads constructor(
             sourceId = null,
             sourceTitle = null,
             at = now(),
-            items = listOf(
-                ExportItemView(
+            tasks = listOf(
+                ExportTaskView(
                     publicId = "test",
                     title = "Test",
                     isCompleted = true,
-                    relativePath = null,
-                    actions = emptyList()
+                    templates = emptyList(),
+                    assets = listOf(
+                        ExportAssetView(
+                            publicId = "test-asset",
+                            title = "Test",
+                            relativePath = null,
+                            sourceMissing = false,
+                            actions = emptyList()
+                        )
+                    )
                 )
             )
         )
@@ -2653,26 +2674,16 @@ class ListsViewModel @JvmOverloads constructor(
 
         // Re-read decisions by Task id rather than by a registration row: a Task without one — a
         // multi-Asset Task, or one no List ever touched — must not silently drop out of the payload.
-        // A Task with no single Asset to name it gets its stable wire id from legacy_task_ids,
-        // minted lazily the first time it is reported.
-        // Read beside the decisions, for the same reason and with the same freshness: a payload
-        // built from the queue's frozen copy would report the tags a Task was imported under even
-        // after its Todo had been re-run, and the `actions` array is current configuration by
-        // definition.
-        val controls = writeOrder.withLock {
-            dao.getAssetControls(taskIds).associate { it.taskId to it.assetControls }
-        }
-        val rows = writeOrder.withLock {
+        // The payload facts are read beside the rows, for the same reason and with the same
+        // freshness: a payload built from the queue's frozen copy would report the tags a Task was
+        // imported under even after its Todo had been re-run, and the `actions` array is current
+        // configuration by definition.
+        val (rows, facts) = writeOrder.withLock {
             val fresh = dao.getTaskStates(taskIds)
             val pairs = dao.getTaskAssetStates(taskIds)
-            withLiveDecisions(items, fresh, pairs).mapIndexed { index, item ->
-                val publicId = if (item.publicId.isNotEmpty()) {
-                    item.publicId
-                } else {
-                    dao.legacyTaskId(item.taskId, now())
-                }
-                item.copy(publicId = publicId).toPayloadRow(index)
-            }
+            val rows = withLiveDecisions(items, fresh, pairs)
+                .mapIndexed { index, item -> item.toPayloadRow(index) }
+            rows to payloadFacts(rows)
         }
 
         deliverPayload(
@@ -2687,7 +2698,7 @@ class ListsViewModel @JvmOverloads constructor(
             // switches its callers already read, and then by the Todo each group came from.
             requireRoundEnabled = false,
             recordAgainstList = false,
-            assetControls = controls,
+            facts = facts,
             // Both callers are automatic - a queue that ran out, or a review being left - so a
             // folder round always asks, exactly as a List round does.
             confirm = true
@@ -2893,13 +2904,14 @@ class ListsViewModel @JvmOverloads constructor(
         // The whole payload is read in one pass under the ordering lock, so an item write from
         // the swipe that triggered this has certainly landed and the list and its items cannot
         // disagree about what just happened.
-        // The controls are read inside the same pass as the rows, which is the point of the pass:
-        // the payload's `actions` are answered by the very configuration that names the slots, so a
-        // row and its control read at two different moments could disagree about which tag a
-        // selected slot is.
+        // The payload facts are read inside the same pass as the rows, which is the point of the
+        // pass: the Assets, their decisions and the templates that name those decisions are one
+        // answer about one moment, and a row and a template read at two different moments could
+        // disagree about which tag a selected slot is.
         val stored = writeOrder.withLock {
-            dao.getList(listId)?.let {
-                ListDelivery(it, scopedItems(listId, queueIds), dao.getAssetControlsForList(listId))
+            dao.getList(listId)?.let { list ->
+                val rows = scopedItems(listId, queueIds)
+                ListDelivery(list, rows, payloadFacts(rows))
             }
         } ?: return
         deliverPayload(
@@ -2914,7 +2926,7 @@ class ListsViewModel @JvmOverloads constructor(
             recordAgainstList = true,
             confirm = confirm,
             assumeNotNow = assumeNotNow,
-            assetControls = stored.controls.associate { it.taskId to it.assetControls }
+            facts = stored.facts
         )
     }
 
@@ -2922,15 +2934,47 @@ class ListsViewModel @JvmOverloads constructor(
      * One list round's whole payload input, read in one pass under [writeOrder].
      *
      * A named type rather than a `Triple`, because the three parts are read together for a reason
-     * that has to travel with them: a row, the list it belongs to, and the control that names the
-     * row's action slots are one answer about one moment, and a caller that read them separately
-     * would be free to be wrong about which tag a selected slot is.
+     * that has to travel with them: a row, the list it belongs to, and the facts about its Tasks and
+     * Assets are one answer about one moment, and a caller that read them separately would be free
+     * to be wrong about which tag a selected slot is.
      */
     private data class ListDelivery(
         val list: ListEntity,
         val rows: List<ListItemEntity>,
-        val controls: List<TaskAssetControls>
+        val facts: PayloadFacts
     )
+
+    /**
+     * Everything the payload needs that is not the row itself: the Task and Asset rows, and the
+     * template table they resolve against.
+     *
+     * Read once per round, in one transaction's worth of queries, so a split round's two groups
+     * describe the same moment and a template edit mid-delivery cannot give them two opinions. The
+     * resolver is built here rather than per row; the old per-row read was an N+1 query and, worse,
+     * could straddle a template update.
+     */
+    private data class PayloadFacts(
+        val tasks: Map<String, PayloadTaskRow>,
+        val assetsByTask: Map<String, List<PayloadAssetRow>>,
+        val resolver: TemplateResolver
+    )
+
+    private suspend fun payloadFacts(rows: List<ListItemEntity>): PayloadFacts {
+        val taskIds = rows.map { it.taskId }.distinct()
+        return PayloadFacts(
+            tasks = if (taskIds.isEmpty()) {
+                emptyMap()
+            } else {
+                dao.getPayloadTasks(taskIds).associateBy { it.taskId }
+            },
+            assetsByTask = if (taskIds.isEmpty()) {
+                emptyMap()
+            } else {
+                dao.getPayloadAssets(taskIds).groupBy { it.taskId }
+            },
+            resolver = resolverNow()
+        )
+    }
 
     /**
      * One round's delivery, whatever asked for it. **The release's headline rule, implemented.**
@@ -2967,8 +3011,8 @@ class ListsViewModel @JvmOverloads constructor(
         requireRoundEnabled: Boolean,
         recordAgainstList: Boolean,
         confirm: Boolean,
-        assumeNotNow: Boolean = false,
-        assetControls: Map<String, String> = emptyMap()
+        facts: PayloadFacts,
+        assumeNotNow: Boolean = false
     ) {
         val current = settingsStore.read()
         val listId = list.id
@@ -3000,7 +3044,9 @@ class ListsViewModel @JvmOverloads constructor(
         val at = now()
 
         // The round's payload, in the shape the pre-split code already had: only the origin moves.
-        suspend fun payloadOf(rowsToSend: List<ListItemEntity>, sourceId: String?, sourceTitle: String?) =
+        // Every group of a split round walks the same facts, so the two bodies are two views of one
+        // moment rather than two readings of the tables.
+        fun payloadOf(rowsToSend: List<ListItemEntity>, sourceId: String?, sourceTitle: String?) =
             ExportPayload(
                 event = event,
                 listId = list.id,
@@ -3009,9 +3055,7 @@ class ListsViewModel @JvmOverloads constructor(
                 sourceId = sourceId,
                 sourceTitle = sourceTitle,
                 at = at,
-                items = rowsToSend.map {
-                    exportItemView(list, it, assetControls[it.taskId].orEmpty(), resolverNow())
-                }
+                tasks = exportTaskViews(rowsToSend, facts.tasks, facts.assetsByTask, facts.resolver)
             )
 
         // No delivery is recorded against the list for a switched-off List — there was no attempt
@@ -3033,7 +3077,7 @@ class ListsViewModel @JvmOverloads constructor(
             val notice = queued(
                 noticeOf(
                     list.title, event, url, kind = kind, defaultWebhook = true,
-                    itemCount = items.size,
+                    itemCount = payload.tasks.size,
                     outcome = NoticeOutcome.DISABLED, httpCode = null, error = null
                 )
             )
@@ -3125,7 +3169,7 @@ class ListsViewModel @JvmOverloads constructor(
                 url = url,
                 kind = group.kind,
                 defaultWebhook = group.sourceId == null,
-                itemCount = group.items.size,
+                itemCount = payload.tasks.size,
                 outcome = outcome,
                 httpCode = httpCode,
                 error = error,
@@ -3204,7 +3248,7 @@ class ListsViewModel @JvmOverloads constructor(
                         event = event,
                         listTitle = list.title,
                         host = webhookHost(url),
-                        itemCount = group.items.size,
+                        itemCount = payload.tasks.size,
                         defaultWebhook = group.sourceId == null
                     )
                 ).also { roundAnswer = it }
@@ -3297,12 +3341,12 @@ class ListsViewModel @JvmOverloads constructor(
         body: String,
         notice: WebhookNotice
     ) {
-        if (payload.items.isEmpty()) return
+        if (payload.tasks.isEmpty()) return
         dao.insertWebhookRecord(
             ExportRecordEntity(
                 event = event,
                 listTitle = list.title,
-                itemCount = payload.items.size,
+                itemCount = payload.tasks.size,
                 payload = body,
                 at = now(),
                 outcome = notice.outcome.name,

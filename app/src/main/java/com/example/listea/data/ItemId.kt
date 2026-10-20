@@ -101,6 +101,21 @@ fun fileIdentity(rootRelativePath: String): String = "file:$rootRelativePath"
 fun manualItemIdentity(listId: Long, title: String): String = "item:$listId/$title"
 
 /**
+ * A Task's identity on the wire. The row id is already unique and stable; the prefix only makes the
+ * fingerprint say what kind of thing it names.
+ */
+fun taskIdentity(taskId: String): String = "task:$taskId"
+
+/**
+ * An Asset's identity on the wire: the Task it is presented for, then where its file sits.
+ *
+ * The Task is part of it on purpose. Two Tasks over one file are two presentations with two
+ * decisions, and their public ids must not be the same string just because the file is.
+ */
+fun assetIdentity(taskId: String, rootRelativePath: String?): String =
+    if (rootRelativePath != null) "asset:$taskId/$rootRelativePath" else "asset:$taskId"
+
+/**
  * What a stored item row is about, chosen the way the insert sites choose it: a source-backed row
  * is its file, and a manual one — which has no file — is the list it was typed into and its title.
  *

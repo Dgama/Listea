@@ -423,83 +423,33 @@ fun webhookUrlError(url: String): String? {
 }
 
 /**
- * The items a payload should actually carry, out of the ones the event covers.
+ * The Tasks a payload should actually carry, out of the ones the event covers.
  *
  * The one place the "only send checked items" setting is applied, so it holds for every event
  * including the test one: what the test button sends stays an honest preview of a real delivery.
- * An event whose items are all unchecked legitimately sends an empty `items` array — a receiver
- * being told "nothing was checked" is not the same as it being told nothing.
+ * An event whose Tasks are all unchecked legitimately sends an empty `tasks` array — a receiver
+ * being told "nothing was checked" is not the same as it being told nothing. The filter is on the
+ * Task's completion, never on whether it has Assets: a checked manual Task belongs in the body with
+ * `assets: []`.
  */
 fun webhookItems(items: List<ListItemEntity>, settings: AppSettings): List<ListItemEntity> =
     if (settings.webhookCompletedItemsOnly) items.filter { it.isCompleted } else items
 
 /**
- * The webhook body. Timestamps are epoch milliseconds. This is a deliberately fixed shape:
- * it exposes the list and its items, and nothing about how they are stored.
+ * The webhook body, version 2. Timestamps are epoch milliseconds.
  *
- * Every event uses this one builder, so there is only ever one item payload format on the wire.
- */
-fun buildWebhookPayload(
-    event: String,
-    list: ListEntity,
-    items: List<ListItemEntity>,
-    /**
-     * What each item's Task was imported under, by Task id, as `task_imports.assetControls` holds
-     * it.
-     *
-     * A lookup passed in rather than a field on [ListItemEntity], because the record belongs to the
-     * Task and neither row this builder is handed carries it: a list round's rows come from a
-     * membership query that does not join `task_imports`, and a folder round's are synthetic.
-     * Absent, it resolves to no templates at all, so an action falls back to its stored id — the
-     * behaviour-preserving reading for a caller that has no tables, and what every caller that
-     * predates v0.5.0 means.
-     *
-     * It is keyed by Task because that is what a control *is* keyed by, and it is read here rather
-     * than resolved by the caller because the wire values a tag sends are answered by the same
-     * configuration that decides which tags exist — one lookup, so the `actions` array cannot name
-     * a tag the row's kind never offered.
-     */
-    assetControls: Map<String, String> = emptyMap(),
-    /**
-     * The templates those attachment strings resolve against.
-     *
-     * Passed alongside them because an attachment is a *reference* since v0.5.4 and names a template
-     * rather than spelling out its buttons: on its own the column says which version governs a Task,
-     * and only the tables can say what that version offers. [TemplateResolver.Empty] is the honest
-     * answer for a caller with no tables to hand — every action then falls back to its stored id,
-     * which is exactly what a build that cannot read the template would be able to say.
-     */
-    resolver: TemplateResolver = TemplateResolver.Empty
-): String = buildWebhookPayload(
-    ExportPayload(
-        event = event,
-        listId = list.id,
-        listTitle = list.title,
-        completedAt = list.completedAt,
-        sourceId = null,
-        sourceTitle = null,
-        // The body carries no timestamp, and this entry point exists for callers that have no round
-        // to describe — see the payload-based builder below. It returns a body, so it can never
-        // reach a renderer whose output would show a time.
-        at = 0L,
-        items = items.map { exportItemView(list, it, assetControls[it.taskId].orEmpty(), resolver) }
-    )
-)
-
-/**
- * The same body, from a payload the export model has already assembled.
+ * The hierarchy is **event → list → task → asset**, and each level says only what belongs to it:
+ * completion and template identity on the Task, the file's path and its decisions on the Asset.
+ * This is a deliberately fixed shape; a receiver built on it may reconstruct a round without
+ * consulting any other source.
  *
- * Since v0.5.6 the dispatcher builds an [ExportPayload] once per group and hands it to whichever
- * mechanism the group's Todo named. This overload is what makes the POST and the text file two
- * renderings of one payload rather than two descriptions of a similar round: the item facts are
- * assembled by [exportItemView] and never here.
- *
- * **The shape is unchanged and deliberately so.** Every field below was on the wire before this
- * release, at this nesting, under these names — `WebhookBodyTest` and `WebhookPayloadTest` pin it,
- * and they are untouched. The export model changed how many requests a round makes and what each
- * one holds; it changed nothing about what a request looks like.
+ * The facts are assembled once, by [exportTaskViews], and this function only decides how they are
+ * spelled. Key order is part of the contract and is pinned by `WebhookBodyTest`. Null is a value,
+ * never an omission: `completedAt`, an Asset with no path, and a template version this build cannot
+ * read all appear as `null`.
  */
 fun buildWebhookPayload(payload: ExportPayload): String = JSONObject()
+    .put("version", EXPORT_VERSION)
     .put("event", payload.event)
     .put(
         "list",
@@ -508,63 +458,52 @@ fun buildWebhookPayload(payload: ExportPayload): String = JSONObject()
             .put("title", payload.listTitle)
             .put("completedAt", payload.completedAt ?: JSONObject.NULL)
     )
-    .put("items", JSONArray().apply { payload.items.forEach { put(itemJson(it)) } })
+    .put("tasks", JSONArray().apply { payload.tasks.forEach { put(taskJson(it)) } })
     .toString()
 
 /**
- * One item as the receiver sees it. Completion and actions are separate on purpose: `isCompleted`
- * says the item was processed in Listea, `actions` says what downstream automation should do with
- * it, and neither implies the other. Check/uncheck is never an action.
+ * One Task as the receiver sees it. `isCompleted` is here rather than on an Asset because checking
+ * off is one judgment about one Task however many files it presents; `templates` is here because
+ * the attachment is stored on the Task.
  *
- * `id` is the item's public id and never its row id — a string, unique across reinstalls and
- * across both review modes, and in an order that sorts by when the item arrived. See
- * [com.example.listea.data.newItemPublicId] for what that is worth and what it is made of. The
- * row id is not on the wire at all: it was only ever meaningful inside this one database, and
- * sending it invited a receiver to key on it.
- *
- * Action wire values come from the control as it stands right now, not from whatever they were
- * when the user tapped the chip.
- *
- * **One entry per Task, resolved over every kind the Task is configured for** — the union, exactly
- * as the badge row resolves it, and for the same reason: a payload is about a Task and names no
- * file, so an `actions` array built from one kind would silently omit a tag the user can see
- * selected in the app. [TemplateResolver.controlForTask] is the resolver; [TemplateResolver.controlFor]
- * is the per-file one the chip row uses.
- *
- * Since v0.5.6 the facts come from [exportItemView] rather than being assembled here, so that this
- * body and the text file cannot describe one round two ways. What this function decides is only how
- * those facts are spelled.
+ * `id` is the Task's public id and never its row id. The Task's `title` is the name the round
+ * showed, which is allowed to differ between the Lists a Task appears in.
  */
-private fun itemJson(item: ExportItemView): JSONObject {
-    val actions = JSONArray()
-    item.actions.forEach { actions.put(it) }
-    return JSONObject()
-        .put("id", item.publicId)
-        .put("title", item.title)
-        .put("isCompleted", item.isCompleted)
-        .put("relativePath", item.relativePath ?: JSONObject.NULL)
-        .put("actions", actions)
-}
-
-/**
- * The item's *folder*, relative to the selected SAF synchronization root, e.g. `2026-07-11/bilibili`
- * for an item stored at `2026-07-11/bilibili/a.jpg`: the list's root-relative folder path followed
- * by the item's list-relative subfolders, with the file name dropped. The name is already on the
- * wire as `title`, so a receiver that wants the whole path joins the two.
- *
- * Empty for an item sitting directly in a list linked to the root itself, which is exactly that
- * item's folder. Null for manual items, which have no source file at all; a fake path would be
- * worse than none for a downstream tool.
- */
-fun webhookRelativePath(list: ListEntity, item: ListItemEntity): String? {
-    val itemSegments = pathSegments(item.sourceRelativePath)
-    if (itemSegments.isEmpty()) return null
-    return (pathSegments(list.sourceRelativePath) + itemSegments.dropLast(1)).joinToString("/")
-}
-
-/** Splits on "/" and drops empty segments, so leading, trailing and doubled separators cannot survive. */
-private fun pathSegments(path: String?): List<String> =
-    path?.split('/')?.filter { it.isNotEmpty() }.orEmpty()
+private fun taskJson(task: ExportTaskView): JSONObject = JSONObject()
+    .put("id", task.publicId)
+    .put("title", task.title)
+    .put("isCompleted", task.isCompleted)
+    .put(
+        "templates",
+        JSONArray().apply {
+            task.templates.forEach { template ->
+                put(
+                    JSONObject()
+                        .put("id", template.id)
+                        .put("name", template.name ?: JSONObject.NULL)
+                        .put("version", template.version)
+                )
+            }
+        }
+    )
+    .put(
+        "assets",
+        JSONArray().apply {
+            task.assets.forEach { asset ->
+                put(
+                    JSONObject()
+                        .put("id", asset.publicId)
+                        .put("title", asset.title)
+                        .put("relativePath", asset.relativePath ?: JSONObject.NULL)
+                        .put("sourceMissing", asset.sourceMissing)
+                        .put(
+                            "actions",
+                            JSONArray().apply { asset.actions.forEach { put(it) } }
+                        )
+                )
+            }
+        }
+    )
 
 /**
  * POSTs [jsonBody] to [url]. Blocking: call on an IO dispatcher.

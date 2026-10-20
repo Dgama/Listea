@@ -46,7 +46,21 @@ import androidx.room.PrimaryKey
 @Entity(tableName = "tasks")
 data class TaskEntity(
     @PrimaryKey val id: String,
-    val createdAt: Long
+    val createdAt: Long,
+
+    /**
+     * What this Task is called on the wire, minted once when the Task is created.
+     *
+     * Separate from [id] for the same reason [ListItemEntity.publicId] is: the row id is a local
+     * handle whose format this app may change, and a receiver keys on the public one. It lives here
+     * rather than only on a membership because the v0.6.0 payload speaks about the Task itself, and
+     * a Task reached through two Lists must have one name for both.
+     *
+     * The column has a default because every database that predates v0.6.0 is given a value by
+     * `MIGRATION_25_26`; the Kotlin default keeps fixtures that only care about identity compiling.
+     */
+    @ColumnInfo(defaultValue = "''")
+    val publicId: String = ""
 )
 
 /**
@@ -108,7 +122,18 @@ data class AssetEntity(
     val sourceMissing: Boolean = false,
     val sourceUri: String? = null,
     val sizeBytes: Long? = null,
-    val lastModified: Long? = null
+    val lastModified: Long? = null,
+
+    /**
+     * What this Asset is called on the wire, minted once when the Asset is created.
+     *
+     * The Asset is the identity two Tasks over the same file must not share, so this cannot be the
+     * file's path or the Task's id: the same file imported under two intentions is two Assets and
+     * two names. `MIGRATION_25_26` gives every row that predates v0.6.0 a value; see
+     * `ListItemEntity.publicId` for why the row id is not the wire id.
+     */
+    @ColumnInfo(defaultValue = "''")
+    val publicId: String = ""
 )
 
 /**

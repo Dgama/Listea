@@ -1752,10 +1752,12 @@ private fun ImportConfirmDialog(
  * write a second reference rather than move the first. The line names both versions, so a refresh
  * that is about to carry a Todo forward says so before it does rather than after.
  *
- * **`New template` does nothing yet, on purpose.** It is here so the shape of the choice is visible
- * from the start — add one that exists, or start one — and it says so when tapped rather than
- * sitting there inert, which reads as broken and teaches nothing. What it points at is real: the
- * template pages under Settings, which are where a template is started today.
+ * **`New template` points at Settings, and the picker is a snapshot.** Since v0.6.0 a template can
+ * be started under Settings → Templates, so the button says where rather than pretending to create
+ * one here. The list it is drawn from was read when the folder was, and this dialog does not observe
+ * the tables: a template created while it is open appears only when it is closed and reopened. That
+ * is stated rather than hidden, because a picker that silently omitted a template the user just
+ * made would read as the create having failed.
  */
 @Composable
 private fun ImportTemplateAttach(
@@ -1796,8 +1798,8 @@ private fun ImportTemplateAttach(
         if (newTemplateTapped) {
             Spacer(Modifier.height(ListeaDimens.RowGap))
             Text(
-                "Starting a new template from here is not in this release. Templates are made and " +
-                    "edited under Settings → Templates.",
+                "Templates are created under Settings → Templates. This picker was read when the " +
+                    "folder was, so close and reopen this dialog after creating one.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

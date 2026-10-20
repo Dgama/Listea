@@ -43,7 +43,7 @@ import java.util.UUID
         TemplateEntity::class,
         TemplateVersionEntity::class
     ],
-    version = 25,
+    version = 26,
     exportSchema = true
 )
 abstract class ListeaDatabase : RoomDatabase() {
@@ -1189,6 +1189,130 @@ abstract class ListeaDatabase : RoomDatabase() {
         }
 
         /**
+         * The step that gives Tasks and Assets a name of their own on the wire.
+         *
+         * v0.6.0's payload speaks about the Task and the file separately, so each needs an id that
+         * survives a round. Neither table had one: `legacy_task_ids` names only the folder-round
+         * Tasks that needed it, and `legacy_item_ids` names only the files a registration had
+         * already named. Reading those tables at delivery time would leave most of a payload
+         * without ids, so the ids are made once, here, and stored.
+         *
+         * **What is preserved.** Where the old wire had a name for the same thing, it keeps it:
+         * a Task's folder-round id becomes its `task.id`, and a file's registration id becomes its
+         * `asset.id`. A Task with exactly one Asset also inherits the List item id that named it,
+         * because for that shape the old item *was* the file. A multi-Asset Task's List id is not
+         * copied onto an arbitrary first file — the Task is the thing that id named, and the Task
+         * already has its own id above.
+         *
+         * Everything else is minted at the Task's own `createdAt`, so the id's time prefix still
+         * says when the row came to exist rather than when this release arrived. The final queries
+         * refuse to leave a row nameless: an empty id on the wire is worse than a failed upgrade.
+         */
+        internal val MIGRATION_25_26 = object : Migration(25, 26) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
+                    "ALTER TABLE tasks ADD COLUMN publicId TEXT NOT NULL DEFAULT ''"
+                )
+                connection.execSQL(
+                    "ALTER TABLE assets ADD COLUMN publicId TEXT NOT NULL DEFAULT ''"
+                )
+                backfillPublicIds(connection)
+            }
+        }
+
+        /**
+         * Gives every Task and Asset its public id, reading everything before writing anything.
+         *
+         * The same rule [backfillSelections] records: a cursor stepping over a table while that
+         * table is being updated is asking SQLite for an opinion nobody needs.
+         */
+        private fun backfillPublicIds(connection: SQLiteConnection) {
+            val now = System.currentTimeMillis()
+
+            val taskCreatedAt = LinkedHashMap<String, Long>()
+            connection.prepare("SELECT id, createdAt FROM tasks").use { row ->
+                while (row.step()) taskCreatedAt[row.getText(0)] = row.getLong(1)
+            }
+
+            val legacyTaskIds = mutableMapOf<String, String>()
+            connection.prepare("SELECT taskId, publicId FROM legacy_task_ids").use { row ->
+                while (row.step()) legacyTaskIds[row.getText(0)] = row.getText(1)
+            }
+
+            val legacyItemIds = mutableMapOf<String, String>()
+            connection.prepare("SELECT assetId, publicId FROM legacy_item_ids").use { row ->
+                while (row.step()) legacyItemIds[row.getText(0)] = row.getText(1)
+            }
+
+            val listIds = mutableMapOf<String, String>()
+            connection.prepare(
+                "SELECT taskId, publicId FROM list_items WHERE publicId <> '' ORDER BY id"
+            ).use { row ->
+                while (row.step()) listIds.putIfAbsent(row.getText(0), row.getText(1))
+            }
+
+            val assets = mutableListOf<Triple<String, String, String?>>()
+            val assetsPerTask = mutableMapOf<String, Int>()
+            connection.prepare("SELECT id, taskId, relativePath FROM assets").use { row ->
+                while (row.step()) {
+                    val taskId = row.getText(1)
+                    assets += Triple(row.getText(0), taskId, row.getText(2))
+                    assetsPerTask[taskId] = (assetsPerTask[taskId] ?: 0) + 1
+                }
+            }
+
+            val used = mutableSetOf<String>()
+
+            // Tasks first, so an asset's fallback time prefix can use its Task's createdAt.
+            val taskIds = taskCreatedAt.map { (taskId, createdAt) ->
+                val preserved = legacyTaskIds[taskId]?.takeIf { it.isNotEmpty() && used.add(it) }
+                val publicId = preserved
+                    ?: newItemPublicId(taskIdentity(taskId), createdAt)
+                used += publicId
+                taskId to publicId
+            }
+
+            val assetIds = assets.map { (assetId, taskId, relativePath) ->
+                val createdAt = taskCreatedAt[taskId] ?: now
+                val preserved = legacyItemIds[assetId]?.takeIf { it.isNotEmpty() && used.add(it) }
+                val publicId = preserved ?: run {
+                    val fromList = if (assetsPerTask[taskId] == 1) {
+                        listIds[taskId]?.takeIf { used.add(it) }
+                    } else {
+                        null
+                    }
+                    fromList ?: newItemPublicId(assetIdentity(taskId, relativePath), createdAt)
+                }
+                used += publicId
+                assetId to publicId
+            }
+
+            connection.prepare("UPDATE tasks SET publicId = ? WHERE id = ?").use { write ->
+                for ((taskId, publicId) in taskIds) {
+                    write.bindText(1, publicId)
+                    write.bindText(2, taskId)
+                    write.step()
+                    write.reset()
+                }
+            }
+            connection.prepare("UPDATE assets SET publicId = ? WHERE id = ?").use { write ->
+                for ((assetId, publicId) in assetIds) {
+                    write.bindText(1, publicId)
+                    write.bindText(2, assetId)
+                    write.step()
+                    write.reset()
+                }
+            }
+
+            check(
+                connection.prepare("SELECT COUNT(*) FROM tasks WHERE publicId = ''")
+                    .use { it.step(); it.getLong(0) } == 0L &&
+                    connection.prepare("SELECT COUNT(*) FROM assets WHERE publicId = ''")
+                        .use { it.step(); it.getLong(0) } == 0L
+            ) { "MIGRATION_25_26 left a Task or Asset without a public id" }
+        }
+
+        /**
          * The built-in, written by [builtInAssetControlRows] — the same statements a database
          * *created* at this version gets, bound the way a migration's connection binds them.
          *
@@ -1854,7 +1978,8 @@ abstract class ListeaDatabase : RoomDatabase() {
                     MIGRATION_21_22,
                     MIGRATION_22_23,
                     MIGRATION_23_24,
-                    MIGRATION_24_25
+                    MIGRATION_24_25,
+                    MIGRATION_25_26
                 )
                     .build()
                     .also { instance = it }

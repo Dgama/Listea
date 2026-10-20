@@ -243,6 +243,43 @@ abstract class ListsDao {
     )
     abstract suspend fun getAssetControls(taskIds: List<String>): List<TaskAssetControls>
 
+    /**
+     * The Tasks a payload is about: their public id, their imported name, and what governs them.
+     *
+     * A `LEFT JOIN` because the payload must contain every Task the round selected, including one
+     * no Todo owns. Absence is answered by the caller falling back to the row's title.
+     */
+    @Query(
+        """
+        SELECT t.id AS taskId, t.publicId AS publicId,
+               ti.displayName AS displayName, ti.assetControls AS assetControls
+        FROM tasks t
+        LEFT JOIN task_imports ti ON ti.taskId = t.id
+        WHERE t.id IN (:taskIds)
+        """
+    )
+    abstract suspend fun getPayloadTasks(taskIds: List<String>): List<PayloadTaskRow>
+
+    /**
+     * The Assets under those Tasks, with each pair's decisions in the same read.
+     *
+     * Ordered by the Asset's own place in its Task, so a payload's `assets` array is the order the
+     * review surface pages through. A second Task over the same file is a second row with its own
+     * id; nothing here merges by path.
+     */
+    @Query(
+        """
+        SELECT a.taskId AS taskId, a.id AS assetId, a.publicId AS publicId,
+               a.relativePath AS relativePath, a.sourceMissing AS sourceMissing,
+               a.sortOrder AS sortOrder, tas.selections AS selections
+        FROM assets a
+        LEFT JOIN task_asset_state tas ON tas.assetId = a.id
+        WHERE a.taskId IN (:taskIds)
+        ORDER BY a.taskId, a.sortOrder, a.id
+        """
+    )
+    abstract suspend fun getPayloadAssets(taskIds: List<String>): List<PayloadAssetRow>
+
     @Insert
     abstract suspend fun insertList(list: ListEntity): Long
 
@@ -1701,10 +1738,10 @@ abstract class ListsDao {
      * one Task's; now that two Todos may hold it, naming every Asset at a path would hand two
      * Tasks the same id and a receiver two rows it cannot tell apart. So the row goes to one of
      * them — the `NOT EXISTS` guard means whichever Asset is named first is the only one ever
-     * named, and every later Task over that file takes its own name from [legacyTaskId] instead,
-     * the same way a multi-Asset Task does. The rest of the file's readers are unaffected either
-     * way: the file-state reads fall back to the registration's own `publicId`, which is the same
-     * string, on every row that has no Asset to have copied it to.
+     * named. The rest of the file's readers are unaffected either way: the file-state reads fall
+     * back to the registration's own `publicId`, which is the same string, on every row that has no
+     * Asset to have copied it to. Since schema 26 every Task and Asset also carries its own
+     * `publicId`; this table survives as the source the 25 → 26 backfill reads to keep old ids.
      */
     @Query(
         """
@@ -2810,29 +2847,6 @@ abstract class ListsDao {
     @Query("DELETE FROM legacy_source_tasks WHERE taskId = :taskId")
     protected abstract suspend fun deleteLegacyClaim(taskId: String)
 
-    @Query("SELECT publicId FROM legacy_task_ids WHERE taskId = :taskId")
-    protected abstract suspend fun legacyTaskIdOf(taskId: String): String?
-
-    @Insert
-    protected abstract suspend fun insertLegacyTaskId(id: LegacyTaskIdEntity)
-
-    /**
-     * The wire id a Task with no single Asset is reported under, minted and stored on first use.
-     *
-     * A folder round over a multi-Asset Task has no `list_items` row and no single Asset whose
-     * `legacy_item_ids` can name it, yet the wire still has to carry a stable `id`. This is where
-     * that name lives, and it is a compatibility boundary written lazily by the webhook adapter —
-     * never by an import run, never by the catalog. The id is stable across rounds because the first
-     * one is stored and read back.
-     */
-    @Transaction
-    open suspend fun legacyTaskId(taskId: String, now: Long): String {
-        legacyTaskIdOf(taskId)?.let { return it }
-        val id = newItemPublicId("task:$taskId", now)
-        insertLegacyTaskId(LegacyTaskIdEntity(taskId = taskId, publicId = id))
-        return id
-    }
-
     /**
      * Any Asset at a locator, whichever Task holds it.
      *
@@ -3029,7 +3043,11 @@ abstract class ListsDao {
                         relativePath = asset.rootRelativePath,
                         sourceUri = asset.uri,
                         sizeBytes = asset.sizeBytes,
-                        lastModified = asset.lastModified
+                        lastModified = asset.lastModified,
+                        publicId = newItemPublicId(
+                            assetIdentity(taskId, asset.rootRelativePath),
+                            now
+                        )
                     ),
                     now
                 )
@@ -3128,7 +3146,11 @@ abstract class ListsDao {
         }
 
         val taskId = UUID.randomUUID().toString()
-        insertTask(TaskEntity(id = taskId, createdAt = now))
+        insertTask(TaskEntity(
+            id = taskId,
+            createdAt = now,
+            publicId = newItemPublicId(taskIdentity(taskId), now)
+        ))
         insertTaskState(TaskStateEntity(taskId = taskId, updatedAt = now))
         insertTaskImport(
             TaskImportEntity(
@@ -3151,7 +3173,8 @@ abstract class ListsDao {
                     relativePath = asset.rootRelativePath,
                     sourceUri = asset.uri,
                     sizeBytes = asset.sizeBytes,
-                    lastModified = asset.lastModified
+                    lastModified = asset.lastModified,
+                    publicId = newItemPublicId(assetIdentity(taskId, asset.rootRelativePath), now)
                 ),
                 now
             )

@@ -14,8 +14,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
@@ -34,11 +38,12 @@ import com.example.listea.domain.decodeTemplateScope
  * Create Tasks dialog edited one Todo's answer, and neither was a thing the user could name, find
  * again or point at. A template is a row now, so this is a list, and each row is a page.
  *
- * **It is a list you read and open, and it does not yet make anything.** A lineage is minted by
- * whatever has something to name — the upgrade that brings a Todo's own buttons across, and an
- * import that attaches one — so there is no *new template* button here. Authoring a template from
- * a blank page is a real thing to want and it is not this step's; adding a button now would be a
- * screen with nothing behind it.
+ * **It makes one, as of v0.6.0: `New` asks for a name and starts a lineage at version 1.** Until
+ * then a lineage could only be minted by an upgrade or an import, and a user who wanted a second
+ * template — two Todos governing two folders differently, which is the release's acceptance
+ * scenario — had no way to get one. What is created starts from the shipped shape rather than
+ * blank, because a template that admits no kind can never be attached; it is edited on its own page
+ * like any other. The name prompt is refused while blank by the dialog's own confirm button.
  *
  * The rows show what the template *is*, not what it does. There is no count of Tasks judged with
  * it and no "used by" line, because nothing attaches one yet: a number here would be a claim about
@@ -53,8 +58,23 @@ fun TemplateListScreen(
 ) {
     val templates by viewModel.templates.collectAsStateWithLifecycle()
     val versions by viewModel.templateVersions.collectAsStateWithLifecycle()
+    var creating by remember { mutableStateOf(false) }
 
     BackHandler { onBack() }
+
+    if (creating) {
+        TextPromptDialog(
+            title = "New template",
+            label = "Name",
+            initialText = "",
+            confirmLabel = "Create",
+            onConfirm = { name ->
+                viewModel.createTemplate(name)
+                creating = false
+            },
+            onDismiss = { creating = false }
+        )
+    }
 
     ListeaNestedScaffold(
         modifier = modifier,
@@ -71,6 +91,7 @@ fun TemplateListScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+            TextButton(onClick = { creating = true }) { Text("New") }
         }
     ) { bodyModifier ->
         val loaded = templates
@@ -99,6 +120,7 @@ fun TemplateListScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center
                     )
+                    TextButton(onClick = { creating = true }) { Text("New template") }
                 }
             }
             return@ListeaNestedScaffold

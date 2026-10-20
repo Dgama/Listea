@@ -1,15 +1,14 @@
 package com.example.listea
 
 import android.content.Context
+import com.example.listea.data.AssetDecisions
 import com.example.listea.data.DecisionTarget
-import com.example.listea.data.ListEntity
 import com.example.listea.data.ListItemEntity
+import com.example.listea.data.PayloadAssetRow
+import com.example.listea.data.PayloadTaskRow
 import com.example.listea.data.ReviewItem
-import com.example.listea.data.assetDecisions
-import com.example.listea.data.decisions
-import com.example.listea.data.encodeActionIds
+import com.example.listea.data.decodeActionIds
 import com.example.listea.data.escapeField
-import com.example.listea.data.taskDecisions
 import com.example.listea.domain.ExportChoice
 import com.example.listea.domain.ExportKind
 import kotlinx.coroutines.CoroutineDispatcher
@@ -45,46 +44,131 @@ import java.util.Locale
  * is usually right.
  */
 
-/** The version line every text export starts with, in the shape `DissolvedRecords` and the template encoders already use. */
-const val EXPORT_TEXT_VERSION = 1
+/**
+ * The version both renderings carry: the JSON body's `version` and the text body's first line.
+ *
+ * v0.6.0's hierarchy is 2; the flat, unversioned v0.1 body is 1. The cut is hard by design — a body
+ * that said *2* while meaning the old shape would be the one mistake a receiver cannot recover
+ * from.
+ */
+const val EXPORT_VERSION = 2
+
+/** One template a Task was imported under: identity only, never its controls. */
+data class ExportTemplateView(
+    val id: String,
+    /** Null when this build cannot read that version — the reference is still worth sending. */
+    val name: String?,
+    val version: Int
+)
 
 /**
- * One item, as every mechanism sees it.
+ * One file under a Task.
  *
- * The item's **folder** rather than its whole path, matching the wire body: the file name is already
- * here as [title], so a reader that wants the pair joins them and neither is sent twice.
- * [relativePath] is null for a manual item, which has no source file at all — a fake path would be
- * worse than none for a downstream tool, and it is the same answer the body gives.
+ * [relativePath] is the material's own folder, relative to the Upstream's linked root: `cos`,
+ * `cos/2026`, `""` for a file directly under it, and null only when the Asset has no path at all.
+ * It is derived from the Asset and from nothing else, which is what makes it independent of how the
+ * Task was packaged or which folder a round happened to open.
+ *
+ * [actions] are the wire values recorded on **this pair**, resolved through the control that governs
+ * this file's kind — the same resolution the chip row draws.
  */
-data class ExportItemView(
+data class ExportAssetView(
     val publicId: String,
     val title: String,
-    val isCompleted: Boolean,
     val relativePath: String?,
-    /** Action wire values, resolved from the Task's control as it stands now, never as it stood when tapped. */
+    val sourceMissing: Boolean,
     val actions: List<String>
 )
 
 /**
- * One item as the payload sees it.
+ * One Task, with its completion, its template identity and its files.
  *
- * The single place an item's wire facts are assembled, so the body and the text file cannot drift:
- * both renderers walk the same [ExportItemView]s, and a field added to one is a field added to both
- * or to neither. **One entry per Task, resolved over every kind the Task is configured for** — the
- * union, exactly as the badge row resolves it, for the reason [buildWebhookPayload] gives.
+ * Completion is here and not on an Asset because checking off is one judgment about one Task however
+ * many files it presents. [assets] is empty for a Task with no file — a manual item — and the shape
+ * says so rather than inventing one.
  */
-fun exportItemView(
-    list: ListEntity,
-    item: ListItemEntity,
-    assetControls: String,
-    resolver: TemplateResolver
-): ExportItemView = ExportItemView(
-    publicId = item.publicId,
-    title = item.title,
-    isCompleted = item.isCompleted,
-    relativePath = webhookRelativePath(list, item),
-    actions = itemActionNames(item.decisions.assetDecisions, resolver.controlForTask(assetControls))
+data class ExportTaskView(
+    val publicId: String,
+    val title: String,
+    val isCompleted: Boolean,
+    val templates: List<ExportTemplateView>,
+    val assets: List<ExportAssetView>
 )
+
+/**
+ * The folder a stored Asset path sits in, relative to the Upstream root.
+ *
+ * `cos/x.jpg` → `cos`, `cos/2026/x.jpg` → `cos/2026`, `x.jpg` → `""`, null → null. A split-and-drop
+ * rather than a substring search, so a path with a leading slash still describes the same folder.
+ */
+fun assetFolderOf(relativePath: String?): String? {
+    if (relativePath == null) return null
+    return relativePath.split('/').filter { it.isNotEmpty() }.dropLast(1).joinToString("/")
+}
+
+/**
+ * The round's Tasks and Assets as the wire sees them.
+ *
+ * The one place a Task becomes a payload object, so the POST and the file cannot drift; both
+ * renderers walk these values, and both delivery paths call this function. Rows are deduplicated by
+ * Task id in first-appearance order: a List holds one membership per Task, but a folder round's
+ * bridge is not the place to rely on that, and a duplicated Task in a payload would be a duplicated
+ * judgment.
+ *
+ * A Task's title is the row's title — what the user saw in this List or review — falling back to the
+ * name it was imported under when the row has none. The two can differ because a List membership is
+ * allowed its own name; the snapshot describes the round that was actually shown.
+ */
+fun exportTaskViews(
+    rows: List<ListItemEntity>,
+    tasks: Map<String, PayloadTaskRow>,
+    assetsByTask: Map<String, List<PayloadAssetRow>>,
+    resolver: TemplateResolver
+): List<ExportTaskView> = rows.distinctBy { it.taskId }.map { row ->
+    val task = tasks[row.taskId]
+    val attachments = task?.assetControls.orEmpty()
+    val templates = decodeTemplateAttachments(attachments).map { ref ->
+        ExportTemplateView(
+            id = ref.templateId.value,
+            name = resolver.versionOf(ref)?.name,
+            version = ref.version
+        )
+    }
+    ExportTaskView(
+        publicId = task?.publicId.orEmpty(),
+        title = row.title.ifBlank { task?.displayName.orEmpty() },
+        isCompleted = row.isCompleted,
+        templates = templates,
+        assets = assetsByTask[row.taskId].orEmpty().map { asset ->
+            exportAssetView(asset, attachments, resolver)
+        }
+    )
+}
+
+/** One Asset's wire facts, resolved against the control that governs its own kind. */
+private fun exportAssetView(
+    asset: PayloadAssetRow,
+    attachments: String,
+    resolver: TemplateResolver
+): ExportAssetView {
+    val path = asset.relativePath
+    val title = path?.substringAfterLast('/').orEmpty()
+    val control = if (path == null) {
+        ResolvedAssetControl.Empty
+    } else {
+        resolver.controlFor(attachments, assetKindOf(title)) ?: ResolvedAssetControl.Empty
+    }
+    return ExportAssetView(
+        publicId = asset.publicId,
+        title = title,
+        relativePath = assetFolderOf(path),
+        sourceMissing = asset.sourceMissing,
+        actions = itemActionNames(
+            AssetDecisions(decodeActionIds(asset.selections.orEmpty())),
+            control
+        )
+    )
+}
 
 /**
  * A review item as a row, purely so the one payload builder can serialise it. Never inserted: a
@@ -93,17 +177,15 @@ fun exportItemView(
  * **This row is a folder round's only chance to say which Task a card was.** A List round's rows come out of
  * `list_items`, where the Task id is a stored column; a folder round resolves files, so its rows are
  * minted here, and [taskId] is the one field of this row that is *read back* rather than merely
- * carried into the body. Two readers, both of them the round's routing:
+ * carried into the body: `planExports` groups a round by the Todo its items came from, and it looks
+ * each item up by Task id. A row that hard-coded `""` puts **every** item of **every** folder round
+ * in one group with no source — which is [ExportChoice.Inherit]'s *nobody owns this* branch, and it
+ * is why a folder round over a *Txt* Todo posted to the webhook instead of writing a file.
  *
- * - `planExports` groups a round by the Todo its items came from, and it looks each item up by Task
- *   id. A row that hard-coded `""` puts **every** item of **every** folder round in one group with
- *   no source — which is [ExportChoice.Inherit]'s *nobody owns this* branch, and it is why a folder
- *   round over a *Txt* Todo posted to the webhook instead of writing a file.
- * - the round's `assetControls` map is keyed the same way, so the same field is what lets an item's
- *   `actions` be resolved from its Task's control rather than standing empty.
- *
- * The row is still never inserted, and [listId] and [createdAt] are still zero for that reason —
- * they are the fields nothing reads back.
+ * The wire facts themselves are read from the database by [exportTaskViews]; v0.6.0's hierarchy means
+ * `actions` belong to a pair and `templates` to the Task, neither of which this bridge can supply.
+ * [publicId] and `selections` are therefore carried but not read — the row is never inserted, and
+ * [listId] and [createdAt] are zero for the same reason.
  */
 internal fun ReviewItem.toPayloadRow(sortOrder: Int) = ListItemEntity(
     id = id,
@@ -118,12 +200,7 @@ internal fun ReviewItem.toPayloadRow(sortOrder: Int) = ListItemEntity(
     sourceRelativePath = relativePath,
     rootRelativePath = (target as? DecisionTarget.File)?.relativePath,
     sourceMissing = sourceMissing,
-    // The fold, and not any one page's. A payload row is one entry for the whole Task, so the
-    // marks it reports are every mark the Task carries — the same rule by which the payload has
-    // always been able to name a tag set on a file that is not the one on screen. The pair the
-    // tag was set on is not reconstructed here and is not sent: a receiver is told what the
-    // Task says, once.
-    selections = encodeActionIds(taskDecisions.selections)
+    selections = ""
 )
 
 /**
@@ -149,7 +226,7 @@ data class ExportPayload(
     val sourceTitle: String?,
     /** When this delivery was attempted. One clock read for the round. */
     val at: Long,
-    val items: List<ExportItemView>
+    val tasks: List<ExportTaskView>
 ) {
     /** The `source` field of a text export, empty when the List chose. */
     val sourceField: String get() = sourceTitle.orEmpty()
@@ -221,8 +298,8 @@ interface Exporter {
     /**
      * The bytes this kind writes. Pure: same payload, same answer.
      *
-     * No resolver, because there is nothing left to look up: the payload's items are already
-     * [ExportItemView]s, assembled by [exportItemView] *before* the payload was built, so an action
+     * No resolver, because there is nothing left to look up: the payload's Tasks are already
+     * [ExportTaskView]s, assembled by [exportTaskViews] *before* the payload was built, so an action
      * that is on the wire is on the wire for both mechanisms by construction. A renderer that could
      * still reach the tables would be a second place for the two to disagree.
      */
@@ -429,32 +506,55 @@ class TxtExporter(
  * The text body. The same facts as [buildWebhookPayload], in the same order, separated by tabs.
  *
  * Version line first, in the shape [com.example.listea.data.encodeDissolvedRecords] and the template
- * encoders already use: a payload is never read without knowing what wrote it, and this one will
- * gain a field the first time an action carries a value rather than a presence.
+ * encoders already use: a payload is never read without knowing what wrote it.
+ *
+ * **The hierarchy is linearised, not flattened.** A `task` record is followed by one `template`
+ * record per attachment and one `asset` record per file, and each asset by one `action` record per
+ * mark. Every record kind has a fixed field count, so a reader splits on tabs and the first field
+ * tells it how many more to expect. Counts on the parent records say how many children follow.
  *
  * **Fields are escaped with the rule `DissolvedRecords` uses**, for the same reason — a title is a
  * user's filename and may contain a tab or a newline, and a renderer that lets one through produces
  * a file that reads as two records. One escaper lifted to `internal`, rather than a second rule for
- * one problem.
- *
- * Every line has the same field count, so a reader can split on tabs without counting; the last
- * field is empty rather than absent when an item has no folder and no actions.
+ * one problem. Actions are records rather than a joined field, so a wire value containing a comma is
+ * still one value.
  */
 fun renderExportText(payload: ExportPayload): String = buildString {
-    append("listea-export\t").append(EXPORT_TEXT_VERSION).append('\n')
+    append("listea-export\t").append(EXPORT_VERSION).append('\n')
     append("event\t").append(payload.event).append('\n')
     append("list\t").append(escapeField(payload.listTitle)).append('\n')
     append("source\t").append(escapeField(payload.sourceField)).append('\n')
     append("at\t").append(payload.at).append('\n')
-    append("items\t").append(payload.items.size).append('\n')
-    payload.items.forEach { item ->
-        append("item")
-        append('\t').append(escapeField(item.publicId))
-        append('\t').append(escapeField(item.title))
-        append('\t').append(if (item.isCompleted) "1" else "0")
-        append('\t').append(escapeField(item.relativePath.orEmpty()))
-        append('\t').append(item.actions.joinToString(","))
+    append("tasks\t").append(payload.tasks.size).append('\n')
+    payload.tasks.forEach { task ->
+        append("task")
+        append('\t').append(escapeField(task.publicId))
+        append('\t').append(escapeField(task.title))
+        append('\t').append(if (task.isCompleted) "1" else "0")
+        append('\t').append(task.templates.size)
+        append('\t').append(task.assets.size)
         append('\n')
+        task.templates.forEach { template ->
+            append("template")
+            append('\t').append(escapeField(template.id))
+            append('\t').append(if (template.name != null) "1" else "0")
+            append('\t').append(escapeField(template.name.orEmpty()))
+            append('\t').append(template.version)
+            append('\n')
+        }
+        task.assets.forEach { asset ->
+            append("asset")
+            append('\t').append(escapeField(asset.publicId))
+            append('\t').append(escapeField(asset.title))
+            append('\t').append(if (asset.relativePath != null) "1" else "0")
+            append('\t').append(escapeField(asset.relativePath.orEmpty()))
+            append('\t').append(if (asset.sourceMissing) "1" else "0")
+            append('\t').append(asset.actions.size)
+            append('\n')
+            asset.actions.forEach { action ->
+                append("action\t").append(escapeField(action)).append('\n')
+            }
+        }
     }
 }
 
