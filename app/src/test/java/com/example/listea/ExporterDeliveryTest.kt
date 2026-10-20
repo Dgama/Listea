@@ -51,7 +51,7 @@ class ExporterDeliveryTest {
         sourceId = null,
         sourceTitle = null,
         at = 0L,
-        items = emptyList()
+        tasks = emptyList()
     )
 
     /**

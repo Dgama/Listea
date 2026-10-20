@@ -17,6 +17,10 @@ import org.junit.Test
  * So the shape is a golden expectation in the same sense the webhook body's is, and the same
  * argument applies — a change to it should be something somebody wrote down.
  *
+ * v0.6.0 linearises the same hierarchy the JSON body carries: a `task` record, then its `template`
+ * records and its `asset` records, and each asset its `action` records. Each record kind has a fixed
+ * field count, which is the property a reader splitting on tabs relies on.
+ *
  * The other half is the escaping. A title here is a user's **filename**, and filenames contain tabs,
  * newlines and percent signs. A renderer that lets one through produces a file that reads as two
  * records, so the round trip through [unescapeField] is asserted rather than assumed.
@@ -26,13 +30,27 @@ import org.junit.Test
  */
 class TxtExportTest {
 
-    private fun item(
+    private fun template(
+        id: String = "tpl-1",
+        name: String? = "Media Asset Control",
+        version: Int = 4
+    ) = ExportTemplateView(id, name, version)
+
+    private fun asset(
         id: String = "a1b2",
         title: String = "IMG_0001.jpg",
-        completed: Boolean = true,
         path: String? = "Camera/2024",
+        sourceMissing: Boolean = false,
         actions: List<String> = listOf("favorite")
-    ) = ExportItemView(id, title, completed, path, actions)
+    ) = ExportAssetView(id, title, path, sourceMissing, actions)
+
+    private fun task(
+        id: String = "task-1",
+        title: String = "IMG_0001.jpg",
+        completed: Boolean = true,
+        templates: List<ExportTemplateView> = listOf(template()),
+        assets: List<ExportAssetView> = listOf(asset())
+    ) = ExportTaskView(id, title, completed, templates, assets)
 
     private fun payload(
         event: String = "quickreview.completed",
@@ -40,7 +58,7 @@ class TxtExportTest {
         sourceId: String? = null,
         sourceTitle: String? = null,
         at: Long = 1_700_000_000_000,
-        items: List<ExportItemView> = listOf(item())
+        tasks: List<ExportTaskView> = listOf(task())
     ) = ExportPayload(
         event = event,
         listId = 7,
@@ -49,7 +67,7 @@ class TxtExportTest {
         sourceId = sourceId,
         sourceTitle = sourceTitle,
         at = at,
-        items = items
+        tasks = tasks
     )
 
     @Test
@@ -59,40 +77,69 @@ class TxtExportTest {
         // thing to remember when the format gains a field.
         val first = renderExportText(payload()).lineSequence().first()
 
-        assertEquals("listea-export\t$EXPORT_TEXT_VERSION", first)
+        assertEquals("listea-export\t$EXPORT_VERSION", first)
     }
 
     @Test
-    fun `the header names the round, and one line follows per item`() {
-        val text = renderExportText(payload(items = listOf(item(id = "a1"), item(id = "b2"))))
+    fun `the header names the round, and one task block follows per task`() {
+        val text = renderExportText(
+            payload(tasks = listOf(task(id = "a1"), task(id = "b2")))
+        )
 
         assertEquals(
             listOf(
-                "listea-export\t1",
+                "listea-export\t2",
                 "event\tquickreview.completed",
                 "list\tHoliday",
                 "source\t",
                 "at\t1700000000000",
-                "items\t2",
-                "item\ta1\tIMG_0001.jpg\t1\tCamera/2024\tfavorite",
-                "item\tb2\tIMG_0001.jpg\t1\tCamera/2024\tfavorite"
+                "tasks\t2",
+                "task\ta1\tIMG_0001.jpg\t1\t1\t1",
+                "template\ttpl-1\t1\tMedia Asset Control\t4",
+                "asset\ta1b2\tIMG_0001.jpg\t1\tCamera/2024\t0\t1",
+                "action\tfavorite",
+                "task\tb2\tIMG_0001.jpg\t1\t1\t1",
+                "template\ttpl-1\t1\tMedia Asset Control\t4",
+                "asset\ta1b2\tIMG_0001.jpg\t1\tCamera/2024\t0\t1",
+                "action\tfavorite"
             ),
             text.trimEnd('\n').split('\n')
         )
     }
 
     @Test
-    fun `the count in the header is the number of item lines`() {
-        // The two are derived from the same list and a reader may trust either, so a disagreement
+    fun `records follow their parent, and the counts say how many`() {
+        // The two are derived from the same lists and a reader may trust either, so a disagreement
         // would be a file that contradicts itself.
         listOf(0, 1, 3).forEach { count ->
-            val text = renderExportText(payload(items = List(count) { item(id = "id$it") }))
-            val declared = text.lineSequence().first { it.startsWith("items\t") }.removePrefix("items\t")
-            val written = text.lineSequence().count { it.startsWith("item\t") }
+            val text = renderExportText(
+                payload(
+                    tasks = List(count) {
+                        task(
+                            id = "id$it",
+                            templates = List(it) { index -> template(id = "t$index") },
+                            assets = List(it) { index -> asset(id = "a$index") }
+                        )
+                    }
+                )
+            )
+            val declared = text.lineSequence().first { it.startsWith("tasks\t") }.removePrefix("tasks\t")
+            val written = text.lineSequence().count { it.startsWith("task\t") }
 
-            assertEquals("$count items", count.toString(), declared)
+            assertEquals("$count tasks", count.toString(), declared)
             assertEquals(count, written)
         }
+
+        val text = renderExportText(
+            payload(
+                tasks = listOf(
+                    task(templates = listOf(template(id = "t1"), template(id = "t2")), assets = listOf(asset(id = "a1"), asset(id = "a2")))
+                )
+            )
+        )
+        assertTrue(text.contains("task\ttask-1\tIMG_0001.jpg\t1\t2\t2"))
+        assertEquals(2, text.lineSequence().count { it.startsWith("template\t") })
+        assertEquals(2, text.lineSequence().count { it.startsWith("asset\t") })
     }
 
     @Test
@@ -111,56 +158,83 @@ class TxtExportTest {
     }
 
     @Test
-    fun `an unchecked item says so, and so does a checked one`() {
+    fun `an unchecked task says so, and so does a checked one`() {
         val text = renderExportText(
-            payload(items = listOf(item(id = "on", completed = true), item(id = "off", completed = false)))
+            payload(tasks = listOf(task(id = "on", completed = true), task(id = "off", completed = false)))
         )
 
-        assertTrue(text.contains("item\ton\tIMG_0001.jpg\t1\t"))
-        assertTrue(text.contains("item\toff\tIMG_0001.jpg\t0\t"))
+        assertTrue(text.contains("task\ton\tIMG_0001.jpg\t1\t"))
+        assertTrue(text.contains("task\toff\tIMG_0001.jpg\t0\t"))
     }
 
     @Test
-    fun `a manual item has an empty folder, not a made-up one`() {
-        // A manual item has no source file at all. A placeholder path would be worse than none —
-        // a downstream tool would try to open it.
-        val text = renderExportText(payload(items = listOf(item(path = null))))
+    fun `a manual task has no templates and no assets, not made-up ones`() {
+        // A manual item has no source file and no import. Empty counts and no child records are the
+        // honest spelling: a placeholder path would be worse than none, because a downstream tool
+        // would try to open it.
+        val text = renderExportText(payload(tasks = listOf(task(templates = emptyList(), assets = emptyList()))))
 
-        assertTrue(text.contains("item\ta1b2\tIMG_0001.jpg\t1\t\tfavorite"))
+        assertTrue(text.contains("task\ttask-1\tIMG_0001.jpg\t1\t0\t0"))
+        assertEquals(0, text.lineSequence().count { it.startsWith("asset\t") })
+        assertEquals(0, text.lineSequence().count { it.startsWith("template\t") })
     }
 
     @Test
-    fun `an item with no actions has an empty field rather than a missing one`() {
-        // Every line has the same field count, so a reader can split on tabs without counting.
-        val text = renderExportText(payload(items = listOf(item(path = null, actions = emptyList()))))
+    fun `a pathless asset says the path is absent and leaves the field empty`() {
+        val text = renderExportText(payload(tasks = listOf(task(assets = listOf(asset(path = null))))))
 
-        val line = text.lineSequence().first { it.startsWith("item\t") }
-        assertEquals(6, line.split('\t').size)
-        assertTrue(line.endsWith("\t"))
+        assertTrue(text.contains("asset\ta1b2\tIMG_0001.jpg\t0\t\t0\t1"))
     }
 
     @Test
-    fun `every item line has the same field count`() {
-        // The property the split-on-tabs reader relies on. One item line that gained a column would
-        // silently shift every field of that row, so the count is one number for the whole file.
+    fun `a missing source file is a flag, not a missing line`() {
+        val text = renderExportText(payload(tasks = listOf(task(assets = listOf(asset(sourceMissing = true))))))
+
+        assertTrue(text.contains("asset\ta1b2\tIMG_0001.jpg\t1\tCamera/2024\t1\t1"))
+    }
+
+    @Test
+    fun `an asset with no actions has a zero count and no action records`() {
+        // Every line has the same field count, so a reader can split on tabs without counting. The
+        // actions themselves are records, not a joined field, so a value with a comma stays one value.
+        val text = renderExportText(payload(tasks = listOf(task(assets = listOf(asset(actions = emptyList()))))))
+
+        val line = text.lineSequence().first { it.startsWith("asset\t") }
+        assertEquals(7, line.split('\t').size)
+        assertTrue(line.endsWith("\t0"))
+        assertEquals(0, text.lineSequence().count { it.startsWith("action\t") })
+    }
+
+    @Test
+    fun `each record kind has one fixed field count`() {
+        // The property the split-on-tabs reader relies on. One record that gained a column would
+        // silently shift every field of that kind, so the count is one number per record kind.
         val text = renderExportText(
             payload(
-                items = listOf(
-                    item(),
-                    item(id = "b", path = null, actions = emptyList()),
-                    item(id = "c", title = "a\tb")
+                tasks = listOf(
+                    task(),
+                    task(
+                        id = "b",
+                        templates = emptyList(),
+                        assets = listOf(
+                            asset(id = "x", path = null, actions = emptyList()),
+                            asset(id = "y", title = "a\tb", actions = listOf("favorite", "cust1"))
+                        )
+                    ),
+                    task(id = "c", title = "nasty\tname\n%")
                 )
             )
         )
 
-        val sizes = text.lineSequence()
-            .filter { it.startsWith("item\t") }
-            .map { it.split('\t').size }
-            .distinct()
-            .toList()
+        val byKind = text.lineSequence()
+            .filter { '\t' in it }
+            .groupBy { it.substringBefore('\t') }
+            .mapValues { (_, lines) -> lines.map { it.split('\t').size }.distinct() }
 
-        assertEquals(sizes.toString(), 1, sizes.size)
-        assertEquals(6, sizes.single())
+        assertEquals(6, byKind.getValue("task").single())
+        assertEquals(5, byKind.getValue("template").single())
+        assertEquals(7, byKind.getValue("asset").single())
+        assertEquals(2, byKind.getValue("action").single())
     }
 
     @Test
@@ -170,7 +244,7 @@ class TxtExportTest {
         // a stray tab would silently truncate what it holds.
         val text = renderExportText(payload(listTitle = "a\tb"))
 
-        text.lineSequence().takeWhile { it.startsWith("items\t").not() }.forEach { line ->
+        text.lineSequence().takeWhile { it.startsWith("tasks\t").not() }.forEach { line ->
             assertEquals(line, 2, line.split('\t').size)
         }
     }
@@ -178,13 +252,20 @@ class TxtExportTest {
     @Test
     fun `a title holding a tab, a newline or a percent survives as itself`() {
         // The case that makes the escaper load-bearing: a filename is the user's, and this one holds
-        // the file's own separators. Left unescaped, this item would read as three records.
+        // the file's own separators. Left unescaped, this record would read as three.
         val nasty = "my%20file\tphoto\n.jpg"
-        val text = renderExportText(payload(items = listOf(item(title = nasty))))
+        val text = renderExportText(payload(tasks = listOf(task(title = nasty))))
 
-        val written = text.lineSequence().first { it.startsWith("item\t") }.split('\t')[2]
+        val written = text.lineSequence().first { it.startsWith("task\t") }.split('\t')[2]
         assertFalse("the tab was not escaped", written.contains('\t'))
         assertEquals(nasty, unescapeField(written))
+    }
+
+    @Test
+    fun `an action holding a comma is still one action record`() {
+        val text = renderExportText(payload(tasks = listOf(task(assets = listOf(asset(actions = listOf("a,b")))))))
+
+        assertEquals(listOf("action\ta,b"), text.lineSequence().filter { it.startsWith("action\t") }.toList())
     }
 
     @Test
@@ -206,16 +287,28 @@ class TxtExportTest {
     }
 
     @Test
-    fun `items keep the order the payload gave them`() {
+    fun `tasks keep the order the payload gave them`() {
         // The payload's order is the List's order, which is the order the user reviewed in. A
         // renderer that sorted or grouped would be reordering a round behind the user's back.
         val text = renderExportText(
-            payload(items = listOf(item(id = "c"), item(id = "a"), item(id = "b")))
+            payload(tasks = listOf(task(id = "c"), task(id = "a"), task(id = "b")))
         )
 
         assertEquals(
             listOf("c", "a", "b"),
-            text.lineSequence().filter { it.startsWith("item\t") }.map { it.split('\t')[1] }.toList()
+            text.lineSequence().filter { it.startsWith("task\t") }.map { it.split('\t')[1] }.toList()
+        )
+    }
+
+    @Test
+    fun `assets keep the order the payload gave them`() {
+        val text = renderExportText(
+            payload(tasks = listOf(task(assets = listOf(asset(id = "c"), asset(id = "a"), asset(id = "b")))))
+        )
+
+        assertEquals(
+            listOf("c", "a", "b"),
+            text.lineSequence().filter { it.startsWith("asset\t") }.map { it.split('\t')[1] }.toList()
         )
     }
 

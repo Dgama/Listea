@@ -259,7 +259,11 @@ class MigrationV23ToV24Test {
 
     private fun migrate(): ListeaDatabase =
         Room.databaseBuilder(context, ListeaDatabase::class.java, V23_DB)
-            .addMigrations(ListeaDatabase.MIGRATION_23_24, ListeaDatabase.MIGRATION_24_25)
+            .addMigrations(
+                ListeaDatabase.MIGRATION_23_24,
+                ListeaDatabase.MIGRATION_24_25,
+                ListeaDatabase.MIGRATION_25_26
+            )
             .build()
             .also { it.openHelper.writableDatabase }
 

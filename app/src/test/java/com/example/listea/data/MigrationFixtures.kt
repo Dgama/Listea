@@ -63,7 +63,10 @@ internal val ColumnsFromLaterSteps = mapOf(
     "file_review_state" to "selections",
     "sources" to "exportKind",
     "lists" to "exportKind",
-    "webhook_history" to "kind"
+    "webhook_history" to "kind",
+    // The newest step's wire identity, appended to the two rows that leave the device.
+    "tasks" to "publicId",
+    "assets" to "publicId"
 )
 
 /** One statement, against a database being built or wound back. */
@@ -184,6 +187,10 @@ internal fun ListeaDatabase.subtractV24Additions() {
  * and the drop is of a table something still points at.
  */
 internal fun ListeaDatabase.subtractV25Additions() {
+    // And the step above this one, first: the fixture has to come back to v24, not to v25. A
+    // database left at v25 already holds the column `MIGRATION_25_26` would add.
+    subtractV26Additions()
+
     exec("PRAGMA foreign_keys = OFF")
     exec("PRAGMA legacy_alter_table = ON")
 
@@ -253,6 +260,58 @@ internal fun ListeaDatabase.subtractV25Additions() {
     )
     exec("DROP TABLE webhook_history")
     exec("ALTER TABLE webhook_history_v24 RENAME TO webhook_history")
+
+    exec("PRAGMA legacy_alter_table = OFF")
+    exec("PRAGMA foreign_keys = ON")
+}
+
+/**
+ * Takes everything `MIGRATION_25_26` adds back off, leaving a database in v25's shape.
+ *
+ * Two `ALTER`s added the columns, so both tables are rebuilt to remove them — [subtractV24Additions]'s
+ * rule, and here for the same reason: minSdk 24 has no `DROP COLUMN`. The DDL is transcribed from
+ * `25.json`, and the same pragmas are needed: `assets` holds a foreign key to `tasks`, and a rename
+ * with `legacy_alter_table` off would rewrite it to the temporary name.
+ */
+internal fun ListeaDatabase.subtractV26Additions() {
+    exec("PRAGMA foreign_keys = OFF")
+    exec("PRAGMA legacy_alter_table = ON")
+
+    // --- tasks: no publicId --------------------------------------------------------------------
+    exec(
+        "CREATE TABLE tasks_v25 (`id` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, " +
+            "PRIMARY KEY(`id`))"
+    )
+    exec("INSERT INTO tasks_v25 (id, createdAt) SELECT id, createdAt FROM tasks")
+    exec("DROP TABLE tasks")
+    exec("ALTER TABLE tasks_v25 RENAME TO tasks")
+
+    // --- assets: no publicId -------------------------------------------------------------------
+    exec(
+        "CREATE TABLE assets_v25 (`id` TEXT NOT NULL, `taskId` TEXT NOT NULL, " +
+            "`sortOrder` INTEGER NOT NULL, `rootUri` TEXT, `relativePath` TEXT, " +
+            "`sourceMissing` INTEGER NOT NULL, `sourceUri` TEXT, `sizeBytes` INTEGER, " +
+            "`lastModified` INTEGER, PRIMARY KEY(`id`), " +
+            "FOREIGN KEY(`taskId`) REFERENCES `tasks`(`id`) " +
+            "ON UPDATE NO ACTION ON DELETE CASCADE )"
+    )
+    exec(
+        "INSERT INTO assets_v25 (id, taskId, sortOrder, rootUri, relativePath, sourceMissing, " +
+            "sourceUri, sizeBytes, lastModified) " +
+            "SELECT id, taskId, sortOrder, rootUri, relativePath, sourceMissing, " +
+            "sourceUri, sizeBytes, lastModified FROM assets"
+    )
+    exec("DROP TABLE assets")
+    exec("ALTER TABLE assets_v25 RENAME TO assets")
+    exec("CREATE INDEX IF NOT EXISTS `index_assets_taskId` ON `assets` (`taskId`)")
+    exec(
+        "CREATE UNIQUE INDEX IF NOT EXISTS `index_assets_taskId_rootUri_relativePath` " +
+            "ON `assets` (`taskId`, `rootUri`, `relativePath`)"
+    )
+    exec(
+        "CREATE INDEX IF NOT EXISTS `index_assets_rootUri_relativePath` " +
+            "ON `assets` (`rootUri`, `relativePath`)"
+    )
 
     exec("PRAGMA legacy_alter_table = OFF")
     exec("PRAGMA foreign_keys = ON")

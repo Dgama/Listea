@@ -533,7 +533,8 @@ class MigrationV20ToV21Test {
                 ListeaDatabase.MIGRATION_21_22,
                 ListeaDatabase.MIGRATION_22_23,
                 ListeaDatabase.MIGRATION_23_24,
-                ListeaDatabase.MIGRATION_24_25
+                ListeaDatabase.MIGRATION_24_25,
+                ListeaDatabase.MIGRATION_25_26
             )
             .build()
 

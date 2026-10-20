@@ -66,11 +66,12 @@ class MigrationV24ToV25Test {
     /**
      * The version, and the column.
      *
-     * The step is the *last* one in the chain as this is written, so `migrate()` opens a database
-     * the app itself could open — which is what makes Room's schema validation part of this test
-     * rather than something checked elsewhere. When a later release adds a step, this file's chain
-     * grows or this test is retired with it; either way the failure is about the chain and not about
-     * what this step does.
+     * `migrate()` registers this step and every later one, so it opens a database the app itself
+     * could open — which is what makes Room's schema validation part of this test rather than
+     * something checked elsewhere. The version asserted is therefore the current one, not the
+     * version this step ends at. When a later release adds a step, this file's chain grows or this
+     * test is retired with it; either way the failure is about the chain and not about what this
+     * step does.
      */
     @Test
     fun `the step takes a v24 database to the current version`() {
@@ -78,7 +79,7 @@ class MigrationV24ToV25Test {
 
         val database = migrate()
 
-        assertEquals(V25, version(database))
+        assertEquals(CURRENT, version(database))
         assertTrue(columnsOf(GONE).contains("exportKind"))
     }
 
@@ -293,7 +294,7 @@ class MigrationV24ToV25Test {
 
     private fun migrate(): ListeaDatabase =
         Room.databaseBuilder(context, ListeaDatabase::class.java, V24_DB)
-            .addMigrations(ListeaDatabase.MIGRATION_24_25)
+            .addMigrations(ListeaDatabase.MIGRATION_24_25, ListeaDatabase.MIGRATION_25_26)
             .build()
             .also { it.openHelper.writableDatabase }
 
@@ -377,8 +378,8 @@ class MigrationV24ToV25Test {
         const val V24_DB = "v24-fixture.db"
         const val V24 = 24
 
-        /** The version the entities declare, as this step leaves it. See the test that asserts it. */
-        const val V25 = 25
+        /** The version the entities declare, which this step plus every later one reaches. */
+        const val CURRENT = 26
 
         /** The table `the step takes a v24 database to the current version` writes its column into. */
         const val GONE = "sources"

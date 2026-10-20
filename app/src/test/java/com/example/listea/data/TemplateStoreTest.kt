@@ -3,10 +3,14 @@ package com.example.listea.data
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.example.listea.TemplateResolver
+import com.example.listea.encodeTemplateAttachments
 import com.example.listea.domain.AssetKind
 import com.example.listea.domain.ButtonType
 import com.example.listea.domain.TEMPLATE_BUTTONS_VERSION
 import com.example.listea.domain.TemplateButton
+import com.example.listea.domain.TemplateId
+import com.example.listea.domain.TemplateVersionRef
 import com.example.listea.domain.Templates
 import com.example.listea.domain.decodeTemplateButtons
 import com.example.listea.domain.decodeTemplateScope
@@ -190,12 +194,69 @@ class TemplateStoreTest {
     fun `an update to a template that is not there creates nothing`() = runTest {
         store.update("no.such.template", "Anything", scope(), listOf(button("custom1", "One", "one")))
 
-        // There is no create path, and this is what that means when something asks for one anyway:
-        // a lineage is minted by whatever has something to name — the upgrade, and an import — and
-        // never by an editor. A store that inserted one here would put a template on the list that
-        // nothing has ever attached.
+        // An edit never creates: creation is its own verb ([create]), with its own name prompt. A
+        // store that inserted one here would put a template on the list that nothing has ever
+        // attached, from a page that never asked what to call it.
         assertNull(lineage("no.such.template"))
         assertTrue(store.templates.first().isEmpty())
+    }
+
+    // --- starting one -------------------------------------------------------------------------------
+
+    @Test
+    fun `create writes a lineage and version 1 with the shipped shape`() = runTest {
+        val id = store.create("Second template")!!
+
+        assertEquals("Second template", lineage(id)?.name)
+        val version = versions(id).single()
+        assertEquals(1, version.version)
+        assertEquals(TEMPLATE_BUTTONS_VERSION, version.buttonsVersion)
+        // Not an empty bar: the scope admits the two media kinds and the buttons are the seed's, so
+        // the template can be attached the moment it exists.
+        assertEquals(setOf(AssetKind.IMAGE, AssetKind.VIDEO), decodeScope(version))
+        assertEquals(Templates.AssetControlSeed.buttons, decodeButtons(version))
+    }
+
+    @Test
+    fun `two creates get two opaque ids`() = runTest {
+        val first = store.create("One")
+        val second = store.create("Two")
+
+        // A UUID, not a name-derived string: a rename must not move an id something has attached.
+        assertTrue(first != null && second != null)
+        assertTrue(first != second)
+        assertTrue(Regex("""^[0-9a-f-]{36}$""").matches(first!!))
+        assertEquals(2, store.templates.first().size)
+    }
+
+    @Test
+    fun `create sanitises the name and refuses a blank one`() = runTest {
+        val id = store.create("  My\tTemplates  ")
+
+        assertEquals("My Templates", lineage(id!!)?.name)
+        // Blank would be a row with nothing to tap; refused rather than stored, and nothing written.
+        assertNull(store.create("   "))
+        assertEquals(1, store.templates.first().size)
+    }
+
+    @Test
+    fun `a created template is attachable at once`() = runTest {
+        store.create("Second template")
+
+        // The resolver's own answer, not a hand-built list: a template whose version it cannot read
+        // or whose scope admits nothing would be created and then silently unofferable.
+        val (templates, versions) = store.snapshot()
+        val resolver = TemplateResolver.of(templates, versions)
+        val second = templates.single { it.name == "Second template" }
+
+        assertTrue(resolver.attachable.any { it.ref.templateId.value == second.id })
+        assertEquals(
+            Templates.AssetControlSeed.buttons,
+            resolver.controlFor(
+                encodeTemplateAttachments(listOf(TemplateVersionRef(TemplateId(second.id), 1))),
+                AssetKind.IMAGE
+            )?.buttons
+        )
     }
 
     @Test

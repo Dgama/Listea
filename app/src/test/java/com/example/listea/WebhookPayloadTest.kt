@@ -1,7 +1,6 @@
 package com.example.listea
 
 import com.example.listea.data.AssetDecisions
-import com.example.listea.data.ListEntity
 import com.example.listea.data.ListItemEntity
 import com.example.listea.data.TemplateEntity
 import com.example.listea.data.TemplateVersionEntity
@@ -23,27 +22,15 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
- * Covers the two pure pieces of the webhook item payload: the folder path an item resolves to, and
- * the action names the template governing that Task resolves it to.
+ * Covers the two pure pieces of the Task/Asset payload: the folder an Asset resolves to, and the
+ * action names the control governing that file's kind resolves it to.
  *
  * The JSON assembly itself is in `WebhookBodyTest`. It used to live on the device, because org.json
  * was not available to host tests — Robolectric, added in v0.2 step 0, is what changed that.
  */
 class WebhookPayloadTest {
 
-    private fun list(relativePath: String?) = ListEntity(
-        id = 1,
-        title = "bilibili",
-        createdAt = 0,
-        sourceRootUri = relativePath?.let { "content://tree/Listea" },
-        sourceRelativePath = relativePath
-    )
-
-    private fun item(
-        sourcePath: String?,
-        vararg actions: String,
-        favorite: Boolean = false
-    ) = ListItemEntity(
+    private fun item(vararg actions: String, favorite: Boolean = false) = ListItemEntity(
         id = 173,
         publicId = "0AT9K3QWMB-4H7ZP2-XC5N0V",
         listId = 1,
@@ -51,7 +38,7 @@ class WebhookPayloadTest {
         title = "example.jpg",
         sortOrder = 0,
         createdAt = 0,
-        sourceRelativePath = sourcePath,
+        sourceRelativePath = "a.jpg",
         selections = encodeActionIds(
             actions.toSet() + if (favorite) setOf(Templates.FAVOURITE_BUTTON_ID) else emptySet()
         )
@@ -101,91 +88,87 @@ class WebhookPayloadTest {
      * The action half of a row, which is what every assertion below is about.
      *
      * A list row reports both halves — see [ReviewDecisions] — and goes through the same
-     * conversion the webhook's own item entry does, so these tests exercise the path the payload
+     * conversion the payload's own Asset entry does, so these tests exercise the path the payload
      * takes rather than a decision record assembled for them.
      */
     private fun ListItemEntity.actionDecisions(): AssetDecisions = decisions.assetDecisions
 
     /**
-     * The control a payload is built under: what governs a Task attached to [LINEAGE] version 1.
+     * The control a payload resolves an Asset under: what governs one **file's kind** on a Task
+     * attached to [LINEAGE] version 1.
      *
-     * The *whole Task's* control rather than one file's, because that is the question a payload
-     * asks — `TemplateResolver.controlForTask`, one entry per Task. The per-kind and per-file paths
-     * are `SettingsTest`'s and `TemplateAttachmentTest`'s business.
-     *
-     * It used to be read off the settings page, with a fallback to the app's shipped tags whenever
-     * a record said nothing. Nothing falls back any more — an ungoverned file gets no chips rather
-     * than the built-in standing in — so the attachment is named here rather than left empty.
+     * Per kind rather than the old Task-wide union, because v0.6.0's `actions` belong to an Asset
+     * and the chip row has always drawn them from the kind's own control. A Task-wide union would
+     * report a tag the file could not have been marked with.
      */
-    private fun control(templates: TemplateResolver = resolver()): ResolvedAssetControl =
-        templates.controlForTask(ATTACHMENT)
+    private fun control(
+        templates: TemplateResolver = resolver(),
+        kind: AssetKind? = AssetKind.IMAGE
+    ): ResolvedAssetControl =
+        kind?.let { templates.controlFor(ATTACHMENT, it) } ?: ResolvedAssetControl.Empty
 
     @Test
-    fun `path is relative to the sync root, not to the list folder`() {
-        assertEquals(
-            "2026-07-11/bilibili",
-            webhookRelativePath(list("2026-07-11/bilibili"), item("example.jpg"))
-        )
+    fun `the folder is the Asset's own containing folder`() {
+        // Relative to the Upstream root, and independent of packaging: a file in `cos` says `cos`
+        // whether its Task is the file or the whole folder.
+        assertEquals("cos", assetFolderOf("cos/a.jpg"))
+        assertEquals("cos/2026", assetFolderOf("cos/2026/a.jpg"))
     }
 
     @Test
-    fun `nested item keeps its subfolders`() {
-        assertEquals(
-            "2026-07-11/bilibili/sub",
-            webhookRelativePath(list("2026-07-11/bilibili"), item("sub/a.jpg"))
-        )
+    fun `a file directly under the root has an empty folder, not a missing one`() {
+        assertEquals("", assetFolderOf("a.jpg"))
     }
 
     @Test
-    fun `the file name is never part of the path`() {
+    fun `the file name is never part of the folder`() {
         // A file and a folder that share a name must still resolve to the same parent.
-        assertEquals(
-            "2026-07-11/bilibili/sub",
-            webhookRelativePath(list("2026-07-11/bilibili"), item("sub/sub"))
-        )
-    }
-
-    @Test
-    fun `an item directly in a list linked to the root has an empty path`() {
-        assertEquals("", webhookRelativePath(list(""), item("a.jpg")))
-    }
-
-    @Test
-    fun `a list linked to the root itself adds no prefix`() {
-        assertEquals("sub", webhookRelativePath(list(""), item("sub/a.jpg")))
+        assertEquals("sub", assetFolderOf("sub/sub"))
     }
 
     @Test
     fun `stray separators cannot produce a doubled slash`() {
-        assertEquals(
-            "2026-07-11/bilibili/sub",
-            webhookRelativePath(list("/2026-07-11/bilibili/"), item("/sub/a.jpg"))
-        )
+        assertEquals("cos/2026", assetFolderOf("/cos/2026/a.jpg"))
     }
 
     @Test
-    fun `manual items have no path at all`() {
-        assertNull(webhookRelativePath(list(null), item(null)))
+    fun `a pathless Asset has no folder at all`() {
+        assertNull(assetFolderOf(null))
     }
 
     @Test
     fun `actions serialize in a fixed order, whatever is set`() {
         val control = control()
-        assertEquals(emptyList<String>(), itemActionNames(item("a.jpg").actionDecisions(), control))
+        assertEquals(emptyList<String>(), itemActionNames(item().actionDecisions(), control))
         assertEquals(
             listOf("favorite"),
-            itemActionNames(item("a.jpg", favorite = true).actionDecisions(), control)
+            itemActionNames(item(favorite = true).actionDecisions(), control)
         )
         assertEquals(
             listOf("favorite", "cust2"),
-            itemActionNames(item("a.jpg", "custom2", favorite = true).actionDecisions(), control)
+            itemActionNames(item("custom2", favorite = true).actionDecisions(), control)
         )
         assertEquals(
             listOf("favorite", "cust1", "cust2"),
             itemActionNames(
-                item("a.jpg", "custom1", "custom2", favorite = true).actionDecisions(),
+                item("custom1", "custom2", favorite = true).actionDecisions(),
                 control
             )
+        )
+    }
+
+    @Test
+    fun `a kind the attached template does not admit sends no actions`() {
+        // The attachment governs images. A video under the same Task has no chip row to have been
+        // marked from, so it cannot claim the image template's tags — the per-file rule in practice.
+        assertEquals(
+            emptyList<String>(),
+            itemActionNames(item("custom1", favorite = true).actionDecisions(), control(kind = AssetKind.VIDEO))
+        )
+        // A pathless Asset is empty for the same reason: no path, no kind, no control.
+        assertEquals(
+            emptyList<String>(),
+            itemActionNames(item("custom1").actionDecisions(), control(kind = null))
         )
     }
 
@@ -196,7 +179,7 @@ class WebhookPayloadTest {
         // about the schema — the two are separate tables — and this is the assertion that would
         // fail if a reader went looking for either of them in the other's place.
         val control = control()
-        val unchecked = item("a.jpg", "custom1")
+        val unchecked = item("custom1")
         assertEquals(listOf("cust1"), itemActionNames(unchecked.actionDecisions(), control))
         assertEquals(
             listOf("cust1"),
@@ -210,7 +193,7 @@ class WebhookPayloadTest {
         assertEquals(
             listOf("favorite", "tag1", "tag2"),
             itemActionNames(
-                item("a.jpg", "custom1", "custom2", favorite = true).actionDecisions(),
+                item("custom1", "custom2", favorite = true).actionDecisions(),
                 control
             )
         )
@@ -222,7 +205,7 @@ class WebhookPayloadTest {
         val control = control(resolver(c1Value = "favorite"))
         assertEquals(
             listOf("favorite"),
-            itemActionNames(item("a.jpg", favorite = true).actionDecisions(), control)
+            itemActionNames(item(favorite = true).actionDecisions(), control)
         )
     }
 
@@ -231,7 +214,7 @@ class WebhookPayloadTest {
         val control = control(resolver(c1Value = "tag", c2Value = "tag"))
         assertEquals(
             listOf("tag"),
-            itemActionNames(item("a.jpg", "custom1", "custom2").actionDecisions(), control)
+            itemActionNames(item("custom1", "custom2").actionDecisions(), control)
         )
     }
 
@@ -239,7 +222,7 @@ class WebhookPayloadTest {
     fun `renaming an action does not change which actions are selected`() {
         // The item holds the id, so it is untouched and only the emitted string moves. This is
         // the whole point of keeping names out of the item row.
-        val marked = item("a.jpg", "custom1").actionDecisions()
+        val marked = item("custom1").actionDecisions()
         assertEquals(listOf("cust1"), itemActionNames(marked, control()))
         assertEquals(listOf("archive"), itemActionNames(marked, control(resolver(c1Value = "archive"))))
     }
@@ -248,7 +231,7 @@ class WebhookPayloadTest {
     fun `an action the user deleted is carried but not sent`() {
         // Deleting a button is a decision about the bar, not about the files already marked with
         // it: the id stays on the row, and stops resolving to anything the webhook can name.
-        val marked = item("a.jpg", "custom1", favorite = true).actionDecisions()
+        val marked = item("custom1", favorite = true).actionDecisions()
         // The template as it stands once its tags are deleted: the version offers `★` and nothing
         // else. Nothing falls back to the shipped pair any more — see `TemplateResolver` — so the
         // deleted id is not quietly read through some other template's buttons.

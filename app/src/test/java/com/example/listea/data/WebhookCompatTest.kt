@@ -4,9 +4,12 @@ import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.listea.EVENT_LIST_COMPLETED
+import com.example.listea.ExportPayload
 import com.example.listea.FolderSnapshot
 import com.example.listea.ImporterKind
+import com.example.listea.TemplateResolver
 import com.example.listea.buildWebhookPayload
+import com.example.listea.exportTaskViews
 import com.example.listea.plan
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
@@ -62,44 +65,63 @@ class WebhookCompatTest {
 
     // §2.4, §10, AR-7
     @Test
-    fun `a multi-Asset Task gets a stable wire id across rounds, stored in legacy_task_ids`() =
-        runTest {
-            val source = registerSource(ROOT, "", ImporterKind.FOLDER_AS_TASK)
-            dao.runImport(source.id, "", folderPlan("", listOf("alice/a.jpg", "alice/b.jpg"), listOf("alice")), 2000)
-            val taskId = dao.getCatalogTasks(source.id).single().taskId
+    fun `a multi-Asset Task's public id is minted at import and never changes`() = runTest {
+        val source = registerSource(ROOT, "", ImporterKind.FOLDER_AS_TASK)
+        dao.runImport(source.id, "", folderPlan("", listOf("alice/a.jpg", "alice/b.jpg"), listOf("alice")), 2000)
+        val taskId = dao.getCatalogTasks(source.id).single().taskId
 
-            val first = dao.legacyTaskId(taskId, 3000)
-            val second = dao.legacyTaskId(taskId, 4000)
+        val first = dao.getPayloadTasks(listOf(taskId)).single().publicId
+        val second = dao.getPayloadTasks(listOf(taskId)).single().publicId
 
-            // One id, minted once, read back on every later round.
-            assertEquals(first, second)
-            assertEquals(first, rawText("SELECT publicId FROM legacy_task_ids WHERE taskId = '$taskId'"))
-            assertEquals(1, rawInt("SELECT COUNT(*) FROM legacy_task_ids"))
-        }
+        // One id, minted when the Task was created, read back on every later round. The delivery
+        // path never mints: a write during a round could disagree with the Task it names.
+        assertEquals(first, second)
+        assertEquals(first, rawText("SELECT publicId FROM tasks WHERE id = '$taskId'"))
+        assertTrue(first.isNotBlank())
+        assertEquals(0, rawInt("SELECT COUNT(*) FROM legacy_task_ids"))
+    }
 
     // §10
     @Test
-    fun `the webhook body for a file-backed Task is byte-identical before and after the release`() =
-        runTest {
-            val now = 1000L
-            val listId = dao.createFolderList("Trip", ROOT, "2026-07-11", files("a.jpg"), emptyList(), false, now)
-            val list = dao.getList(listId)!!.copy(id = 7)
-            // Normalise the random public id and the checked state so the body is deterministic; the
-            // row itself is what the recomposed createFolderList produced.
-            val item = dao.getItems(listId).single().copy(publicId = "PUBLIC-1", isCompleted = true)
+    fun `the webhook body for a file-backed Task is the v2 hierarchy`() = runTest {
+        val now = 1000L
+        val listId = dao.createFolderList("Trip", ROOT, "2026-07-11", files("a.jpg"), emptyList(), false, now)
+        val row = dao.getItems(listId).single().copy(isCompleted = true)
 
-            // No settings and no resolver: this body is what a caller with neither would send, which
-            // is the shape v0.1's receiver was written against.
-            val payload = buildWebhookPayload(EVENT_LIST_COMPLETED, list, listOf(item))
-
-            assertEquals(
-                """{"event":"list.completed",""" +
-                    """"list":{"id":7,"title":"Trip","completedAt":null},""" +
-                    """"items":[{"id":"PUBLIC-1","title":"a.jpg","isCompleted":true,""" +
-                    """"relativePath":"2026-07-11","actions":[]}]}""",
-                payload
+        val task = dao.getPayloadTasks(listOf(row.taskId)).single()
+        val asset = dao.getPayloadAssets(listOf(row.taskId)).single()
+        val payload = buildWebhookPayload(
+            ExportPayload(
+                event = EVENT_LIST_COMPLETED,
+                listId = 7,
+                listTitle = "Trip",
+                completedAt = null,
+                sourceId = null,
+                sourceTitle = null,
+                at = now,
+                tasks = exportTaskViews(
+                    rows = listOf(row),
+                    tasks = mapOf(task.taskId to task),
+                    assetsByTask = mapOf(task.taskId to listOf(asset)),
+                    resolver = TemplateResolver.Empty
+                )
             )
-        }
+        )
+
+        // No import, so no template: `templates` is empty rather than absent, and the Asset carries
+        // the folder the file actually sits in. The two ids are the rows' own, minted at import.
+        assertEquals(
+            """{"version":2,"event":"list.completed",""" +
+                """"list":{"id":7,"title":"Trip","completedAt":null},""" +
+                """"tasks":[{"id":"${task.publicId}","title":"a.jpg","isCompleted":true,""" +
+                """"templates":[],"assets":[{"id":"${asset.publicId}","title":"a.jpg",""" +
+                """"relativePath":"2026-07-11","sourceMissing":false,"actions":[]}]}]}""",
+            payload
+        )
+        assertTrue(task.publicId.isNotBlank())
+        assertTrue(asset.publicId.isNotBlank())
+        assertTrue(task.publicId != asset.publicId)
+    }
 
     // --- helpers ---------------------------------------------------------------------------------
 
