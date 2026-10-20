@@ -16,7 +16,7 @@ android {
         targetSdk = 37
         // The version is the round the code is at — the same name the iteration docs and the git
         // tag use. versionCode is that name flattened to one integer, so it cannot drift from it.
-        val version = "0.5.6"
+        val version = "0.6.0"
         versionName = version
         versionCode = version.split(".")
             .let { it[0].toInt() * 10_000 + it[1].toInt() * 100 + it[2].toInt() }
