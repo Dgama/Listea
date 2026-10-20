@@ -174,7 +174,7 @@ Pressing the button is the confirmation.
 
 **No payload is ever posted and no file is ever written with nothing to carry.** A round where
 nothing was checked, a review left without a single swipe, a List that emptied itself — each reports
-*Nothing to send* instead. `"items": []` would tell a receiver a round happened when none did, and a
+*Nothing to send* instead. `"tasks": []` would tell a receiver a round happened when none did, and a
 file holding only a header says the same lie in a different medium.
 
 Nothing is kept in the history for an empty payload either. There would be nothing to resend, and

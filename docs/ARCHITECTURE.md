@@ -2,12 +2,14 @@
 
 > **Status:** Normative architectural direction  
 > **Scope:** Long-lived product and domain boundaries  
-> **Last updated:** 2026-09-19 (revised: v0.5.4's move of the Asset Control band into stored
-> templates is recorded in [Templates](#templates); v0.5.6's split of the *export* from its
-> *mechanism* is recorded in [Exporter / Action](#exporter--action); and v0.5.1's move of `★` and the
-> configured actions down to the Task–Asset pair is recorded in [TaskState](#taskstate), where the
-> sentence it was measured against says the opposite — the decision is kept and its shape is left
-> open)
+> **Last updated:** 2026-10-20 (revised: v0.6.0's re-specification of the export body as a versioned
+> `event → list → task → asset` contract, and of the wire ids it carries, is recorded in
+> [Exporter / Action](#exporter--action) and [Identity](#identity); v0.5.4's move of the Asset Control
+> band into stored templates is recorded in [Templates](#templates); v0.5.6's split of the *export*
+> from its *mechanism* is recorded in [Exporter / Action](#exporter--action); and v0.5.1's move of
+> `★` and the configured actions down to the Task–Asset pair is recorded in
+> [TaskState](#taskstate), where the sentence it was measured against says the opposite — the
+> decision is kept and its shape is left open)
 
 Listea is a lightweight human-judgment layer between structured inputs and workflow outputs. It turns a collection of reviewable tasks into a fast, resumable feed, records what a person decided, and leaves upstream ingestion and downstream consequences to other systems.
 
@@ -256,6 +258,17 @@ Different identity concepts must remain different:
 
 The current public item ID contract is not a substitute for Task identity. In the legacy media system, the same file can arrive again and receive another public ID. That contract may remain useful to downstream webhook consumers, but it must be translated at the compatibility boundary rather than imposed on the new domain.
 
+**v0.6.0 makes that translation explicit rather than derivational, and this is where the decision is
+recorded.** The export body gained a Task level, so the wire now carries two arrival ids: one per
+Task and one per Asset. Both are stored as `publicId` columns *beside* each row's domain id, minted
+at row creation, and neither is ever used to refer to a Task or Asset inside the domain. The
+distinction above survives: the domain id answers *which Task is this*, the public id answers *which
+arrival did the receiver see*, and a re-arrival of the same material still gets a new public id
+under the same kind of domain identity. Storing the wire id on the row rather than minting it at
+delivery is what makes it stable across resends and across two delivery paths that no longer share
+a registration side table. An upgrade backfills existing rows from the old wire names where they
+exist, so old records still join; see [Core concepts → Item identity](core-concepts.md#item-identity).
+
 Identity must survive ordinary edits, reorderings, template renames, and movement between review contexts. Destructive identity merges or splits require an explicit migration policy.
 
 ## Templates
@@ -410,6 +423,22 @@ The List half is not new — [Legacy compatibility is not architecture](#legacy-
 already allows a List to display and configure a delivery. Delivery history stays at the boundary, as
 the paragraph above permits: the table keeps its `webhook_history` name and gains a `kind`, and it now
 records every kind's attempts rather than one kind's. See [v0.5.6](iterations/v0.5.6.md).
+
+**v0.6.0 turns the seam into a published contract, and stops treating the body as a rendering
+detail.** One `ExportPayload` holds the round as `ExportTaskView`s, each with its Assets and its
+attached template identities, assembled once from the database before either renderer runs; the two
+kinds spell the same values. The body is versioned (`2`), the previous flat `items` shape is a hard
+cut, and a stored history record resigns its original bytes rather than being re-rendered under the
+new contract. That last rule follows from the boundary rather than despite it: a history row is a
+record of *what was sent*, not a projection that may be recomputed when the format changes.
+
+Two placements inside the payload are architectural rather than cosmetic. **Completion sits on the
+Task**, because checking off is one judgment however many files a Task presents. **`relativePath` and
+`actions` sit on the Asset**, because both describe a particular file: the first is its location
+under the Upstream, independent of how the Task was packaged, and the second is resolved through the
+control that governs that file's own kind, never a Task-wide union. The values are a snapshot of the
+round as it ended, not a review history; a timestamped history would be an additive level, not a
+reason to change these. See [v0.6.0](iterations/v0.6.0.md) and [Webhooks](webhooks.md).
 
 ## Source material, import, and review selection
 

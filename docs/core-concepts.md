@@ -273,9 +273,10 @@ the catalog: what is reviewed is exactly what the run put there.
 *Same as the Todos* path, because there is no List card to have chosen otherwise: each item leaves
 by its own Todo's method, and an item with no source Todo goes by webhook — see
 [Exports](exports.md#how-a-round-resolves). What a receiver sees is still one shape, with `list.id`
-set to `0` and the folder's name standing in as the title. And its Tasks have no registration row of
-their own, so an item arrives with no public id until the payload builder mints one on the first
-delivery. Decisions are saved either way, and are visible everywhere else, because of
+set to `0` and the folder's name standing in as the title. Its Tasks have no registration row of
+their own, but they are not nameless: every Task and Asset is given its public id when the row is
+created, so a folder round's items arrive with the same names on the first delivery as on the last.
+Decisions are saved either way, and are visible everywhere else, because of
 [where state lives](#where-state-lives).
 
 Quick Review can be switched off in Settings. Off takes the action out of a Todo and stops the
@@ -442,9 +443,9 @@ the Task's tick, because the Task is the judgment target and it did not change.
 
 ## Item identity
 
-Every item carries a 24-character **public id**, assigned when the row is created and never changed
-afterwards. It is what goes onto the wire, and it is safe to use as a primary key on the
-receiving side.
+Every **Task** and every **Asset** carries its own 24-character **public id**, assigned when the row
+is created and never changed afterwards. Both go onto the wire — `tasks[].id` and `assets[].id` — and
+both are safe to use as primary keys on the receiving side.
 
 ```
 0AT9K3QWMB-4H7ZP2-XC5N0V
@@ -453,19 +454,31 @@ receiving side.
 ```
 
 - **time** — milliseconds since the epoch, base32, fixed width. Sorting the ids **as strings**
-  sorts them by when the item arrived; no parsing needed.
-- **file** — a fingerprint of what the row is about: a file's path under its Upstream, or a manual
-  item's List and title. Deterministic, so two arrivals of the same file share this field. A hint
+  sorts them by when the row arrived; no parsing needed.
+- **file** — a fingerprint of what the row is about: a Task's identity, or an Asset's Task and path
+  under its Upstream. Deterministic, so two arrivals of the same material share this field. A hint
   for grouping, not a guarantee.
 - **random** — 30 bits, and what actually makes the id unique.
 
 The alphabet is Crockford base32 — no `I`, `L`, `O` or `U` — so an id copied out of a log by hand
 cannot be misread.
 
-**An id names one *arrival* of a file, not the file itself.** The same file entering Listea again —
-a new List over the same folder, a re-sync that re-adds it after it went missing — gets a **new**
-id, so a receiver can keep both records without either overwriting the other. Two arrivals of one
-file are recognisable by their matching middle field, or by `relativePath` + `title`.
+**The two ids name different things.** A Task's id names one judgment; an Asset's id names one file
+*as presented under that Task*. The same file under two Tasks — `cos/x.jpg` imported once
+file-as-Task and once inside a folder-as-Task — is two Assets with two ids, because those are two
+judgments and a receiver must be able to keep them apart. They are recognisable as the same material
+by their matching fingerprint, or by `relativePath` + `title`.
+
+**An id names one *arrival*, not the file itself.** The same file entering Listea again — a new List
+over the same folder, a re-sync that re-adds it after it went missing — gets a **new** id, so a
+receiver can keep both records without either overwriting the other.
+
+**An upgrade gives existing rows ids without inventing new arrivals.** A Task took the id the old
+folder-round path had already minted for it where one existed. A file took its old registration id,
+because that was the name the v0.1 wire sent. A file whose Task held exactly one Asset and whose
+List item carried an id — the old shape in which the List item *was* the file — inherited that id. A
+multi-Asset Task's List id was **not** copied onto one of its files: that id named the Task's
+presentation, not any particular file. Everything else was minted at the row's own creation time.
 
 ---
 
