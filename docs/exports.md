@@ -27,7 +27,7 @@ Everything here is optional. Listea is fully usable with nothing set to export a
 | Method | What it does | Asks first | Its own settings |
 |---|---|---|---|
 | **Webhook** | POSTs a JSON body describing the round to a URL you configure | Yes | [Settings → Exports → Webhook](settings.md#exports) |
-| **Txt** | Writes one tab-separated text file per round under `Download/Listea/txt/` | No | [Settings → Exports → Txt](settings.md#exports) — nothing is editable there yet |
+| **Txt** | Writes the same JSON body the webhook would post to one file per round under `Download/Listea/txt/` | No | [Settings → Exports → Txt](settings.md#exports) — nothing is editable there yet |
 
 The set of methods is closed rather than stored, because a method is **code** — a renderer plus a
 destination, and neither is data. The list of methods is the list of exporters this build ships:
@@ -38,8 +38,10 @@ serving.
 
 The txt method is deliberately the least ambitious export there could be: no configuration, no
 network, and one failure mode — the file did not get written. It exists to prove the webhook was a
-method rather than the model. What is in the file is documented in
-[Webhooks → The txt body](webhooks.md#the-txt-body), beside the JSON body it mirrors field for field.
+method rather than the model. Since v0.6.2 the file holds **exactly the JSON body the webhook
+would post**, so the two outputs of one round can be diffed; the destination is the only thing
+missing, because a body never carried one. See
+[Webhooks → The txt body](webhooks.md#the-txt-body).
 
 ## Where the choice lives
 

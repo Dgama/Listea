@@ -269,7 +269,7 @@ these are the two **methods** a round can leave by:
 | Method | What it does | Asks first |
 |---|---|---|
 | **Webhook** | POSTs a JSON body describing the round to a URL you configure | Yes |
-| **Txt** | Writes one tab-separated text file per round under `Download/Listea/txt/` | No |
+| **Txt** | Writes the same JSON body the webhook would post to one file per round under `Download/Listea/txt/` | No |
 
 **Nothing exports by default, and a new Todo exports nothing.** Three steps turn it on:
 

@@ -185,48 +185,30 @@ files that no List ever registered, and each still arrives named. See
 
 ## The txt body
 
-The txt method renders the same facts, in the same order, as tab-separated lines. One file per
+The txt method writes **the same JSON body a webhook would post, byte for byte**. One file per
 round, named `<yyyyMMdd-HHmmss>-<event>-<origin>.txt` in local time, with a `-2`, `-3` … suffix if
 the name is taken.
 
 ```
-listea-export	2
-event	review.exited
-list	export test
-source	2026-09-11
-at	1767100000000
-tasks	1
-task	0AT9K3QWMB-4H7ZP2-XC5N0V	a.jpg	1	1	1
-template	builtin.media.asset-control	1	Media Asset Control	4
-asset	0AT9K3QWMB-4H7ZP2-XC5N0V	a.jpg	1	cos	0	2
-action	favorite
-action	cust1
+{"version":2,"event":"review.exited","list":{"id":7,"title":"export test","completedAt":null},"tasks":[{"id":"0AT9K3QWMB-4H7ZP2-XC5N0V","title":"a.jpg","isCompleted":true,…}]}
 ```
 
-**The hierarchy is linearised, not flattened.** A `task` record is followed by one `template`
-record per attachment and one `asset` record per file; each `asset` is followed by one `action`
-record per mark. Every record kind has a fixed field count, so a reader splits on tabs and the
-first field tells it how many more to expect:
+(One line in the file; wrapped here for reading.) It is [the payload](#the-payload) above in a
+file, so every field, every `null` and the key order are the same thing, and a receiver parses it
+exactly as it parses a POST.
 
-| Record | Fields | Meaning |
-|---|---|---|
-| `task` | 6 | type, id, title, completed `0\|1`, template count, asset count |
-| `template` | 5 | type, id, name-present `0\|1`, name (empty when absent), version |
-| `asset` | 7 | type, id, title, path-present `0\|1`, path (empty when absent), `sourceMissing` `0\|1`, action count |
-| `action` | 2 | type, wire value |
+**The one thing the file does not carry is the destination.** That is not an omission: there was
+never an address in a body, because where an export went is a fact for
+[the record](#the-record), not for its bytes. This makes the two outputs of one round diffable on
+a workstation, which is the property the feature exists to give.
 
-Actions are records rather than a comma-joined field, so a wire value containing a comma is still
-one value. Counts on the parent records say how many children follow.
+**The file name carries what the body does not.** The v2 body has no `at` field and does not name
+the Todo a split group came from; the name's stamp says when the round happened, and its origin
+says which Todo chose the method — or the List, when the List did.
 
-Fields are escaped the way every other Listea record escapes them — a title is a user's filename
-and may contain a tab or a newline, and a renderer that let one through would produce a file that
-reads as two records. A not-present path is written as `0` followed by an empty field, so the
-column count never changes.
-
-Two things the file has that the JSON does not: a **version line** first, so a payload is never read
-without knowing what wrote it, and an **`at`** line, because a file on disk has to say when it was
-written in a way a receiver's arrival time cannot. `source` names the Todo a split group came from,
-and is empty when the List chose for the whole round.
+Since v0.6.2 this identity is deliberate and temporary: it was asked for so the two outputs could
+be compared while the release was being accepted, and a later release may give the file a shape of
+its own. If it does, `version` inside the file is still what says which shape is being read.
 
 ## Task and asset ids
 

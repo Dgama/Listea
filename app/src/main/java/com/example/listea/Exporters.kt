@@ -8,7 +8,6 @@ import com.example.listea.data.PayloadAssetRow
 import com.example.listea.data.PayloadTaskRow
 import com.example.listea.data.ReviewItem
 import com.example.listea.data.decodeActionIds
-import com.example.listea.data.escapeField
 import com.example.listea.domain.ExportChoice
 import com.example.listea.domain.ExportKind
 import kotlinx.coroutines.CoroutineDispatcher
@@ -32,9 +31,11 @@ import java.util.Locale
  *   described in terms every mechanism can use.
  * - [Exporter] is **how it leaves** — a renderer and a destination, and neither is data.
  *
- * The JSON body the webhook sends is produced from the same payload by the same builder as before
- * this release ([buildWebhookPayload]), which is what makes the text file and the POST two
- * renderings of one thing rather than two implementations of a similar idea.
+ * The JSON body the webhook sends is produced from the same payload by one builder
+ * ([buildWebhookPayload]), and since v0.6.2 the text file is **that same body, byte for byte**:
+ * the only difference between the two outputs is where they go. The payload carries no address,
+ * so the file needs none. This is deliberately temporary — it makes the two outputs diffable while
+ * the user checks a round — and a later release may give the file a shape of its own again.
  *
  * ## Everything here is one round's
  *
@@ -45,7 +46,8 @@ import java.util.Locale
  */
 
 /**
- * The version both renderings carry: the JSON body's `version` and the text body's first line.
+ * The version both renderings carry, as the JSON body's `version` — and, since v0.6.2, the text
+ * file carries the same body, so it is the version line there too.
  *
  * v0.6.0's hierarchy is 2; the flat, unversioned v0.1 body is 1. The cut is hard by design — a body
  * that said *2* while meaning the old shape would be the one mistake a receiver cannot recover
@@ -559,6 +561,9 @@ private const val MAX_EXPORT_NAME_ATTEMPTS = 50
  *
  * Deliberately the least ambitious export there could be: no configuration, no network, and one
  * failure mode — the file did not get written — reported rather than thrown.
+ *
+ * The body is [buildWebhookPayload] — the POST's own bytes, minus nothing, because an address is
+ * not part of a body. See the file header for why that is temporary.
  */
 class TxtExporter(
     private val context: Context,
@@ -569,7 +574,7 @@ class TxtExporter(
     override val asksBeforeDelivering = false
     override val deliveredOutcome = NoticeOutcome.WRITTEN
 
-    override fun render(payload: ExportPayload): String = renderExportText(payload)
+    override fun render(payload: ExportPayload): String = buildWebhookPayload(payload)
 
     override suspend fun deliver(payload: ExportPayload, body: String): ExportAttempt {
         val stem = exportNameStem(payload)
@@ -581,62 +586,6 @@ class TxtExporter(
             return ExportAttempt.Failed(problem)
         }
         return ExportAttempt.Failed("every name up to $MAX_EXPORT_NAME_ATTEMPTS was taken")
-    }
-}
-
-/**
- * The text body. The same facts as [buildWebhookPayload], in the same order, separated by tabs.
- *
- * Version line first, in the shape [com.example.listea.data.encodeDissolvedRecords] and the template
- * encoders already use: a payload is never read without knowing what wrote it.
- *
- * **The hierarchy is linearised, not flattened.** A `task` record is followed by one `template`
- * record per attachment and one `asset` record per file, and each asset by one `action` record per
- * mark. Every record kind has a fixed field count, so a reader splits on tabs and the first field
- * tells it how many more to expect. Counts on the parent records say how many children follow.
- *
- * **Fields are escaped with the rule `DissolvedRecords` uses**, for the same reason — a title is a
- * user's filename and may contain a tab or a newline, and a renderer that lets one through produces
- * a file that reads as two records. One escaper lifted to `internal`, rather than a second rule for
- * one problem. Actions are records rather than a joined field, so a wire value containing a comma is
- * still one value.
- */
-fun renderExportText(payload: ExportPayload): String = buildString {
-    append("listea-export\t").append(EXPORT_VERSION).append('\n')
-    append("event\t").append(payload.event).append('\n')
-    append("list\t").append(escapeField(payload.listTitle)).append('\n')
-    append("source\t").append(escapeField(payload.sourceField)).append('\n')
-    append("at\t").append(payload.at).append('\n')
-    append("tasks\t").append(payload.tasks.size).append('\n')
-    payload.tasks.forEach { task ->
-        append("task")
-        append('\t').append(escapeField(task.publicId))
-        append('\t').append(escapeField(task.title))
-        append('\t').append(if (task.isCompleted) "1" else "0")
-        append('\t').append(task.templates.size)
-        append('\t').append(task.assets.size)
-        append('\n')
-        task.templates.forEach { template ->
-            append("template")
-            append('\t').append(escapeField(template.id))
-            append('\t').append(if (template.name != null) "1" else "0")
-            append('\t').append(escapeField(template.name.orEmpty()))
-            append('\t').append(template.version)
-            append('\n')
-        }
-        task.assets.forEach { asset ->
-            append("asset")
-            append('\t').append(escapeField(asset.publicId))
-            append('\t').append(escapeField(asset.title))
-            append('\t').append(if (asset.relativePath != null) "1" else "0")
-            append('\t').append(escapeField(asset.relativePath.orEmpty()))
-            append('\t').append(if (asset.sourceMissing) "1" else "0")
-            append('\t').append(asset.actions.size)
-            append('\n')
-            asset.actions.forEach { action ->
-                append("action\t").append(escapeField(action)).append('\n')
-            }
-        }
     }
 }
 
