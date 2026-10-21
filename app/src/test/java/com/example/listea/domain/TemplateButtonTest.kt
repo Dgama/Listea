@@ -21,6 +21,7 @@ class TemplateButtonTest {
 
     private val c1 = TemplateButton("custom1", "C1", ButtonType.TAG, "cust1")
     private val star = TemplateButton("favorite", "★", ButtonType.BOOLEAN, "favorite")
+    private val note = TemplateButton("note1", "Comment", ButtonType.COMMENT, "")
 
     private fun decode(text: String) = decodeTemplateButtons(text, TEMPLATE_BUTTONS_VERSION)
 
@@ -50,8 +51,86 @@ class TemplateButtonTest {
     }
 
     @Test
+    fun `a comment is written in version 2 and reads back`() {
+        val text = encodeTemplateButtons(listOf(c1, note))
+        assertEquals("custom1\tC1\ttag\tcust1\nnote1\tComment\tcomment\t", text)
+        assertEquals(
+            listOf(c1, note),
+            decodeTemplateButtons(text, TEMPLATE_BUTTONS_COMMENT_VERSION)
+        )
+        assertEquals(
+            TEMPLATE_BUTTONS_COMMENT_VERSION,
+            buttonsVersionFor(listOf(c1, note))
+        )
+    }
+
+    @Test
+    fun `a comment-free bar keeps version 1`() {
+        // It must stay readable by a build that has never heard of version 2, so the writer does
+        // not move the whole format forward just because it can.
+        assertEquals(TEMPLATE_BUTTONS_VERSION, buttonsVersionFor(listOf(c1, star)))
+        assertEquals(TEMPLATE_BUTTONS_VERSION, buttonsVersionFor(emptyList()))
+    }
+
+    @Test
+    fun `a comment line inside version 1 is dropped`() {
+        // Version 1 could not have written one; a row that holds one was hand-edited or corrupted.
+        // Offering free text from a payload that never promised it is the guess the version gate
+        // exists to refuse, so the line goes and its neighbours stay.
+        assertEquals(
+            listOf(c1, star),
+            decode("custom1\tC1\ttag\tcust1\nnote1\tComment\tcomment\t\nfavorite\t★\tboolean\tfavorite")
+        )
+    }
+
+    @Test
+    fun `a draft that became a comment is read back at version 2`() {
+        // The editor's whole sequence: a version-1 row is opened, one of its buttons is changed to
+        // Comment, and the draft is re-encoded. Reading that draft back at the stored version drops
+        // the comment line — it is version-2 vocabulary — so the button vanishes from the page and
+        // the next Update writes the template without it. The draft's version, not the row's, is
+        // what has to read it.
+        val stored = encodeTemplateButtons(listOf(c1, star))
+        val draft = encodeTemplateButtons(listOf(c1, note))
+
+        assertEquals(
+            "the stored row's version cannot read the row the edit added",
+            listOf(c1),
+            decodeTemplateButtons(draft, TEMPLATE_BUTTONS_VERSION)
+        )
+        assertEquals(
+            TEMPLATE_BUTTONS_COMMENT_VERSION,
+            templateDraftVersion(stored, TEMPLATE_BUTTONS_VERSION, draft)
+        )
+        assertEquals(
+            listOf(c1, note),
+            decodeTemplateButtons(
+                draft,
+                templateDraftVersion(stored, TEMPLATE_BUTTONS_VERSION, draft)
+            )
+        )
+    }
+
+    @Test
+    fun `an untouched draft stays readable at its stored version`() {
+        // The other half of the rule: a version-1 row holding a corrupt comment line is not given
+        // version-2 meaning merely because the page could now write one. It is still the stored
+        // row, and the line stays dropped until the user actually edits.
+        val stored = "custom1\tC1\ttag\tcust1\nnote1\tComment\tcomment\t"
+
+        assertEquals(
+            TEMPLATE_BUTTONS_VERSION,
+            templateDraftVersion(stored, TEMPLATE_BUTTONS_VERSION, stored)
+        )
+        assertEquals(
+            TEMPLATE_BUTTONS_COMMENT_VERSION,
+            templateDraftVersion(stored, TEMPLATE_BUTTONS_VERSION, "$stored\nfavorite\t★\tboolean\tfavorite")
+        )
+    }
+
+    @Test
     fun `a version this build does not know is refused, not guessed at`() {
-        assertNull(decodeTemplateButtons("custom1\tC1\ttag\tcust1", TEMPLATE_BUTTONS_VERSION + 1))
+        assertNull(decodeTemplateButtons("custom1\tC1\ttag\tcust1", TEMPLATE_BUTTONS_COMMENT_VERSION + 1))
     }
 
     @Test
@@ -76,6 +155,6 @@ class TemplateButtonTest {
         // A template that offers nothing is a fact the payload recorded, and it must not be
         // conflated with a payload this build could not read.
         assertEquals(emptyList<TemplateButton>(), decode(""))
-        assertNull(decodeTemplateButtons("", TEMPLATE_BUTTONS_VERSION + 1))
+        assertNull(decodeTemplateButtons("", TEMPLATE_BUTTONS_COMMENT_VERSION + 1))
     }
 }

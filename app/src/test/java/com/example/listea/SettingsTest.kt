@@ -124,6 +124,25 @@ class SettingsTest {
     }
 
     @Test
+    fun `a comment is a passage tool, not a file-level action`() {
+        // A Comment button is offered by the PDF selection menu; a chip row, a Task badge or an
+        // exported `actions` array has no form for it, so [ResolvedAssetControl.actions] omits it
+        // while [ResolvedAssetControl.buttons] keeps it for the viewer.
+        val note = TemplateButton("note", "Comment", ButtonType.COMMENT, "")
+        val control = ResolvedAssetControl(
+            listOf(
+                TemplateButton("star", "★", ButtonType.BOOLEAN, "favorite"),
+                note,
+                TemplateButton("tag", "C", ButtonType.TAG, "cust1")
+            )
+        )
+
+        assertEquals(listOf(ItemAction("star"), ItemAction("tag")), control.actions)
+        assertTrue(note in control.buttons)
+        assertNull(itemActionLabel(item("note"), control))
+    }
+
+    @Test
     fun `an action the user deleted is neither offered nor labelled`() {
         // The id stays on the item; the control is what forgot it, so nothing here resolves it.
         // It answers with the id rather than with null, which is what keeps a button deleted from a

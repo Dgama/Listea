@@ -76,6 +76,26 @@ class TemplateScopeTest {
     }
 
     @Test
+    fun `a PDF is a kind a scope may name, and one written before PDF existed does not admit it`() {
+        // PDF becomes a governable kind in v0.7.0, so it reads and writes like the other two.
+        assertEquals(
+            "kind:image,video,pdf",
+            encodeTemplateScope(
+                TemplateScope.ofKinds(setOf(AssetKind.PDF, AssetKind.IMAGE, AssetKind.VIDEO))
+            )
+        )
+        val scope = decodeTemplateScope("kind:image,pdf")
+        assertTrue(scope.admits(AssetKind.PDF))
+        assertFalse(scope.admits(AssetKind.VIDEO))
+
+        // The line that matters for every template already on a device: the built-in media control
+        // was written as `kind:image,video` when PDF was not a kind at all. A PDF added to the
+        // library must draw no chips from it — the scope says what it was written to say, and a new
+        // member of the vocabulary does not quietly join an old set.
+        assertFalse(decodeTemplateScope("kind:image,video").admits(AssetKind.PDF))
+    }
+
+    @Test
     fun `an empty scope admits nothing`() {
         // The quietest authoring mistake there is: a template saved before its scope was filled in.
         // Matching everything would make that mistake govern an entire library.

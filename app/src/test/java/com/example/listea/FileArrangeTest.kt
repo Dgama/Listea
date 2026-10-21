@@ -61,6 +61,7 @@ class FileArrangeTest {
         assertEquals(MediaKind.PICTURE, mediaKindOf("Holiday.JPG"))
         assertEquals(MediaKind.VIDEO, mediaKindOf("clip.mp4"))
         assertEquals(MediaKind.TEXT, mediaKindOf("notes.TXT"))
+        assertEquals(MediaKind.PDF, mediaKindOf("paper.PDF"))
     }
 
     @Test
@@ -75,6 +76,7 @@ class FileArrangeTest {
                 MediaKind.PICTURE -> AssetKind.IMAGE
                 MediaKind.VIDEO -> AssetKind.VIDEO
                 MediaKind.TEXT -> AssetKind.OTHER
+                MediaKind.PDF -> AssetKind.PDF
             }
             media.extensions.forEach { extension ->
                 assertEquals(
@@ -104,7 +106,7 @@ class FileArrangeTest {
         assertEquals(MediaKind.TEXT, mediaKindOf("notes.txt"))
         assertEquals(AssetKind.OTHER, assetKindOf("notes.txt"))
         assertFalse(assetViewerAvailable("notes.txt"))
-        assertFalse(assetViewerAvailable("report.pdf"))
+        assertTrue(assetViewerAvailable("report.pdf"))
         assertFalse(assetViewerAvailable("README"))
     }
 
@@ -126,7 +128,11 @@ class FileArrangeTest {
             listOf(AssetKind.IMAGE, AssetKind.VIDEO),
             assetKindsPresent(listOf("clip.mp4", "a.jpg"))
         )
-        assertEquals(emptyList<AssetKind>(), assetKindsPresent(listOf("report.pdf", "README")))
+        // A PDF is a kind since v0.7.0, so a folder of PDFs opens the PDF section and nothing else.
+        assertEquals(
+            listOf(AssetKind.PDF),
+            assetKindsPresent(listOf("report.pdf", "README"))
+        )
         assertEquals(emptyList<AssetKind>(), assetKindsPresent(emptyList()))
     }
 

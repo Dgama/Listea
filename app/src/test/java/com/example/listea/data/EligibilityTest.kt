@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -79,24 +80,24 @@ class EligibilityTest {
             assertEquals(0, rawInt("SELECT COUNT(*) FROM review_events"))
         }
 
-    // §6.4, §9.3, AR-3
+    // §6.4, §9.3, AR-3 — and the v0.7.0 change that gives a PDF a viewer
     @Test
-    fun `a PDF Task imports, appears in the catalog as awaiting a viewer, and cannot be reviewed`() =
-        runTest {
-            val source = registerSource(ROOT, "", ImporterKind.FOLDER_AS_TASK)
-            dao.runImport(source.id, "", folderPlan("", listOf("alice/cv.pdf"), listOf("alice")), 2000)
+    fun `a PDF Task is viewable and reviewable now that the app can show a PDF`() = runTest {
+        // Before v0.7.0 this Task was imported and catalogued but refused a judgment, because no
+        // viewer in the build could render its one Asset. The rule has not moved — a Task whose
+        // content cannot be shown is still refused — but a PDF can be shown now, so this is the
+        // ordinary case rather than the exception it used to pin.
+        val source = registerSource(ROOT, "", ImporterKind.FOLDER_AS_TASK)
+        dao.runImport(source.id, "", folderPlan("", listOf("alice/cv.pdf"), listOf("alice")), 2000)
 
-            val row = dao.getCatalogTasks(source.id).single()
-            assertTrue(row.hasUnviewableAsset)
-            assertEquals("alice", row.groupPath)
+        val row = dao.getCatalogTasks(source.id).single()
+        assertFalse(row.hasUnviewableAsset)
+        assertEquals("alice", row.groupPath)
 
-            assertEquals(
-                emptyList<Long>(),
-                dao.submitReview(row.taskId, media(true), Templates.MediaRapidReview.ref, ReviewContext.InFolder(ROOT, ""), 2000)
-            )
-            assertEquals(0, rawInt("SELECT isCompleted FROM task_state WHERE taskId = '${row.taskId}'"))
-            assertEquals(0, rawInt("SELECT COUNT(*) FROM review_events"))
-        }
+        dao.submitReview(row.taskId, media(true), Templates.MediaRapidReview.ref, ReviewContext.InFolder(ROOT, ""), 2000)
+        assertEquals(1, rawInt("SELECT isCompleted FROM task_state WHERE taskId = '${row.taskId}'"))
+        assertEquals(1, rawInt("SELECT COUNT(*) FROM review_events"))
+    }
 
     // §6.4, AR-3
     @Test
@@ -144,20 +145,21 @@ class EligibilityTest {
             assertEquals(1, dao.getItems(listId).size)
         }
 
-    // Definition of Done, v0.3 readiness
+    // Definition of Done, v0.3 readiness — and v0.7.0's promise that a PDF is not a second class
     @Test
-    fun `a PDF Task and an image Task are identical except that the PDF cannot be reviewed`() = runTest {
+    fun `a PDF Task and an image Task are identical in every respect`() = runTest {
         val source = registerSource(ROOT, "", ImporterKind.FOLDER_AS_TASK)
         dao.runImport(source.id, "", folderPlan("", listOf("img/cv.jpg", "pdf/cv.pdf"), listOf("img", "pdf")), 2000)
         val rows = dao.getCatalogTasks(source.id).associateBy { it.displayName }
         val image = rows.getValue("img")
         val pdf = rows.getValue("pdf")
 
-        // Both are imported, catalogued and measured alike; only the viewability flag differs.
+        // Both are imported, catalogued and measured alike — including the viewability flag, which
+        // is the line v0.7.0 moved.
         assertEquals(1, image.assetCount)
         assertEquals(1, pdf.assetCount)
         assertEquals(false, image.hasUnviewableAsset)
-        assertEquals(true, pdf.hasUnviewableAsset)
+        assertEquals(false, pdf.hasUnviewableAsset)
 
         // Both are members of the same List — eligibility does not gate membership.
         val listId = dao.createListFromTasks("Trip", listOf(image.taskId, pdf.taskId), false,3000)
@@ -165,15 +167,12 @@ class EligibilityTest {
         assertEquals(1, rawInt("SELECT COUNT(*) FROM task_state WHERE taskId = '${image.taskId}'"))
         assertEquals(1, rawInt("SELECT COUNT(*) FROM task_state WHERE taskId = '${pdf.taskId}'"))
 
-        // The image Task submits and records a judgment; the PDF Task writes nothing.
+        // Both submit and record a judgment.
         dao.submitReview(image.taskId, media(true), Templates.MediaRapidReview.ref, ReviewContext.InFolder(ROOT, ""), 4000)
-        assertEquals(
-            emptyList<Long>(),
-            dao.submitReview(pdf.taskId, media(true), Templates.MediaRapidReview.ref, ReviewContext.InFolder(ROOT, ""), 4000)
-        )
-        assertEquals(1, rawInt("SELECT COUNT(*) FROM review_events"))
+        dao.submitReview(pdf.taskId, media(true), Templates.MediaRapidReview.ref, ReviewContext.InFolder(ROOT, ""), 4000)
+        assertEquals(2, rawInt("SELECT COUNT(*) FROM review_events"))
         assertEquals(1, rawInt("SELECT isCompleted FROM task_state WHERE taskId = '${image.taskId}'"))
-        assertEquals(0, rawInt("SELECT isCompleted FROM task_state WHERE taskId = '${pdf.taskId}'"))
+        assertEquals(1, rawInt("SELECT isCompleted FROM task_state WHERE taskId = '${pdf.taskId}'"))
     }
 
     // --- helpers ---------------------------------------------------------------------------------

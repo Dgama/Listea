@@ -53,7 +53,7 @@ class CatalogTest {
         assertTrue(assetViewerAvailable("a.jpg"))
         assertTrue(assetViewerAvailable("b.mp4"))
         assertTrue(assetViewerAvailable("c.PNG"))
-        assertFalse(assetViewerAvailable("c.pdf"))
+        assertTrue(assetViewerAvailable("c.pdf"))
         assertFalse(assetViewerAvailable("d.txt"))
         assertFalse(assetViewerAvailable("noextension"))
     }
@@ -72,12 +72,12 @@ class CatalogTest {
     @Test
     fun `the asset-control kind and the viewer agree on every extension this app knows`() {
         val extensions = MediaKind.entries.flatMap { kind -> kind.extensions } +
-            listOf("pdf", "txt", "noextension", "")
+            listOf("txt", "noextension", "")
 
         extensions.forEach { extension ->
             val name = if (extension.isEmpty()) "noextension" else "file.$extension"
             val governed = when (assetKindOf(name)) {
-                AssetKind.IMAGE, AssetKind.VIDEO -> true
+                AssetKind.IMAGE, AssetKind.VIDEO, AssetKind.PDF -> true
                 AssetKind.OTHER -> false
             }
 
@@ -98,7 +98,8 @@ class CatalogTest {
         assertEquals(AssetKind.IMAGE, assetKindOf("a.JPEG"))
         assertEquals(AssetKind.VIDEO, assetKindOf("a.mp4"))
         assertEquals(AssetKind.OTHER, assetKindOf("a.txt"))
-        assertEquals(AssetKind.OTHER, assetKindOf("a.pdf"))
+        assertEquals(AssetKind.PDF, assetKindOf("a.pdf"))
+        assertEquals(AssetKind.PDF, assetKindOf("a.PDF"))
         assertEquals(AssetKind.OTHER, assetKindOf("noextension"))
     }
 
@@ -120,9 +121,10 @@ class CatalogTest {
         )
         assertEquals(
             ReviewBlock.NO_VIEWER,
-            reviewBlockFor(listOf(reviewAsset("a.pdf", missing = false)))
+            reviewBlockFor(listOf(reviewAsset("a.txt", missing = false)))
         )
         assertEquals(null, reviewBlockFor(listOf(reviewAsset("a.jpg", missing = false))))
+        assertEquals(null, reviewBlockFor(listOf(reviewAsset("a.pdf", missing = false))))
         assertEquals(null, reviewBlockFor(emptyList()))
     }
 

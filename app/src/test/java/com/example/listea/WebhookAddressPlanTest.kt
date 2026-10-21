@@ -12,7 +12,9 @@ import org.junit.Test
  * Where each payload of a round goes.
  *
  * v0.6.2 moved the destination off Settings and onto the thing that owns the work: a Todo holds the
- * address it posts to, a List may override it, and items no Todo owns fall back to the live default.
+ * address it posts to, and items no Todo owns fall back to the live default. v0.7.0 narrowed the
+ * List's override to a List that chose webhook itself — under *same as the Todos* the List page
+ * hides the field, and the planner must agree with the page.
  * The planner is the one place that arithmetic happens, so it is pinned here without a database —
  * the same reason [ExportDispatchTest] exists beside it for the mechanism.
  *
@@ -96,7 +98,12 @@ class WebhookAddressPlanTest {
     }
 
     @Test
-    fun `a List address overrides every webhook group of an inheriting round`() {
+    fun `an inheriting round ignores the List address, because the page does not show it`() {
+        // v0.7.0 narrowed the override to a List that chose WEBHOOK itself. The List page hides the
+        // field under *same as the Todos*, and a setting the page does not show must not redirect
+        // a round: inheritance means each Todo keeps its own snapshot. A stored address from an
+        // earlier choice stays in the column and starts applying again the moment the List chooses
+        // webhook — see the chosen-webhook case below.
         val groups = plan(
             listOf(item("t1"), item("t2"), item("t3")),
             ExportChoice.Inherit,
@@ -110,11 +117,11 @@ class WebhookAddressPlanTest {
         )
 
         assertEquals(
-            listOf("https://list.example/hook", "", "https://list.example/hook"),
+            listOf("https://one.example/hook", "", "https://three.example/hook"),
             groups.map { it.webhookUrl }
         )
-        // Still one payload per Todo: the address moves; the mechanism does not. The text Todo is
-        // untouched and carries no address of its own.
+        // Still one payload per Todo: inheriting moves neither the mechanism nor the address. The
+        // text Todo is untouched and carries no address of its own.
         assertEquals(listOf(ExportKind.WEBHOOK, ExportKind.TXT, ExportKind.WEBHOOK), groups.map { it.kind })
     }
 

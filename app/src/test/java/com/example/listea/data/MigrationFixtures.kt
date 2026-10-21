@@ -25,7 +25,7 @@ package com.example.listea.data
  */
 
 /**
- * The tables only a step *newer* than the fixtures' own creates.
+ * The objects only a step *newer* than the fixtures' own creates.
  *
  * A fixture is opened at the version the app ships, so any test that names the tables it expects
  * sees every later release's there too. Several of them assert the table list in full — "this step
@@ -33,8 +33,17 @@ package com.example.listea.data
  * than replacing with a count, because a rebuilt copy under a different name is precisely what it
  * is there to catch. Subtracting these keeps each one about the step it was written for, and keeps
  * the list that has to be maintained as the chain grows in a single place.
+ *
+ * Indexes are named here too: the comparison is over `sqlite_master`, so an index a later step
+ * creates is as much a new object as the table it sits on.
  */
-internal val TablesFromLaterSteps = listOf("templates", "template_versions", "schema_backfills")
+internal val TablesFromLaterSteps = listOf(
+    "templates",
+    "template_versions",
+    "schema_backfills",
+    "task_asset_marks",
+    "index_task_asset_marks_assetId"
+)
 
 /**
  * The columns a step *newer* than the fixtures' own appends to tables that already existed.
@@ -336,6 +345,10 @@ internal fun ListeaDatabase.subtractV26Additions() {
  * it into the empty override.
  */
 internal fun ListeaDatabase.subtractV27Additions() {
+    // The step above this one, first: a fixture has to come back to v26, and a database left at
+    // v28 would still hold the marks table that step created.
+    subtractV28Additions()
+
     exec("DROP TABLE IF EXISTS schema_backfills")
 
     exec("PRAGMA foreign_keys = OFF")
@@ -384,4 +397,16 @@ internal fun ListeaDatabase.subtractV27Additions() {
 
     exec("PRAGMA legacy_alter_table = OFF")
     exec("PRAGMA foreign_keys = ON")
+}
+
+/**
+ * Takes the one table `MIGRATION_27_28` creates back off, leaving a database in v27's shape.
+ *
+ * The step only adds a table, so there is no rebuild and no pragma to juggle: a `DROP` is exactly
+ * what undoes a `CREATE`, and the table has no predecessor to restore. A fixture that held marks
+ * would fail its own "really a v27" assertion, which is what keeps the subtraction honest as the
+ * chain grows rather than a line nobody reads.
+ */
+internal fun ListeaDatabase.subtractV28Additions() {
+    exec("DROP TABLE IF EXISTS task_asset_marks")
 }

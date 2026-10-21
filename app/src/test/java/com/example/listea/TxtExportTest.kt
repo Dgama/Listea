@@ -2,6 +2,7 @@ package com.example.listea
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.example.listea.domain.MarkKind
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -47,8 +48,9 @@ class TxtExportTest {
         title: String = "IMG_0001.jpg",
         path: String? = "Camera/2024",
         sourceMissing: Boolean = false,
-        actions: List<String> = listOf("favorite")
-    ) = ExportAssetView(id, title, path, sourceMissing, actions)
+        actions: List<String> = listOf("favorite"),
+        marks: List<ExportMarkView> = emptyList()
+    ) = ExportAssetView(id, title, path, sourceMissing, actions, marks)
 
     private fun task(
         id: String = "task-1",
@@ -121,6 +123,39 @@ class TxtExportTest {
         assertEquals(EXPORT_VERSION, body.getInt("version"))
         assertEquals(listOf("version", "event", "list", "tasks"), body.keys().asSequence().toList())
         assertFalse(body.toString().contains("http"))
+    }
+
+    @Test
+    fun `a marked round is version 3 in the file too, and still the exact POST`() {
+        // The file is the POST's bytes, so a passage reaches a file export the same way it reaches a
+        // receiver — same array, same order, same version claim. This is the one round where the two
+        // renderings would be easiest to let drift, because a file export has no receiver to notice.
+        val round = payload(
+            tasks = listOf(
+                task(
+                    assets = listOf(
+                        asset(
+                            id = "pdf-1",
+                            title = "paper.pdf",
+                            path = "Papers",
+                            actions = emptyList(),
+                            marks = listOf(
+                                ExportMarkView("m-1", MarkKind.COMMENT, "comment-1", 2, "the passage", "I think so"),
+                                ExportMarkView("m-2", MarkKind.TAG, "tag-1", 4, "another passage", "funny_sentence")
+                            )
+                        )
+                    )
+                )
+            )
+        )
+
+        val body = JSONObject(exporter.render(round))
+
+        assertEquals(buildWebhookPayload(round), exporter.render(round))
+        assertEquals(EXPORT_VERSION_MARKS, body.getInt("version"))
+        val marks = body.getJSONArray("tasks").getJSONObject(0)
+            .getJSONArray("assets").getJSONObject(0).getJSONArray("marks")
+        assertEquals(listOf("m-1", "m-2"), (0 until marks.length()).map { marks.getJSONObject(it).getString("id") })
     }
 
     @Test

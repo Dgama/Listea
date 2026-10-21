@@ -6,6 +6,7 @@ import com.example.listea.data.TemplateEntity
 import com.example.listea.data.TemplateVersionEntity
 import com.example.listea.domain.AssetKind
 import com.example.listea.domain.ButtonType
+import com.example.listea.domain.TEMPLATE_BUTTONS_COMMENT_VERSION
 import com.example.listea.domain.TEMPLATE_BUTTONS_VERSION
 import com.example.listea.domain.TemplateButton
 import com.example.listea.domain.TemplateId
@@ -290,6 +291,32 @@ class TemplateAttachmentTest {
     }
 
     @Test
+    fun `the template that governs a file is the one whose chips it got`() {
+        // The same first-match walk `controlFor` makes, answered as a version rather than a button
+        // list. Two callers need the version itself — a new PDF mark is authored under it, and a
+        // stored mark must still find its tool in it — and they must agree with the chips on screen
+        // about which template that is, or a mark would be written under one template and shown
+        // against another.
+        val resolver = resolver(
+            lineage("photos", "Photos") to listOf(
+                version("photos", scope = TemplateScope.ofKinds(setOf(AssetKind.IMAGE)), buttons = TAGS_A)
+            ),
+            lineage("papers", "Papers") to listOf(
+                version("papers", scope = TemplateScope.ofKinds(setOf(AssetKind.PDF)), buttons = TAGS_B)
+            )
+        )
+        val attached = "photos\t1\npapers\t1"
+
+        assertEquals(TemplateVersionRef(TemplateId("papers"), 1), resolver.governingFor(attached, AssetKind.PDF)?.ref)
+        assertEquals(
+            resolver.controlFor(attached, AssetKind.PDF)?.buttons,
+            resolver.governingFor(attached, AssetKind.PDF)?.buttons
+        )
+        // A PDF in a Todo whose only template governs images is a PDF no template governs.
+        assertNull(resolver.governingFor("photos\t1", AssetKind.PDF))
+    }
+
+    @Test
     fun `a kind nothing admits offers nothing, and the file keeps its empty bar`() {
         // The acceptance case, as a unit test: a Todo whose only template is scoped to images shows
         // a video no chips at all. Null and not an empty control, because the two are different
@@ -321,7 +348,7 @@ class TemplateAttachmentTest {
         val resolver = resolver(
             lineage("a", "A") to listOf(
                 version("a", version = 1, buttons = TAGS_A),
-                version("a", version = 2, buttons = TAGS_A, buttonsVersion = TEMPLATE_BUTTONS_VERSION + 1)
+                version("a", version = 2, buttons = TAGS_A, buttonsVersion = TEMPLATE_BUTTONS_COMMENT_VERSION + 1)
             )
         )
 
@@ -395,7 +422,7 @@ class TemplateAttachmentTest {
             // Every version unreadable, so the lineage cannot be attached at all — which is how a
             // template whose bar would draw empty stays out of the picker.
             lineage("b", "Beta") to listOf(
-                version("b", version = 1, buttons = TAGS_A, buttonsVersion = TEMPLATE_BUTTONS_VERSION + 1)
+                version("b", version = 1, buttons = TAGS_A, buttonsVersion = TEMPLATE_BUTTONS_COMMENT_VERSION + 1)
             ),
             lineage("c", "Charlie") to listOf(version("c", version = 1, buttons = TAGS_A))
         )
@@ -412,7 +439,7 @@ class TemplateAttachmentTest {
         val resolver = resolver(
             lineage("a", "Alpha") to listOf(
                 version("a", version = 1, buttons = TAGS_A),
-                version("a", version = 2, buttons = TAGS_A, buttonsVersion = TEMPLATE_BUTTONS_VERSION + 1)
+                version("a", version = 2, buttons = TAGS_A, buttonsVersion = TEMPLATE_BUTTONS_COMMENT_VERSION + 1)
             )
         )
 

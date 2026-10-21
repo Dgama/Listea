@@ -7,6 +7,7 @@ import com.example.listea.TemplateResolver
 import com.example.listea.encodeTemplateAttachments
 import com.example.listea.domain.AssetKind
 import com.example.listea.domain.ButtonType
+import com.example.listea.domain.TEMPLATE_BUTTONS_COMMENT_VERSION
 import com.example.listea.domain.TEMPLATE_BUTTONS_VERSION
 import com.example.listea.domain.TemplateButton
 import com.example.listea.domain.TemplateId
@@ -133,6 +134,23 @@ class TemplateStoreTest {
         assertTrue(versions().all { it.buttonsVersion == TEMPLATE_BUTTONS_VERSION })
     }
 
+    @Test
+    fun `a comment moves the payload to version 2, and taking it away moves it back`() = runTest {
+        seed()
+        val note = TemplateButton("note1", "Comment", ButtonType.COMMENT, "")
+
+        store.update(seedId, name(), scope(), buttons() + note)
+
+        // The version is read off the bar rather than raised for every write: a build that has never
+        // heard of a comment can still read a bar without one, and moving the whole format forward
+        // on any edit would strand those builds for no reason.
+        assertEquals(TEMPLATE_BUTTONS_COMMENT_VERSION, versions().last().buttonsVersion)
+        assertEquals(note, decodeButtons(versions().last()).last())
+
+        store.update(seedId, name(), scope(), buttons())
+        assertEquals(TEMPLATE_BUTTONS_VERSION, versions().last().buttonsVersion)
+    }
+
     // --- a rename is not a version ------------------------------------------------------------------
 
     @Test
@@ -176,7 +194,7 @@ class TemplateStoreTest {
 
     @Test
     fun `a version written by a newer build is not written over, name and all`() = runTest {
-        seed(buttonsVersion = TEMPLATE_BUTTONS_VERSION + 1)
+        seed(buttonsVersion = TEMPLATE_BUTTONS_COMMENT_VERSION + 1)
         val before = versions()
 
         store.update(seedId, "Renamed", scope(), listOf(button("custom1", "One", "one")))

@@ -244,7 +244,7 @@ class MigrationV26ToV27Test {
 
     private fun migrate(): ListeaDatabase {
         val database = Room.databaseBuilder(context, ListeaDatabase::class.java, V26_DB)
-            .addMigrations(ListeaDatabase.MIGRATION_26_27)
+            .addMigrations(ListeaDatabase.MIGRATION_26_27, ListeaDatabase.MIGRATION_27_28)
             .allowMainThreadQueries()
             .build()
         database.openHelper.writableDatabase
@@ -309,6 +309,6 @@ class MigrationV26ToV27Test {
     private companion object {
         const val V26_DB = "v26-fixture.db"
         const val V26 = 26
-        const val CURRENT = 27
+        const val CURRENT = 28
     }
 }
