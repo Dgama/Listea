@@ -2730,11 +2730,17 @@ class ListsViewModel @JvmOverloads constructor(
      * The one export that does not ask first, along with a resend: pressing a button labelled
      * *Send a test payload* is the confirmation. It still shows the progress dialog, because a
      * receiver can be slow and the seconds in between otherwise look like nothing happening.
+     *
+     * **[address] is the value the caller is looking at**, when it has one. The default-URL field
+     * commits on Done, on losing focus or on leaving the page — and a tap does not take focus from
+     * a text field on touch, so a URL typed and then tested was still a draft, and the test posted
+     * to the address that had been stored before it. The button exists to answer *can this address
+     * receive?*, so it sends to the field as it stands. The value is used for this one attempt and
+     * recorded on it; storing it remains the field's commit, not this.
      */
-    fun testWebhook() = launchDb {
+    fun testWebhook(address: String? = null) = launchDb {
         ensureWebhookAddressBackfill()
-        val current = settingsStore.read()
-        val url = current.defaultWebhookUrl.trim()
+        val url = (address ?: settingsStore.read().defaultWebhookUrl).trim()
         val at = now()
         val roundId = UUID.randomUUID().toString()
 

@@ -24,6 +24,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -243,6 +246,13 @@ private fun WebhookExportScreen(
     onBack: () -> Unit
 ) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    // What the field currently holds, committed or not. Kept here so the Test button can send to
+    // the address the user is looking at: the field commits on Done or on leaving, and a tap does
+    // not leave it, so the stored value is still the old one at the moment the button is pressed.
+    // Seeded from (and reset by) the stored value, so an external change still lands.
+    var draftUrl by rememberSaveable(settings.defaultWebhookUrl) {
+        mutableStateOf(settings.defaultWebhookUrl)
+    }
 
     ListeaNestedScaffold(
         title = "Webhook",
@@ -271,7 +281,8 @@ private fun WebhookExportScreen(
                     label = "Default URL",
                     value = settings.defaultWebhookUrl,
                     onCommit = { viewModel.setDefaultWebhookUrl(it) },
-                    allowEmpty = true
+                    allowEmpty = true,
+                    onDraft = { draftUrl = it }
                 )
                 HelperText(
                     "The value a Todo copies when it is created on Use default. A Todo keeps " +
@@ -284,7 +295,10 @@ private fun WebhookExportScreen(
 
             SectionCard(title = "Test") {
                 Button(
-                    onClick = { viewModel.testWebhook() },
+                    // The field's own text, not the stored default: a URL typed a moment ago is
+                    // not committed until the field is left, and this button is pressed precisely
+                    // to find out whether *that* address receives.
+                    onClick = { viewModel.testWebhook(draftUrl) },
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("Send a test payload", maxLines = 1)

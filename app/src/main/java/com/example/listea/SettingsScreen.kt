@@ -1358,6 +1358,12 @@ internal fun SwitchRow(
  * `internal` since v0.5.4: a template's page edits buttons with the same two fields, and a button's
  * display name is a display name. [commitAsYouType] is for the one caller whose [value] is a draft
  * rather than a stored row — see [CustomActionFields].
+ *
+ * [onDraft] reports the text on every keystroke **without committing it**, for the one caller that
+ * has to act on what is in the field before the field is left. The webhook page's Test button is
+ * that caller: a tap does not take focus from a text field on touch, so a URL typed and then tested
+ * was still a draft when the button read the stored value — and the test posted to the address that
+ * was there before it. Listening does not change when the value is stored.
  */
 @Composable
 internal fun SettingsTextField(
@@ -1366,7 +1372,8 @@ internal fun SettingsTextField(
     onCommit: (String) -> Unit,
     modifier: Modifier = Modifier,
     allowEmpty: Boolean = false,
-    commitAsYouType: Boolean = false
+    commitAsYouType: Boolean = false,
+    onDraft: ((String) -> Unit)? = null
 ) {
     // Seeded per stored value so an external change lands, without fighting the keyboard.
     var text by remember(value) { mutableStateOf(value) }
@@ -1398,6 +1405,7 @@ internal fun SettingsTextField(
         value = text,
         onValueChange = {
             text = it
+            onDraft?.invoke(it)
             if (commitAsYouType) commitNow(it)
         },
         label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
