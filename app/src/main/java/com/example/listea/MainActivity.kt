@@ -51,6 +51,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -1489,6 +1490,16 @@ private fun ImportFolderDialogs(viewModel: ListsViewModel) {
  * The fields are seeded from `request.options` rather than from a default, so the dialog opens on
  * what the run is actually about — the Source's own name and importer when refreshing, the folder's
  * name and the default grouping when creating.
+ *
+ * **The draft is saved, so it needs an identity.** Compose restores `rememberSaveable` values by
+ * composition position, and the flow that holds this request does not survive the process: if the
+ * app dies with this dialog open — or is replaced by an update while its task is retained — the
+ * draft stays in the Activity's saved state and would be consumed by the *next* dialog composed at
+ * this position, whatever run that dialog describes. That is how a Refresh of a webhook Todo opened
+ * on *Don't export*: the seed was right, but a draft saved for an earlier run was restored over it.
+ * The run's seed is therefore part of the composition key, so a draft is only restored by the run
+ * it was seeded from. Rotation keeps the same request, so it keeps the draft, which is the case
+ * saved state exists for.
  */
 @Composable
 private fun ImportConfirmDialog(
@@ -1497,10 +1508,49 @@ private fun ImportConfirmDialog(
     onConfirm: (ImportOptions, DissolvedHistory?) -> Unit,
     onDismiss: () -> Unit
 ) {
-    // Keyed on the run being described rather than on the [Confirm] object: the object is a new
-    // instance every collection, so keying on it would discard a half-typed name on any recompose
-    // that re-read the flow, and the label is what distinguishes one run's confirmation from the
-    // next one's.
+    key(importRunIdentity(request)) {
+        ImportConfirmDialogBody(request, defaultWebhookUrl, onConfirm, onDismiss)
+    }
+}
+
+/**
+ * The words that identify one run to the dialog's saved state: everything the draft is seeded from.
+ *
+ * A fingerprint rather than an id because the request is not stored: after a process death there is
+ * no previous object to compare with, only whatever the saved state kept and whatever the new run
+ * says. Equal fingerprints mean the two runs would have opened the dialog identically, so restoring
+ * a draft is safe; different fingerprints mean it is a different run.
+ */
+internal fun importRunIdentity(request: ImportFolderRequest.Confirm): String {
+    val seed = request.options
+    return listOf(
+        request.refresh,
+        request.folderLabel,
+        seed.displayName,
+        seed.keepTree,
+        seed.importer.key,
+        seed.contentPolicy.key,
+        encodeExportChoice(seed.exportChoice),
+        seed.webhookUrl,
+        seed.webhookFromDefault,
+        seed.followUpstream,
+        seed.keepStateOnDelete,
+        encodeTemplateAttachments(seed.templates),
+        request.histories.joinToString(",") { it.sourceId }
+    ).joinToString("\u0000")
+}
+
+/** The dialog itself, composed under [importRunIdentity]'s key. */
+@Composable
+private fun ImportConfirmDialogBody(
+    request: ImportFolderRequest.Confirm,
+    defaultWebhookUrl: String,
+    onConfirm: (ImportOptions, DissolvedHistory?) -> Unit,
+    onDismiss: () -> Unit
+) {
+    // The whole body is keyed by the run above, so this input no longer has to tell one run from
+    // the next; it is kept because it is what a field's draft is bound to within a run, and the
+    // dialog never describes two runs at once.
     val runKey = request.folderLabel
     val seed = request.options
     var name by rememberSaveable(runKey) { mutableStateOf(seed.displayName) }
@@ -1724,8 +1774,8 @@ private fun ImportConfirmDialog(
                             }
                         )
                         // Nested directly under *One Task per file*, because it is the one
-                        // importer with a tree to keep: folder-as-Task's Tasks are one per folder
-                        // and its catalog is flat whatever this would say.
+                        // importer with a tree to keep: folder-as-Task's Tasks are one per
+                        // folder and its catalog is flat whatever this would say.
                         if (importer == ImporterKind.FILE_AS_TASK) {
                             ImportKeepTreeChoice(
                                 keepTree = keepTree,
