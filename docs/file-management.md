@@ -48,7 +48,10 @@ something outside its own database.
 
 It deletes **every checked file under the chosen Upstream** from the device itself, permanently.
 When more than one Upstream is registered, Settings offers a chip row to say which one this counts and
-deletes in; with a single Upstream there is nothing to choose and no chips are shown.
+deletes in; with a single Upstream there is nothing to choose and no chips are shown. The chips are
+the Upstream list, so **removing an Upstream removes that folder from these tools**: its files,
+Todos and Lists remain, but no root is drawn for it and neither row counts it any more. The removal
+confirmation says so.
 
 **Nothing happens without an explicit confirmation, and the confirmation is the full listing rather
 than a count.** Every file is named, grouped under the folder that holds it, and the list scrolls:
@@ -201,6 +204,11 @@ Two consequences:
   that has gone is re-established through Android's picker for the same folder or not at all; the
   delete's [write-access](#write-access) prompt refuses a different folder for exactly this reason.
   So nothing on this page can repoint Tasks and Lists at material they were never about.
+- **An Upstream can be removed (v0.6.2), and removal deletes nothing.** It forgets the
+  registration only: the folder's files, its Todos, their Tasks and the Lists holding them all stay,
+  because none of them is keyed on the Upstream's id — they are located by the grant plus a path. The
+  SAF grant is kept, since another Upstream may share it. What stops is listing: the Upstreams tab and
+  Settings lose the row, and this page's root chips lose that folder.
 - **A file's identity is the Upstream it is under plus its path beneath it** — which is what a scan,
   a folder listing and a re-import all match on. Deleting a file outside the app does not disturb
   the Task that was made from it: the Task keeps its decision and its List memberships, and the file

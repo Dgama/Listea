@@ -22,24 +22,37 @@ see [Settings](settings.md#exports).
 
 ## The destination
 
-**Settings → Exports → Webhook.** Two settings, both app-wide:
+**A Todo owns the address its exports post to.** The address is taken when the Todo is configured —
+at Create Tasks or Refresh Import — and stored on the Todo's row. *Use default* copies the default as
+it stands at that moment: it is a snapshot, not a subscription, so a later edit in Settings reaches
+no existing Todo. To move a Todo, edit it: **Todo card → ⋮ → Webhook address**. That dialog shows the
+address held, offers *Use default* or a custom URL, and saves it on the Todo. The same address
+governs the Todo's own rounds, Quick Review rounds involving its Tasks, and the webhook exports of
+Lists holding them.
 
-- **Default enabled** — whether webhook exports happen at all. With it off, a round that would have
-  posted says so instead. It does **not** change anyone's method choice: turning it back on restores
-  them exactly as they were.
-- **Default URL** — where every webhook in the app posts.
+**A List may override it with an address of its own.** The optional *Webhook address* field on a
+List's Export card is empty by default, which means *follow each Todo*. A non-empty value replaces
+every webhook group that List would otherwise post, and is the one case where an address is typed
+for a List rather than copied from a Todo. A List never reads the Settings default on its own; a
+Task with no owning Todo does fall back to the live default.
 
-There is **no per-List URL and no per-List test button**, deliberately. A List used to carry its own
-copy, seeded from this default when it was created and never read again — so changing the default
-reached no existing List, which is the opposite of what a default is for.
+**Settings → Exports → Webhook** holds the app-wide starting point:
 
-**Send a test payload** posts one small payload to the URL above, so a receiver can be checked
+- **Preselect the default address** — whether *Use default* is preselected when a Todo is being
+  configured. It does **not** enable or disable delivery: turning it off only starts the dialog on
+  *Custom*. Delivery is authorised by each Todo's method.
+- **Default URL** — the value a new Todo copies. It is not *the* destination, and changing it moves
+  only Todos created afterwards.
+
+**Send a test payload** posts one small payload to the default URL, so a receiver can be checked
 without waiting for a round. It asks nothing first, because pressing a button called *Test* is the
-confirmation. Its event is `export.test`.
+confirmation. Its event is `export.test`, and it writes one history record — a round of one.
 
-**Resend**, from the [history](exports.md#the-record), posts a stored body byte for byte to this
-same URL. It asks only that a URL is filled in — not that *Default enabled* is on, since that switch
-is one of the things that might have gone wrong in the first place.
+**Resend**, from the [history](exports.md#the-record), posts a stored body byte for byte to the
+address the record attempted, prefilled and editable. An edited address is temporary: it is used for
+that resend only and written back to neither the Todo, the List nor the record. A row written before
+schema 27 has no recorded address; its resend is prefilled with the current default and says the
+original was not recorded.
 
 ## Events
 
@@ -54,9 +67,9 @@ is one of the things that might have gone wrong in the first place.
 on the transition only — a List that merely stays complete never delivers again.
 
 **Which of these fire at all** depends on what the round's List and Todos chose, not on the events
-themselves. A round whose method is *Txt* fires no webhook at all; a List on *Same as the Todos* over
-items from two webhook Todos fires two of these, one per group. See
-[Exports → How a round resolves](exports.md#how-a-round-resolves).
+themselves. A round whose method is *Txt* fires no webhook at all. A List on *Same as the Todos* over
+items from two webhook Todos posts once per **resolved address**: one delivery if both Todos share an
+address, two if they differ. See [Exports → How a round resolves](exports.md#how-a-round-resolves).
 
 **`review.exited`** also needs *Export when leaving a review*. A queue that finished on screen has
 already exported and does not export again on the way out, and leaving a review that had nothing to
@@ -277,9 +290,10 @@ the method's own result — **Webhook sent** with its HTTP code, **Txt written**
 **Txt not written**, **Nothing to send**, **Nothing exported**.
 
 One swipe can finish a review **and** complete the List it belongs to, which is two deliveries. Each
-is announced in turn rather than overwriting the other, except that two deliveries found switched
-off in the same moment are reported once. A round that split across two Todos announces once per
-group.
+is announced in turn rather than overwriting the other. A round that split by address announces once
+per destination and its headline says *several webhook addresses*; each group's own line names its
+host, so a failure stays specific. A List completion whose switch is off is the only delivery now
+recorded as *not sent* — there is no app-wide gate to produce that outcome any more.
 
 A List's **Last export** line records what that List's own exports did — `list.completed`,
 `export.test`, and `review.exited` from a full Review. A **Quick Review round** has no List to

@@ -440,6 +440,19 @@ control that governs that file's own kind, never a Task-wide union. The values a
 round as it ended, not a review history; a timestamped history would be an additive level, not a
 reason to change these. See [v0.6.0](iterations/v0.6.0.md) and [Webhooks](webhooks.md).
 
+**v0.6.2 moves the destination onto the row that decides the export, and links a round's records.**
+A Todo's address is a column on `sources`, written as a copy at Create/Refresh and never read live
+from Settings; `lists.webhookUrl` is read again as a List's deliberate override, and an empty value
+means *follow the Todos*. The Settings default survives as the value a new Todo copies and as the
+fallback for Tasks with no owning Todo — a source of values, not a global gate. This keeps the
+boundary paragraph above intact: the address is part of the export configuration the Todo already
+owns, not a new fact about a Task. Delivery history gains the attempted address and a **round id**
+on `webhook_history`; the id groups rows produced by one `deliverPayload` without changing the
+one-row-per-actual-export rule. The default and the old gate live in DataStore, which a Room
+migration cannot read, so schema 27 leaves a marker and a one-time bootstrap copies the value (only
+when the old gate was on) inside the same transaction as the first address write. See
+[v0.6.2](iterations/v0.6.2.md).
+
 ## Source material, import, and review selection
 
 The path into Core contains several distinct concepts and operations:

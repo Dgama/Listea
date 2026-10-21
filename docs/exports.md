@@ -54,12 +54,17 @@ are single values, never a set — *"todo创建（import的时候）和list里�
 - **A List** — chosen on its detail page, in the **Export** card's **Method** row:
   **Same as the Todos** / **Export nothing** / **Webhook** / **Txt**. A List that has never been
   touched sits on *Same as the Todos*, and that is a real state rather than a blank one — see
-  [How a round resolves](#how-a-round-resolves).
+  [How a round resolves](#how-a-round-resolves). Since v0.6.2 a newly created List also starts with
+  **Export when this list is completed** off: no List begins posting because it was created after an
+  upgrade, and the switch is turned on per List.
 
-**There is no per-List webhook URL any more, and no Test button on a List.** Every webhook in the
-app reads the one default URL in Settings, and the test lives on the Webhook method's own page. The
-per-List copy was seeded at creation and never read again, so changing the default reached no
-existing List — the same defect v0.5.4 removed from a template's attachment column.
+**The destination is per Todo, and a List may override it.** Since v0.6.2 a Todo stores the webhook
+address it posts to, copied from the default when it is configured (a snapshot, not a subscription)
+and editable from the Todo card's ⋮ menu. A List's Export card carries an optional **Webhook
+address**: empty means *follow each Todo*, and a non-empty value replaces every webhook group that
+List would otherwise post. There is still no Test button on a List — the test belongs on the Webhook
+method's page, where the default it posts to lives. See
+[Webhooks → The destination](webhooks.md#the-destination).
 
 ### A method this build cannot read exports nothing
 
@@ -78,15 +83,26 @@ come from a Todo.
 |---|---|
 | **Webhook** or **Txt** | **One** payload, by that method, carrying the whole round |
 | **Export nothing** | No payload, no file, no request — and no question asked |
-| **Same as the Todos** | **One payload per source Todo**, each by that Todo's own method |
+| **Same as the Todos** | **One payload per source Todo**, each by that Todo's own method and address |
 | A Todo set to *Don't export* | Its group is **absent**, not empty |
-| An item no Todo owns | Its own group, by **Webhook** |
+| An item no Todo owns | Its own group, by **Webhook** to the live default address |
+| A non-empty List address | Overrides the address of **every webhook group** of that List |
 
 *Same as the Todos* is the interesting row, and it is why a List's choice is a choice rather than a
 switch. A List may hold Tasks from several Todos with several different methods, and a round over
 such a List exports more than once — one POST for the items that came from a webhook Todo, one file
 for the items that came from a Txt Todo. The split is a **sum computed when the round ends**, never
 a list stored on a row, which is why nothing has to be kept in sync: nothing is held.
+
+**Webhook groups that resolve to the same address merge.** Under *Same as the Todos* over items from
+two webhook Todos, the round produces one POST if both Todos hold that address and two if they do
+not; *Webhook* chosen for the whole List is one POST regardless of how many Todos the Tasks came
+from. A blank address is its own group and is recorded as a delivery with no destination rather than
+silently disappearing — the failure is the answer to *why did nothing arrive*.
+
+**A List never reads the Settings default on its own.** Its webhook groups resolve through the
+Todos; only an item with no owning Todo falls back to the live default. The List's own address is
+the one value typed for it, and it is an override rather than a copy.
 
 Groups come out in the order their items arrived, and each is delivered by its own method, so a
 round that becomes two payloads announces two results.
@@ -110,9 +126,9 @@ read back rather than merely carried into the body.
 ## Settings → Exports
 
 **Settings → Exports** is a full screen listing the methods — **Webhook**, then **Txt** — each with
-its destination on its row, and the export-wide settings below them. The Settings row above it reads
-*All export methods* and counts what is behind it: how many methods there are, and how the history
-stands.
+its destination on its row, and the export-wide settings below them. The Settings index row reads
+*"2 methods · webhook at n8n.example"* (or *"webhook not set"*), describing methods and the default
+address only: history has its own row at the bottom of Settings.
 
 It is a screen rather than a dialog because a dialog whose own contents include another dialog is
 the shape this avoids.
@@ -126,14 +142,16 @@ on the Webhook page:
 | **Export when leaving a review** | Whether a review that ends — finished or not — exports the round it covered |
 | **Export checked items only** | Whether an export carries only the items that are checked |
 
-Each method's page holds what is *its own*: the Webhook page holds Default enabled, Default URL,
-**Send a test payload** and a way into the history; the Txt page states where it writes and what is
-in the file, and is deliberately not editable in this release — no name template, no format, no
-schedule.
+Each method's page holds what is *its own*: the Webhook page holds **Preselect the default
+address** (whether *Use default* starts selected when configuring — it does not enable delivery),
+**Default URL** (the value a new Todo copies), and **Send a test payload**; the Txt page states where
+it writes and what is in the file, and is deliberately not editable in this release — no name
+template, no format, no schedule. Neither page has a history card any more.
 
 **The history is one list, not one per method.** *What did that review do?* wants one answer, so
-every export — whichever method carried it — is a row in the same place, and the method is named on
-the row. See [The record](#the-record).
+every export — whichever method carried it — is kept in the same place, and the method is named on
+the row. It is now grouped by the round that produced it and reached from the bottom of Settings.
+See [The record](#the-record).
 
 ## Which methods ask first
 
@@ -189,32 +207,37 @@ for it, because there is no payload whose method would mean anything.
 
 ## The record
 
-**Settings → Exports → History**, and **Settings → Exports → Webhook → Open history** — the same
-list, reached from either place.
+**Settings → History**, the last row of the Settings index.
 
 **Every export Listea performs is kept, with its body and what became of it** — sent, written,
-failed, not sent because the method was switched off, or declined when it asked. It used to keep
-only failures, which turned out to be the wrong shape: *did that round actually go out?* is the
-question people have, and a page that answers it only when the answer is no is a page you cannot
-trust.
+failed, not sent because a List's switch was off, or declined when it asked — and the rows of one
+delivery share a **round id**, so the screen can show what belonged together. It used to keep only
+failures, which turned out to be the wrong shape: *did that round actually go out?* is the question
+people have, and a page that answers it only when the answer is no is a page you cannot trust.
 
-Each record is named by the moment it last reached a verdict, and says its **method**, what event it
-was, which List or folder, how many items, and how it went. Tapping one shows the exact body that
-was posted or written, or would have been.
+**A round card** carries the time of its newest record, the List, the event, how many exports it
+produced and one aggregate verdict: *Delivered*, *Partly delivered*, *Failed*, *Not sent* or
+*Outcome not recorded*. It expands into its exports, each of which keeps its **method**, **address**
+(the host is shown), item count and outcome; opening one shows the exact body that was posted or
+written, or would have been. **Test** writes one record as a round of one, and rows written before
+schema 27 have no round id and are treated as a round of one each.
 
-Two actions per record, where they make sense:
+Three actions per export, where they make sense:
 
-- **Resend** posts the stored body, byte for byte, to the **default URL**. It is offered only on a
-  webhook record — *post this again* says nothing about a file that was written to disk. It asks
-  only that a URL is filled in, not that *Default enabled* is on, since that switch is one of the
-  things that might have gone wrong in the first place. The record is updated in place with the new
+- **Resend** posts the stored body, byte for byte, to **the address that record attempted**,
+  prefilled in an editable field. It is offered only on a webhook record — *post this again* says
+  nothing about a file that was written to disk. An edited address is temporary: it is used for that
+  resend only and is never written back to the Todo, the List or the record; when it differs from
+  the recorded one the detail line appends *resent to <host>*. A pre-27 record has no address; the
+  field starts from the current default and says so. The record is updated in place with the new
   verdict rather than a second one being appended: the history is a list of payloads and what became
   of each, not a log of every attempt at one.
-- **Delete** drops it, immediately and for good. It is the only thing in the app that can lose a
-  payload.
+- **Open payload** shows the exact body.
+- **Delete** drops the record, immediately and for good. It is the only thing in the app that can
+  lose a payload.
 
-The Settings line counts both: how much history there is, and how much of it has still not been
-delivered. Only the second is worth a warning.
+The Settings index row counts both exports and rounds, and carries a warning tone while a record has
+still not been delivered. Only that second fact is worth a warning.
 
 **A folder round has no List to record against**, so its exports appear in the history and on no
 List's *Last export* line. The history is the only place they are kept.

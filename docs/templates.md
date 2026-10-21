@@ -109,10 +109,11 @@ A version is **never edited**. There is no path in the app that changes what ver
 **Create Tasks** is where a template is attached. The dialog's last step lists the templates that
 exist and lets a run say which of them govern the files it is about to create Tasks over.
 
-**A run with nothing attached is refused**, and it is the one gate in the dialog — the **Create**
-button stays disabled until at least one template is on. The alternative is a Todo whose every file
-draws an empty chip row and whose Tasks can carry no mark at all, which is a thing the user would
-discover after importing a folder rather than before it.
+**A run with nothing attached is refused**, and it is one of the dialog's two gates. Since v0.6.2 the
+**Create** button stays enabled and pressing it opens the **Review** section with the template
+picker in front of the user, rather than a disabled button whose reason may be folded away. The
+alternative is a Todo whose every file draws an empty chip row and whose Tasks can carry no mark at
+all, which is a thing the user would discover after importing a folder rather than before it.
 
 **A Todo holds one version of a lineage, not several.** Attaching a newer version replaces the one
 the Todo holds, **in the position that one already occupied** rather than at the end, because the
@@ -126,6 +127,20 @@ alternative is a lie — the row would read as *not attached* for a template the
 
 A refresh run re-asks the same step and re-stamps it, which is why the drawer is drawn for a refresh
 too: a refresh is exactly the run that touches every Task it is about.
+
+**Leaving a ticked row alone on a refresh adopts the version the picker offers**, which is what that
+row has always promised. Before v0.6.2 the draft was seeded from the Todo's stored references and
+confirming submitted it untouched, so the dialog said *this run will attach version 2* and then
+re-stamped version 1 — silently, and durably, because a refresh touches every Task it still holds. A
+lineage the picker no longer offers keeps its held reference; a lineage no longer ticked is removed
+as before. A follow-the-upstream sync has no dialog and never upgrades anything.
+
+**When a held version will move, the dialog says what that does to marks that already exist** — the
+entry-12 rule, stated before Confirm: after the refresh, all of that Todo's Tasks report the new
+version on the next export, including those marked under the old one. If the edit only renames
+buttons the wire values are unchanged; if it adds or removes buttons, marks on a removed button
+become invisible and are never sent, and a new button starts unmarked. Unticking the moved template
+withdraws both the write and the notice.
 
 ## Which template governs a file
 

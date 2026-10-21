@@ -273,21 +273,26 @@ these are the two **methods** a round can leave by:
 
 **Nothing exports by default, and a new Todo exports nothing.** Three steps turn it on:
 
-1. **Point the webhook somewhere.** **Settings → Exports → Webhook** holds *Default enabled* and
-   *Default URL*; paste a URL and tap **Send a test payload** to check the receiver before relying on
-   it. The Txt method has nothing to configure.
-2. **Pick a method for a Todo.** The Create Tasks dialog asks *When a round over this Todo finishes*,
-   offering **Don't export**, **Webhook** or **Txt**. A new Todo starts at *Don't export*.
+1. **Set a default address.** **Settings → Exports → Webhook** holds *Preselect the default address*
+   and *Default URL*; paste a URL and tap **Send a test payload** to check the receiver before relying
+   on it. The switch only decides whether a new Todo starts on *Use default*; it does not enable
+   delivery. The Txt method has nothing to configure.
+2. **Pick a method for a Todo.** The Create Tasks dialog's **Sync** section asks *When a round over
+   this Todo finishes*, offering **Don't export**, **Webhook** or **Txt**, and choosing Webhook opens
+   the address configuration — *Use default* (a copy of the default at that moment) or a custom URL.
+   A new Todo starts at *Don't export*. Its address can be changed later from the Todo card's ⋮ menu.
 3. **Leave a List on *Same as the Todos*, or override it.** A List's detail page carries an **Export**
    card whose **Method** row offers *Same as the Todos*, *Export nothing*, *Webhook* or *Txt*, plus a
-   switch for exporting when the List completes.
+   switch for exporting when the List completes. An optional **Webhook address** field overrides the
+   Todos' addresses for that List; empty follows each Todo.
 
 A round then exports when you leave a review, when a Quick Review queue runs out, or when a List goes
 complete. The webhook method asks before it posts; the txt method writes and then reports. Three
 switches in **Settings → Exports** decide when and what anything exports: **Export from Quick
 Review**, **Export when leaving a review** and **Export checked items only**. Every export of every
-method is kept in one history — **Settings → Exports → History** — so a round is never lost and can
-be sent again later. All of it is in [Exports](exports.md).
+method is kept in one history — **Settings → History**, the last row of the index — grouped by the
+round that produced it, so a round is never lost and can be sent again later. All of it is in
+[Exports](exports.md).
 
 ## Keeping a List in sync
 

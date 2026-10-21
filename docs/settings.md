@@ -11,28 +11,31 @@ see [Exports → Where the choice lives](exports.md#where-the-choice-lives).
 
 - [Upstreams](#upstreams)
 - [Review](#review)
-- [Templates](#templates)
 - [Media and review behaviour](#media-and-review-behaviour)
 - [Todos](#todos)
+- [Templates](#templates)
 - [Exports](#exports)
 - [File management](#file-management)
+- [History](#history)
 - [Todo deletion](#todo-deletion)
 - [A Todo's own two policies](#a-todos-own-two-policies)
 
-The sections below are in the order the Settings screen draws them. The last two are **not on that
-screen** — both describe per-Todo controls, recorded here because this is where defaults are written
-down.
+**Since v0.6.2 the Settings screen is an index, and every section below is one row on it.** Each
+row carries the category's name and a one-line state — how many Upstreams, whether Quick Review is
+on, which export methods exist and where the default points, how the history stands — and opens a
+page holding that category's controls. No switch, add button or cleanup tool sits on the main
+screen: a page is where a category is edited, and the index is where it is found.
 
-**Two of the sections are a single row leading to a screen.** A template is a thing with a name, a
-scope and a version; an export method has a page of its own with a history on it. Neither fits in a
-card on a scrolling page, so this screen says how many there are and where they are edited, and the
-editing happens one level down.
+The sections below are in the order the index draws them, with **History last**. The final two are
+**not on that screen** — both describe per-Todo controls, recorded here because this is where
+defaults are written down.
 
 ## Upstreams
 
 | Control | Default | What it does |
 |---|---|---|
 | **Each Upstream row** | — | Names one granted folder and what a walk of it finds: how many folders, how many files, and how much they take up. Counted the same way a List's scan counts, so the two can never disagree about what the folder holds. |
+| **⋮ Remove Upstream…** | — | Forgets the registration after a confirmation. Todos, Tasks, Lists and files stay; the Android grant is kept. Offered on the row and on the Upstreams tab, and available even when the grant is lost. |
 | **Add Upstream** | — | Opens Android's folder picker. The folder you choose becomes an Upstream. |
 
 **This is where folders are added.** The Upstreams tab lists them and opens them, and offers no
@@ -138,7 +141,7 @@ history button; every one of those lives under here now, one level down.
 
 | Control | Default | What it does |
 |---|---|---|
-| **All export methods** | — | How many methods there are, and how the history stands — how many records, and how many of them a receiver has still not accepted. Opens the **Exports** screen. |
+| **Exports** | — | How many methods there are, and where the default address points — *"2 methods · webhook at n8n.example"*, or *"webhook not set"*. Opens the **Exports** screen. History is no longer reported here; it has its own index row. |
 
 The screen behind it lists one row per method — **Webhook**, then **Txt** — each with its destination
 on the row, and each opening a page of its own. Under the methods sit the three switches that every
@@ -181,6 +184,29 @@ open item, described accurately here rather than left to be discovered.
 Full behaviour, including write access and what happens to deleted files' decisions:
 [File management](file-management.md). The filter and sort options themselves:
 [Review and actions → Filtering and sorting](review-and-actions.md#filtering-and-sorting).
+
+The **Upstream** chips and both file tools derive their roots from the Upstream list. Removing an
+Upstream therefore removes that folder from these tools even though its files, Todos and Lists
+remain — the confirmation says so rather than leaving it to be noticed.
+
+## History
+
+**The last row on the index**, because history is a record of what the app did rather than part of
+configuring how it does it. It used to be reachable from three doors — the Exports landing page, the
+Webhook page and a note on the Txt page — and those copies are gone. The row reads *"Nothing yet"*
+when no export has been attempted, otherwise *"N exports · R rounds"* (or *"N exports"* when the two
+numbers are equal), and carries a warning tone while a record is still pending a receiver.
+
+**The screen groups records by the round that produced them.** A round card shows the time, the
+List, the event, how many exports it produced and one aggregate verdict — *Delivered*, *Partly
+delivered*, *Failed*, *Not sent*, or *Outcome not recorded*. Tapping it expands into the actual
+exports, each of which keeps its own method, address, item count and outcome; *Open payload*,
+*Resend* and *Delete* act on one export. A single-export round uses the same shape rather than a
+different one. Records written before schema 27 have no round id and are each a round of one — a
+resend moves its round to the top, because the round's time is its newest row.
+
+*Resend* is described under [Webhooks → The destination](webhooks.md#the-destination): it prefills
+the address that attempt used, and an edit there is temporary.
 
 ## Todo deletion
 
