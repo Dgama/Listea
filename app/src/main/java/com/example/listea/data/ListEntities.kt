@@ -60,16 +60,16 @@ data class ListEntity(
     val exportOnCompletion: Boolean = false,
 
     /**
-     * The URL this List used to post to. **Dead: nothing reads it and nothing writes it.**
+     * An address that overrides every webhook group this List exports.
      *
-     * It held a copy of the Settings default, seeded at creation and never refreshed, so changing
-     * the default reached no existing List — the same *copy where a reference was wanted* defect
-     * v0.5.4 removed from `sources.assetControls`, one column over. v0.5.6 removed the copy and
-     * every List reads the default at the moment it exports.
+     * Empty is the ordinary state: a List follows each Todo's own address, because a List is a
+     * selection of Tasks and not a destination. A non-empty value is the List saying *everything
+     * from this List goes here*, and it overrides the Todos' addresses for every webhook group of
+     * a round — see `planExports`.
      *
-     * Kept rather than dropped because dropping one needs SQLite 3.35 and minSdk is 24, and kept
-     * *declared* because Room compares the entity against the table in both directions — a column
-     * the table has and the entity does not is a schema mismatch, not an unused column.
+     * Until v0.6.2 the column held a copy of the Settings default, seeded at creation and never
+     * refreshed, and was read by nothing. That copy was neither a choice nor current, so
+     * `MIGRATION_26_27` clears every row; the column is live again under a different rule.
      */
     val webhookUrl: String = "",
 
@@ -914,7 +914,31 @@ data class ExportRecordEntity(
      * keeps its name for the reason v0.5.4's decision 8 gave about a column: renaming one is a
      * rebuild for a word, and the word is in the migration's history either way.
      */
-    val kind: String = com.example.listea.domain.ExportKind.WEBHOOK.key
+    val kind: String = com.example.listea.domain.ExportKind.WEBHOOK.key,
+
+    /**
+     * The address this attempt posted to, or `""` for a txt export and for a row written before
+     * v0.6.2.
+     *
+     * Stored per row rather than looked up, because one round may split across several addresses
+     * and the record has to say which one *this* attempt used. A resend prefills it, and a
+     * temporary address typed there is deliberately not written back: the record is a history of
+     * what happened, not a second place a Todo's configuration lives.
+     *
+     * The SQL default matches `MIGRATION_26_27`'s `ALTER`, so a created and a migrated database
+     * agree, and a fixture can insert a legacy-shaped row without naming these columns.
+     */
+    @ColumnInfo(defaultValue = "''")
+    val webhookUrl: String = "",
+
+    /**
+     * The delivery this row was part of. Every export of one round shares it.
+     *
+     * `""` on rows written before v0.6.2. The history reads an empty id as a round of its own,
+     * which is what each old row was: rounds did not exist to group them.
+     */
+    @ColumnInfo(defaultValue = "''")
+    val roundId: String = ""
 )
 
 /**
@@ -933,7 +957,13 @@ data class ExportRecordSummary(
     val detail: String,
 
     /** Which mechanism made the attempt, so a history row can say what it was without opening it. */
-    val kind: String
+    val kind: String,
+
+    /** The address this attempt used; empty for txt and for rows written before v0.6.2. */
+    val webhookUrl: String,
+
+    /** The delivery this row belongs to; empty on legacy rows, which the UI reads as one each. */
+    val roundId: String
 )
 
 /** One file found by a recursive folder scan, before it becomes a [ListItemEntity]. */

@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
@@ -49,10 +50,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -67,6 +70,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.example.listea.domain.ExportChoice
+import com.example.listea.domain.ExportKind
 import com.example.listea.domain.LIST_EXPORT_CHOICES
 import com.example.listea.domain.decodeExportChoice
 import com.example.listea.domain.listExportChoiceLabel
@@ -252,7 +256,8 @@ fun ListDetailScreen(
                 ExportCard(
                     list = current.list,
                     onChoiceChange = { viewModel.setListExportKind(listId, it) },
-                    onCompletionChange = { viewModel.setExportOnCompletion(listId, it) }
+                    onCompletionChange = { viewModel.setExportOnCompletion(listId, it) },
+                    onWebhookUrlChange = { viewModel.setListWebhookUrl(listId, it) }
                 )
                 Spacer(Modifier.height(ListeaDimens.SectionGap))
             }
@@ -537,16 +542,18 @@ private fun ProgressCard(
  * - **How it went** — *Last export*, one line, because a List whose exports are failing should say
  *   so here rather than only in a history three screens away.
  *
- * The URL field and the Test button that used to live here are gone, and deliberately: a List that
- * held its own URL was a copy of a setting that lives elsewhere, seeded once and never updated, so
- * changing the default reached no existing List. Every webhook now reads the app default, and the
- * Test button moved to where that default is configured.
+ * **The address field is back, with a different meaning.** The URL that used to live here in
+ * v0.5.6 was a copy of the app default, seeded once and never updated, so changing the default
+ * reached no existing List. This one is an *override*: empty means each Todo still posts where it
+ * says, and a non-empty value replaces every webhook group this List would otherwise split into.
+ * The Test button stays in Settings, where the default it tests lives.
  */
 @Composable
 private fun ExportCard(
     list: ListEntity,
     onChoiceChange: (ExportChoice) -> Unit,
-    onCompletionChange: (Boolean) -> Unit
+    onCompletionChange: (Boolean) -> Unit,
+    onWebhookUrlChange: (String) -> Unit
 ) {
     var menuOpen by rememberSaveable { mutableStateOf(false) }
     var expanded by rememberSaveable { mutableStateOf(true) }
@@ -593,6 +600,23 @@ private fun ExportCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = ListeaDimens.CompactGap)
             )
+            // Only where the List can actually post. Under *Export nothing* or a txt method there
+            // is no webhook group for an override to reach, and a field that changes nothing is a
+            // field a user will think is broken.
+            if (choice == ExportChoice.Inherit || choice == ExportChoice.By(ExportKind.WEBHOOK)) {
+                Spacer(Modifier.height(ListeaDimens.RowGap))
+                ListWebhookField(
+                    value = list.webhookUrl,
+                    onCommit = onWebhookUrlChange
+                )
+                Text(
+                    "Leave this empty to use each Todo's address. An address here overrides every " +
+                        "webhook export from this list.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = ListeaDimens.CompactGap)
+                )
+            }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -621,6 +645,52 @@ private fun exportChoiceHelp(choice: ExportChoice): String = when (choice) {
         "Each Todo this list holds decides for itself, so one round can export more than once."
     ExportChoice.Nothing -> "Nothing leaves this list, whatever its Todos are set to."
     is ExportChoice.By -> "Every export from this list goes by " + choice.kind.label.lowercase() + "."
+}
+
+/**
+ * The List's optional webhook address, committed on Done, on leaving the field, or on leaving the
+ * screen — never per keystroke.
+ *
+ * Validation is the same rule delivery uses, applied before the write rather than after it: an
+ * invalid address is shown as an error and never stored, so a List can hold *no override* or a
+ * usable one and nothing in between. Empty is a legitimate answer and means *follow each Todo*, so
+ * it commits like any other value — this is the opposite of [SettingsTextField]'s refusal of blank,
+ * and the difference is that here blank is a decision rather than a missing default.
+ */
+@Composable
+private fun ListWebhookField(
+    value: String,
+    onCommit: (String) -> Unit
+) {
+    // Seeded per stored value so an external change lands, without fighting the keyboard.
+    var text by remember(value) { mutableStateOf(value) }
+    val trimmed = text.trim()
+    val error = if (trimmed.isEmpty()) null else webhookUrlError(trimmed)
+
+    fun commit() {
+        if (error == null && trimmed != value.trim()) onCommit(trimmed)
+    }
+
+    // Disposal writes what is in the field at that moment, not what it held when the effect was
+    // set up; committing a value already stored is a no-op, so a field that lost focus first is
+    // not written twice.
+    val commitOnLeave by rememberUpdatedState(::commit)
+    DisposableEffect(Unit) { onDispose { commitOnLeave() } }
+
+    OutlinedTextField(
+        value = text,
+        onValueChange = { text = it },
+        label = { Text("Webhook address", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        placeholder = { Text("Follow each Todo") },
+        singleLine = true,
+        isError = error != null,
+        supportingText = error?.let { { Text(it) } },
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+        keyboardActions = KeyboardActions(onDone = { commit() }),
+        modifier = Modifier
+            .fillMaxWidth()
+            .onFocusChanged { if (!it.isFocused) commit() }
+    )
 }
 
 /**

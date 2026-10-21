@@ -333,34 +333,69 @@ fun exporterFor(kind: ExportKind, url: String, context: Context): Exporter? = wh
 
 // --- which payloads a round becomes ------------------------------------------------------------
 
-/** A Todo, as the group it owns needs it. */
-data class ExportSource(val id: String, val title: String, val kind: ExportKind?)
+/**
+ * A Todo, as the group it owns needs it.
+ *
+ * [webhookUrl] is the address this Todo holds for the webhook kind, trimmed by the caller. Empty
+ * means it holds none — either the install never had one (the upgrade left every Todo blank), or
+ * the user cleared it — and a webhook group with no address is planned anyway: it fails delivery
+ * and says why, which is more honest than a round that silently shrinks.
+ */
+data class ExportSource(
+    val id: String,
+    val title: String,
+    val kind: ExportKind?,
+    val webhookUrl: String = ""
+)
 
 /**
- * One group of a round: the items that will leave together, and the mechanism they will leave by.
+ * One group of a round: the items that will leave together, the mechanism they will leave by, and
+ * the address that mechanism will use.
  *
  * The mechanism is always a kind and never an [ExportChoice]: a group only exists because something
  * was decided for it, so a group whose answer was *nothing* was never planned. That is what makes
  * the dispatcher's loop total — it has no branch for *do not export*, because there is nothing to
  * loop over.
+ *
+ * [webhookUrl] is meaningful only for [ExportKind.WEBHOOK] and is where that group posts. It is
+ * resolved by [planExports] and never re-derived by the dispatcher, so the confirmation, the POST
+ * and the history row all name the same destination. Empty is a legitimate value that the
+ * dispatcher refuses to post.
  */
 data class PlannedExport(
     val kind: ExportKind,
     val sourceId: String?,
     val sourceTitle: String?,
-    val items: List<ListItemEntity>
+    val items: List<ListItemEntity>,
+    val webhookUrl: String = ""
 )
 
 /**
  * The payloads one round becomes. **The release's headline rule, and the only place it is decided.**
  *
  * ```
- * a List that chose a kind → one group, its kind, no source
- * a List that chose nothing→ no groups at all
- * a List that did not      → one group per source Todo, that Todo's kind
- * a Todo that said nothing → its group is absent, not empty
- * an item no Todo owns     → its own group, by WEBHOOK
+ * a List that chose a kind  → one group, its kind, no source
+ * a List that chose nothing → no groups at all
+ * a List that did not       → one group per source Todo, that Todo's kind
+ * a Todo that said nothing  → its group is absent, not empty
+ * an item no Todo owns      → its own group, by WEBHOOK
  * ```
+ *
+ * **Every group carries the address it will post to**, resolved here rather than at send time, for
+ * the same reason the mechanism is: the confirmation, the POST and the history row must name one
+ * destination. The rules:
+ *
+ * - a non-empty [listWebhookUrl] overrides the webhook address of every group — a List with an
+ *   address of its own is saying *this folder's work goes here*, whatever its Todos hold;
+ * - a webhook group otherwise posts to the address of the Todo its items came from;
+ * - items no Todo owns fall back to [defaultWebhookUrl], the live Settings value;
+ * - a Todo that holds no address keeps an empty one. It is not quietly given the default: an
+ *   address snapshot is a snapshot, and the upgrade deliberately left old Todos blank.
+ *
+ * **`By(WEBHOOK)` without a List address splits by address**, not by Todo: two Todos configured with
+ * the same receiver are one payload to that receiver, and their first appearance fixes the order.
+ * A blank address forms a group of its own and fails at delivery, which is visible; dropping it
+ * would make the round quietly smaller than the List it reports.
  *
  * Pure, and takes `sourceOf` as a function rather than a map so that a test can decide what a round
  * looks like without a database — the same reason [Exporter.render] takes no context. The caller
@@ -384,19 +419,58 @@ data class PlannedExport(
 fun planExports(
     items: List<ListItemEntity>,
     listChoice: ExportChoice,
-    sourceOf: (ListItemEntity) -> ExportSource?
+    sourceOf: (ListItemEntity) -> ExportSource?,
+    listWebhookUrl: String = "",
+    defaultWebhookUrl: String = ""
 ): List<PlannedExport> {
     if (listChoice is ExportChoice.Nothing) return emptyList()
 
+    val listUrl = listWebhookUrl.trim()
+    val defaultUrl = defaultWebhookUrl.trim()
+
     if (listChoice is ExportChoice.By) {
-        return listOf(
-            PlannedExport(
-                kind = listChoice.kind,
-                sourceId = null,
-                sourceTitle = null,
-                items = items
+        if (listChoice.kind != ExportKind.WEBHOOK) {
+            // A text file has no destination to resolve; the address columns are not read at all.
+            return listOf(
+                PlannedExport(
+                    kind = listChoice.kind,
+                    sourceId = null,
+                    sourceTitle = null,
+                    items = items
+                )
             )
-        )
+        }
+        if (listUrl.isNotEmpty()) {
+            return listOf(
+                PlannedExport(
+                    kind = ExportKind.WEBHOOK,
+                    sourceId = null,
+                    sourceTitle = null,
+                    items = items,
+                    webhookUrl = listUrl
+                )
+            )
+        }
+        // Split by address, not by Todo: one payload per receiver, first appearance fixing the order.
+        val ordered = LinkedHashMap<String, PlannedExport>()
+        items.forEach { item ->
+            val source = sourceOf(item)
+            val address = source?.webhookUrl?.trim().orEmpty()
+                .ifEmpty { if (source == null) defaultUrl else "" }
+            val existing = ordered[address]
+            ordered[address] = if (existing == null) {
+                PlannedExport(
+                    kind = ExportKind.WEBHOOK,
+                    sourceId = null,
+                    sourceTitle = null,
+                    items = listOf(item),
+                    webhookUrl = address
+                )
+            } else {
+                existing.copy(items = existing.items + item)
+            }
+        }
+        return ordered.values.toList()
     }
 
     val ordered = LinkedHashMap<String?, PlannedExport>()
@@ -406,15 +480,23 @@ fun planExports(
         if (source != null && source.kind == null) return@forEach
         val key = source?.id
         val existing = ordered[key]
-        ordered[key] = if (existing == null) {
-            PlannedExport(
+        if (existing == null) {
+            val address = if (kind == ExportKind.WEBHOOK) {
+                listUrl.ifEmpty {
+                    if (source == null) defaultUrl else source.webhookUrl.trim()
+                }
+            } else {
+                ""
+            }
+            ordered[key] = PlannedExport(
                 kind = kind,
                 sourceId = source?.id,
                 sourceTitle = source?.title,
-                items = listOf(item)
+                items = listOf(item),
+                webhookUrl = address
             )
         } else {
-            existing.copy(items = existing.items + item)
+            ordered[key] = existing.copy(items = existing.items + item)
         }
     }
     return ordered.values.toList()

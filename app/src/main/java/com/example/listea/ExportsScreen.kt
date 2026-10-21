@@ -15,13 +15,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.FilterList
-import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -37,11 +35,11 @@ import com.example.listea.domain.ExportKind
  *
  * ## Why a page and not a dialog
  *
- * Every other management surface in Settings opens a dialog. This one does not, and the user gave
- * the reason in as many words: a webhook's own configuration contains a history, and a history is
- * itself a dialog — so configuring a webhook inside a dialog would be a dialog inside a dialog.
- * The shape here is the one Templates already uses: an **early-return branch** in `SettingsScreen`
- * with two levels, the list of methods and the method opened out of it.
+ * Every other management surface in Settings opens a dialog. This one does not, because a method's
+ * configuration is a paragraph of explanation with controls in it, and the history it used to hold
+ * has moved out to a page of its own at the bottom of the Settings index. The shape here is the one
+ * Templates uses: a route in `SettingsScreen` with two levels, the list of methods and the method
+ * opened out of it.
  *
  * ## What lives where
  *
@@ -68,20 +66,17 @@ import com.example.listea.domain.ExportKind
  */
 
 /**
- * The Settings row's one line: how many methods there are, and how the history stands.
+ * The Settings row's one line: how many methods there are, and where the webhook method points.
  *
- * Both facts, because they are what the page behind the button is for — the things a round can go
- * to, and the record of everything that ever did. "not delivered" counts across every method, since
- * an unfinished export is unfinished whatever was supposed to carry it.
+ * History used to share this line. It is a page of its own now, reached from the bottom of the
+ * Settings index, so this summary answers only what the Exports page is about. The webhook host is
+ * the one fact worth knowing before opening it, and *not set* is the fact the user has to act on.
  */
-internal fun exportMethodsSummary(historyCount: Int, pendingCount: Int): String {
+internal fun exportMethodsSummary(defaultUrl: String): String {
     val methods = ExportKind.entries.size
-    val history = when {
-        historyCount == 0 -> "nothing exported yet"
-        pendingCount == 0 -> "$historyCount record" + (if (historyCount == 1) "" else "s")
-        else -> "$historyCount records · $pendingCount not delivered"
-    }
-    return "$methods methods · $history"
+    val host = webhookHost(defaultUrl.trim())
+    val webhook = if (host == null) "webhook not set" else "webhook at $host"
+    return "$methods methods · $webhook"
 }
 
 /** The list of methods, and the export-wide settings that are not about any one of them. */
@@ -90,12 +85,9 @@ fun ExportListScreen(
     modifier: Modifier,
     viewModel: ListsViewModel,
     onBack: () -> Unit,
-    onOpenKind: (ExportKind) -> Unit,
-    onHistoryOpenChange: (Boolean) -> Unit
+    onOpenKind: (ExportKind) -> Unit
 ) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
-    val historyCount by viewModel.webhookRecordCount.collectAsStateWithLifecycle()
-    val pendingCount by viewModel.pendingWebhookCount.collectAsStateWithLifecycle()
 
     ListeaNestedScaffold(
         title = "Exports",
@@ -166,58 +158,6 @@ fun ExportListScreen(
                         "just did. Nothing checked means nothing is exported, and Listea says so."
                 )
             }
-
-            Spacer(Modifier.height(ListeaDimens.SectionGap))
-
-            SectionCard(title = "History") {
-                InfoActionsRow(
-                    info = {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
-                        ) {
-                            Icon(
-                                Icons.Filled.History,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(ListeaDimens.IconSize)
-                            )
-                            Text("Every export", style = MaterialTheme.typography.bodyMedium)
-                        }
-                        // Two numbers, because they answer different questions: how much has ever
-                        // been built, and how much of it a receiver has still not accepted. Only
-                        // the second is worth a warning, and only when it is not zero.
-                        StatusLine(
-                            when {
-                                historyCount == 0 -> "Nothing yet"
-                                pendingCount == 0 ->
-                                    "$historyCount record" + (if (historyCount == 1) "" else "s") +
-                                        " · all delivered"
-
-                                else ->
-                                    "$historyCount record" + (if (historyCount == 1) "" else "s") +
-                                        " · $pendingCount not delivered"
-                            },
-                            tone = if (pendingCount == 0) StatusTone.Neutral else StatusTone.Warning
-                        )
-                    },
-                    actions = {
-                        Button(
-                            onClick = { onHistoryOpenChange(true) },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("Open", maxLines = 1)
-                        }
-                    }
-                )
-                HelperText(
-                    "Every export Listea performs is kept here with its body and what became of " +
-                        "it — delivered, failed, or not attempted at all — so a round of review is " +
-                        "never lost and you can always check whether one went out. A text export " +
-                        "is recorded too, so a file that was written is as visible as a POST that " +
-                        "was sent."
-                )
-            }
         }
     }
 }
@@ -272,39 +212,35 @@ fun ExportDetailScreen(
     modifier: Modifier,
     viewModel: ListsViewModel,
     kind: ExportKind,
-    onBack: () -> Unit,
-    onHistoryOpenChange: (Boolean) -> Unit
+    onBack: () -> Unit
 ) {
     when (kind) {
         ExportKind.WEBHOOK -> WebhookExportScreen(
             modifier = modifier,
             viewModel = viewModel,
-            onBack = onBack,
-            onHistoryOpenChange = onHistoryOpenChange
+            onBack = onBack
         )
         ExportKind.TXT -> TxtExportScreen(modifier = modifier, onBack = onBack)
     }
 }
 
 /**
- * The webhook method: everywhere it sends, and nothing about when or what.
+ * The webhook method: where it goes by default, and the test button.
  *
- * **Default URL is the only URL there is**, as of v0.5.6. A List used to carry its own, seeded
- * from this value when the List was created and never updated afterwards — so changing the default
- * reached no existing List, and a List's copy was a stale answer wearing a setting's clothes. That
- * field is gone and this one is now read by every webhook the app performs, which is what makes
- * the helper text below true rather than aspirational.
+ * **The default address is a value a Todo copies; it is not the only destination.** A Todo holds
+ * the address it was configured with, and a List may override both. This page configures the
+ * address offered as *Use default* and the one unowned Tasks fall back to — which is why changing it
+ * here never moves an existing Todo.
  *
- * **Default enabled** survives. It is the webhook method's own switch, asked per webhook group
- * rather than per round: a List whose Todos export by webhook and by txt will write its file
- * whether or not this is on, and will only go quiet about the POSTs.
+ * **Preselect the default address** is a preference about the Create Tasks dialog, not a delivery
+ * gate. The gate was removed in v0.6.2: with an address set on the Todo, a round posts whether this
+ * is on or off. The switch only decides which address radio a new Todo starts on.
  */
 @Composable
 private fun WebhookExportScreen(
     modifier: Modifier,
     viewModel: ListsViewModel,
-    onBack: () -> Unit,
-    onHistoryOpenChange: (Boolean) -> Unit
+    onBack: () -> Unit
 ) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
 
@@ -320,11 +256,16 @@ private fun WebhookExportScreen(
                 .verticalScroll(rememberScrollState())
                 .padding(ListeaDimens.PagePadding)
         ) {
-            SectionCard(title = "Delivery") {
+            SectionCard(title = "Default address") {
                 SwitchRow(
-                    label = "Default enabled",
+                    label = "Preselect the default address",
                     checked = settings.defaultWebhookEnabled,
                     onCheckedChange = { viewModel.setDefaultWebhookEnabled(it) }
+                )
+                HelperText(
+                    "When a Todo is created, start its webhook address on Use default. Off " +
+                        "starts it on Custom. This does not enable delivery: a Todo posts to " +
+                        "the address it holds, whatever this switch says."
                 )
                 SettingsTextField(
                     label = "Default URL",
@@ -333,14 +274,9 @@ private fun WebhookExportScreen(
                     allowEmpty = true
                 )
                 HelperText(
-                    "The address every webhook in this app posts to. No List keeps one of its " +
-                        "own — a Todo or a List chooses *webhook* as its method, and the POST " +
-                        "goes here."
-                )
-                HelperText(
-                    "With Default enabled off, webhook exports are not attempted and a round " +
-                        "that would have posted says so. Method choices are not changed by this " +
-                        "switch: turning it back on restores them exactly as they were."
+                    "The value a Todo copies when it is created on Use default. A Todo keeps " +
+                        "its own copy, so changing this later does not move an existing Todo; edit " +
+                        "the Todo to change where it posts. Items no Todo owns fall back to it."
                 )
             }
 
@@ -354,25 +290,9 @@ private fun WebhookExportScreen(
                     Text("Send a test payload", maxLines = 1)
                 }
                 HelperText(
-                    "Posts one small payload to the URL above, so a receiver can be checked " +
-                        "without waiting for a round. It asks nothing first, because pressing a " +
-                        "button called *Test* is the confirmation."
-                )
-            }
-
-            Spacer(Modifier.height(ListeaDimens.SectionGap))
-
-            SectionCard(title = "History") {
-                Button(
-                    onClick = { onHistoryOpenChange(true) },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Open history", maxLines = 1)
-                }
-                HelperText(
-                    "The same history the Exports screen leads to — every method's exports and " +
-                        "every method's failures, in one place, because a round that split " +
-                        "across two methods is one round."
+                    "Posts one small payload to the default URL above, so a receiver can be " +
+                        "checked without waiting for a round. It asks nothing first, because " +
+                        "pressing a button called Test is the confirmation."
                 )
             }
         }
@@ -438,18 +358,6 @@ private fun TxtExportScreen(modifier: Modifier, onBack: () -> Unit) {
                     "It is written, not sent: there is no URL, no network, and nothing to " +
                         "configure. A file that could not be written is reported the same way a " +
                         "failed POST is."
-                )
-            }
-
-            Spacer(Modifier.height(ListeaDimens.SectionGap))
-
-            SectionCard(title = "History") {
-                Text(
-                    "Every text export is recorded in the same history the webhook method uses, " +
-                        "with the file's name against it, so *did that round write a file?* is a " +
-                        "question with an answer.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }

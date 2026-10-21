@@ -1,8 +1,10 @@
 package com.example.listea
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -10,11 +12,23 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.listea.data.UpstreamEntity
@@ -51,6 +65,9 @@ fun UpstreamsScreen(
     onOpenBrowser: (UpstreamEntity) -> Unit
 ) {
     val upstreams by viewModel.upstreams.collectAsStateWithLifecycle()
+    // The Upstream whose removal is being confirmed. Held by value, so the dialog closes when the
+    // card it was opened from leaves the list.
+    var removing by remember { mutableStateOf<UpstreamEntity?>(null) }
 
     LazyColumn(
         modifier = modifier.fillMaxSize(),
@@ -74,18 +91,30 @@ fun UpstreamsScreen(
             UpstreamCard(
                 upstream = upstream,
                 available = upstream.rootUri in heldRoots,
-                onOpen = { onOpenBrowser(upstream) }
+                onOpen = { onOpenBrowser(upstream) },
+                onRemove = { removing = upstream }
             )
         }
+    }
+
+    removing?.let { upstream ->
+        RemoveUpstreamDialog(
+            upstream = upstream,
+            onDismiss = { removing = null },
+            onConfirm = {
+                viewModel.deleteUpstream(upstream.id)
+                removing = null
+            }
+        )
     }
 }
 
 /**
  * One Upstream: the folder's name, where it sits, and whether it can still be read.
  *
- * The whole card opens the folder, and the whole card is the only control on it — that is what an
- * Upstream *is*, and a card that could only be acted on through a button would make looking at the
- * material the one thing the screen for material could not do.
+ * The whole card opens the folder. The one control it carries besides that is the overflow that
+ * forgets it, and it is behind a menu because removal is rare and irreversible in the sense that
+ * the registration cannot be restored — the folder can be added again, but not what the card was.
  *
  * Unavailable is a state and not a deletion: a folder whose grant Android no longer holds is still
  * the user's Upstream, and saying so plainly is better than a card that disappears without
@@ -95,11 +124,41 @@ fun UpstreamsScreen(
 private fun UpstreamCard(
     upstream: UpstreamEntity,
     available: Boolean,
-    onOpen: () -> Unit
+    onOpen: () -> Unit,
+    onRemove: () -> Unit
 ) {
+    var menuOpen by remember { mutableStateOf(false) }
+
     OutlinedCard(onClick = onOpen, enabled = available, modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(ListeaDimens.CardPadding)) {
-            Text(upstream.displayName, style = MaterialTheme.typography.titleSmall, maxLines = 2)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    upstream.displayName,
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 2,
+                    modifier = Modifier.weight(1f)
+                )
+                // Removal stays reachable when the grant is gone — that is one of the reasons a
+                // user comes looking for it. The card's own click is disabled in that state; this
+                // button is not.
+                Box {
+                    IconButton(onClick = { menuOpen = true }) {
+                        Icon(
+                            Icons.Filled.MoreVert,
+                            contentDescription = "More actions for ${upstream.displayName}"
+                        )
+                    }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Remove Upstream…") },
+                            onClick = {
+                                menuOpen = false
+                                onRemove()
+                            }
+                        )
+                    }
+                }
+            }
             if (upstream.relativePath.isNotEmpty()) {
                 Spacer(Modifier.height(ListeaDimens.CompactGap))
                 Text(
@@ -120,4 +179,39 @@ private fun UpstreamCard(
             }
         }
     }
+}
+
+/**
+ * The question before an Upstream is forgotten, shared by the Upstreams tab and Settings.
+ *
+ * The wording separates the three things a user could reasonably fear are about to happen, because
+ * *remove* is a word that could mean any of them: the Todos and Tasks made from the folder stay,
+ * the files on disk are untouched, and the Android permission is kept. It also says the one thing
+ * that does change beyond this screen — checked-file tools derive their roots from Upstreams, so
+ * this folder stops appearing in them even though its files remain.
+ */
+@Composable
+internal fun RemoveUpstreamDialog(
+    upstream: UpstreamEntity,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Remove \"" + upstream.displayName + "\"?") },
+        text = {
+            Text(
+                "Listea will forget this folder. Its Todos, Tasks and Lists stay, and no files " +
+                    "are deleted. The Android folder permission is kept because other Upstreams " +
+                    "may share it. File management lists roots from Upstreams, so this folder " +
+                    "stops appearing there."
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("Remove") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
 }

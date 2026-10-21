@@ -16,8 +16,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -40,29 +42,26 @@ import com.example.listea.domain.ExportKind
 import org.json.JSONObject
 
 /**
- * Every export Listea has performed, what became of it, and the two things you can do about one.
- *
- * It began as a place for failures — a failed delivery used to leave nothing behind but a dialog
- * the user had already dismissed, and the round it described was gone. Keeping only failures then
- * turned out to be its own gap: "did that round go out?" is the question people actually have,
- * and a page that answers it only when the answer is no is a page you cannot trust. So a record
- * is written for every attempt that reached a verdict — sent, written, failed, refused by a
- * switched-off webhook, or declined when the app asked — and this page shows all of them.
+ * Every export Listea has performed, grouped by the round that produced it.
  *
  * **One history and not one per method**, which is the shape v0.5.6 chose (*两种都记*). A round
  * over a List whose Todos disagree splits into several exports, and a reader asking *what did that
- * review do?* wants one answer rather than a page per mechanism. The `kind` column says which
- * method carried each row, so the two are still tellable apart at a glance.
+ * review do?* wants one answer rather than a page per mechanism. The storage keeps one row per
+ * export — one row has one method, one address and one verdict — so this screen folds those rows
+ * back into rounds with [historyRounds]: the parent card is the round, its children are the
+ * exports, and a single-export round simply opens with its one child already showing.
  *
- * **A text export is recorded too**, and that is not bookkeeping for its own sake: without a row,
- * a txt export is unfalsifiable — the user cannot tell whether the file was written, and a List's
- * *Last export* line would have nothing to say exactly when the effective method is txt.
+ * **The round is the unit because that is what the user did.** A row's [ExportRecordSummary.at] is
+ * when that row last reached a verdict; resending one child moves it, so that round rises to the
+ * top of the page, where the user just acted.
  *
  * Records are written by the delivery path, never here; this screen only replays them or throws
- * them away. Resending posts to the default URL in Settings, deliberately without asking whether
- * the default webhook is switched *on* — a record may exist precisely because something was
- * misconfigured, and the switch is one of the things it might have been. Both the progress and
- * the result land in the same top-level dialogs every other delivery uses.
+ * them away. Resend replays the stored body byte for byte — what arrives is what failed — to an
+ * address the dialog prefills with the one the record used (the live default for a pre-27 row) and
+ * lets the user change for this attempt only. It deliberately does not ask whether any switch is
+ * on: a record may exist precisely because something was misconfigured, and the address is one of
+ * the things it might have been. Both the progress and the result land in the same top-level
+ * dialogs every other delivery uses.
  */
 @Composable
 fun ExportHistoryScreen(
@@ -71,26 +70,31 @@ fun ExportHistoryScreen(
     onBack: () -> Unit
 ) {
     val records by viewModel.webhookHistory.collectAsStateWithLifecycle()
+    val roundCount by viewModel.webhookRoundCount.collectAsStateWithLifecycle()
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
 
     // Survives rotation, and is only an id: the payload behind it is read when the dialog opens.
     var openRecordId by rememberSaveable { mutableStateOf<Long?>(null) }
+    var resendRecordId by rememberSaveable { mutableStateOf<Long?>(null) }
 
     BackHandler { onBack() }
 
+    val rounds = historyRounds(records)
+
     ListeaNestedScaffold(
         modifier = modifier,
-        title = "Export history",
-        backLabel = "Exports",
+        title = "History",
+        backLabel = "Settings",
         onBack = onBack,
         trailing = {
             Text(
-                countOfRecords(records.size),
+                historyCountLabel(records.size, roundCount),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
     ) { bodyModifier ->
-        if (records.isEmpty()) {
+        if (rounds.isEmpty()) {
             Box(bodyModifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -121,20 +125,12 @@ fun ExportHistoryScreen(
             ),
             verticalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
         ) {
-            items(records, key = { it.id }) { record ->
-                ExportRecordCard(
-                    record = record,
-                    onOpen = { openRecordId = record.id },
-                    onDelete = { viewModel.deleteWebhookRecord(record.id) },
-                    onResend = { viewModel.resendWebhookRecord(record.id) },
-                    // *Resend* means *post this again*, which only says anything about a kind
-                    // whose delivery is a POST. A written text file has no receiver to send it
-                    // back to, and pressing the button would have pushed a tab-separated report
-                    // at whatever URL happened to be in Settings.
-                    //
-                    // An unreadable kind hides it too, and that is the failing-closed rule rather
-                    // than an oversight: a row nobody can name is not one to guess a mechanism for.
-                    canResend = ExportKind.fromKey(record.kind) == ExportKind.WEBHOOK
+            items(rounds, key = { it.key }) { round ->
+                HistoryRoundCard(
+                    round = round,
+                    onOpen = { openRecordId = it },
+                    onDelete = { viewModel.deleteWebhookRecord(it) },
+                    onResend = { resendRecordId = it }
                 )
             }
         }
@@ -147,86 +143,238 @@ fun ExportHistoryScreen(
             onDismiss = { openRecordId = null }
         )
     }
+
+    val resendRecord = resendRecordId?.let { id -> records.firstOrNull { it.id == id } }
+    if (resendRecord != null) {
+        ResendDialog(
+            record = resendRecord,
+            defaultUrl = settings.defaultWebhookUrl,
+            onDismiss = { resendRecordId = null },
+            onResend = { address ->
+                viewModel.resendWebhookRecord(resendRecord.id, address)
+                resendRecordId = null
+            }
+        )
+    }
 }
 
 /**
- * One kept payload: when it last reached a verdict, what it was, what that verdict was, and the
- * two actions.
+ * One round: when it last reached a verdict, what it was, and what the round did as a whole.
  *
- * The card itself is the way into the body, the same way a list card is the way into its list, so
- * the row keeps to the time and its two buttons. Delete is immediate: what it removes is a record
- * of something that already happened, not anything the user made, and needing two taps each to
- * clear a run of them would make the page tiring in exactly the situation that produces a run.
- *
- * Resend is offered on a successful record too. Sending the same round twice is a thing people
- * legitimately want — a receiver that lost it, a flow that was rebuilt — and the alternative is a
- * button that disappears exactly when the payload is known-good.
+ * The card is the way in and out of its children, the same way a list card is the way into its
+ * list. A round with a single export opens expanded, because there is nothing to fold: the child is
+ * the card's whole content and hiding it behind a tap would be a button whose only job is to make
+ * the page emptier. A split round starts folded and says how many exports it holds.
  */
 @Composable
-private fun ExportRecordCard(
-    record: ExportRecordSummary,
-    onOpen: () -> Unit,
-    onDelete: () -> Unit,
-    onResend: () -> Unit,
-    /** Whether this record has a receiver to be sent to again; see the call site. */
-    canResend: Boolean
+private fun HistoryRoundCard(
+    round: HistoryRound,
+    onOpen: (Long) -> Unit,
+    onDelete: (Long) -> Unit,
+    onResend: (Long) -> Unit
 ) {
+    var expanded by rememberSaveable(round.key) {
+        mutableStateOf(round.exportCount == 1)
+    }
+
     OutlinedCard(
-        onClick = onOpen,
+        onClick = { expanded = !expanded },
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(ListeaDimens.CardCorner)
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(
-                    start = ListeaDimens.CardPadding,
-                    top = ListeaDimens.RowGap,
-                    bottom = ListeaDimens.RowGap
-                ),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(ListeaDimens.CompactGap)
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(ListeaDimens.CardPadding),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    webhookTimestampLabel(record.at),
-                    style = MaterialTheme.typography.titleSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                StatusLine(
-                    listOfNotNull(
-                        // Named first, because it is the one fact a reader cannot infer: a round
-                        // that split has a row per method, and two rows a second apart otherwise
-                        // look like the same thing said twice.
-                        ExportKind.fromKey(record.kind)?.label,
-                        webhookEventLabel(record.event),
-                        record.listTitle.ifEmpty { null },
-                        countOfItems(record.itemCount)
-                    ).joinToString(" · ")
-                )
-                StatusLine(record.detail, tone = recordTone(record.outcome))
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(ListeaDimens.CompactGap)
+                ) {
+                    Text(
+                        webhookTimestampLabel(round.at),
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    StatusLine(
+                        listOfNotNull(
+                            webhookEventLabel(round.event),
+                            round.listTitle.ifEmpty { null },
+                            countOfExports(round.exportCount)
+                        ).joinToString(" · ")
+                    )
+                    StatusLine(round.outcome.label, tone = roundTone(round.outcome))
+                }
+                TextButton(onClick = { expanded = !expanded }) {
+                    Text(if (expanded) "Hide" else "Show", maxLines = 1)
+                }
             }
-            TextButton(onClick = onDelete) { Text("Delete", maxLines = 1) }
-            if (canResend) TextButton(onClick = onResend) { Text("Resend", maxLines = 1) }
+
+            if (expanded) {
+                round.records.forEachIndexed { index, record ->
+                    if (index > 0) HorizontalDivider()
+                    ExportRecordRow(
+                        record = record,
+                        onOpen = { onOpen(record.id) },
+                        onDelete = { onDelete(record.id) },
+                        onResend = { onResend(record.id) }
+                    )
+                }
+            }
         }
     }
 }
 
 /**
- * How loudly a record's own line reads.
+ * One export inside a round: which method carried it, to which address, how much, and what became
+ * of it.
  *
- * A delivery that went out is a success and says so; one that failed is a warning. Everything
- * else — switched off, declined — is neither: nothing went wrong, the user or the configuration
- * simply meant it not to go, and colouring that like a failure would make an ordinary choice look
- * like a problem. An outcome from some future version reads neutrally rather than alarmingly.
+ * Delete is immediate: what it removes is a record of something that already happened, not anything
+ * the user made, and needing two taps each to clear a run of them would make the page tiring in
+ * exactly the situation that produces a run. Resend is offered on a successful record too — sending
+ * the same round twice is a thing people legitimately want, and the alternative is a button that
+ * disappears exactly when the payload is known-good.
+ *
+ * *Resend* means *post this again*, which only says anything about a kind whose delivery is a POST.
+ * A written text file has no receiver to send it back to, and an unreadable kind is not one to guess
+ * a mechanism for, so both hide it.
+ */
+@Composable
+private fun ExportRecordRow(
+    record: ExportRecordSummary,
+    onOpen: () -> Unit,
+    onDelete: () -> Unit,
+    onResend: () -> Unit
+) {
+    val kind = ExportKind.fromKey(record.kind)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(ListeaDimens.CardPadding),
+        verticalArrangement = Arrangement.spacedBy(ListeaDimens.CompactGap)
+    ) {
+        StatusLine(
+            listOfNotNull(
+                kind?.label ?: "Unknown export",
+                countOfItems(record.itemCount),
+                recordAddressLabel(record)
+            ).joinToString(" · ")
+        )
+        StatusLine(record.detail, tone = recordTone(record.outcome))
+        Row(horizontalArrangement = Arrangement.spacedBy(ListeaDimens.CompactGap)) {
+            TextButton(onClick = onOpen) { Text("Open payload", maxLines = 1) }
+            if (kind == ExportKind.WEBHOOK) {
+                TextButton(onClick = onResend) { Text("Resend", maxLines = 1) }
+            }
+            TextButton(onClick = onDelete) { Text("Delete", maxLines = 1) }
+        }
+    }
+}
+
+/**
+ * Asks where this one replayed body should go, prefilled with where it went before.
+ *
+ * The prefill is the record's stored address; a row written before addresses were recorded has
+ * none, so the live default stands in and the helper says the original was not recorded. Whatever
+ * the user types is used for this attempt only — the ViewModel writes the outcome, never the
+ * address — and the helper says that too, so an edited address does not read like a correction of
+ * the record.
+ */
+@Composable
+private fun ResendDialog(
+    record: ExportRecordSummary,
+    defaultUrl: String,
+    onDismiss: () -> Unit,
+    onResend: (String) -> Unit
+) {
+    val recorded = record.webhookUrl.trim()
+    val prefill = recorded.ifEmpty { defaultUrl.trim() }
+    var url by rememberSaveable(record.id) { mutableStateOf(prefill) }
+    val problem = webhookUrlError(url)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Resend export") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(ListeaDimens.CompactGap)) {
+                Text(
+                    "Posts the kept body again, exactly as it was.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = { url = it },
+                    label = { Text("Webhook address") },
+                    singleLine = true,
+                    isError = problem != null,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    when {
+                        recorded.isEmpty() ->
+                            "The original address was not recorded, so this is the current default."
+                        url.trim() != prefill ->
+                            "Used for this attempt only; the record keeps the address it first used."
+                        else -> "The address this export used."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (problem != null) {
+                    Text(
+                        problem,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = problem == null,
+                onClick = { onResend(url.trim()) }
+            ) { Text("Resend") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
+}
+
+/**
+ * Where a webhook row was posted, for a child line. Null for a text export, which has no address;
+ * *address not recorded* for a row written before v0.6.2 kept one. The full URL is not shown, for
+ * the same reason Settings shows a host: a page of addresses is not a page anyone reads.
+ */
+private fun recordAddressLabel(record: ExportRecordSummary): String? {
+    if (ExportKind.fromKey(record.kind) != ExportKind.WEBHOOK) return null
+    val stored = record.webhookUrl.trim()
+    if (stored.isEmpty()) return "address not recorded"
+    return webhookHost(stored) ?: "address not readable"
+}
+
+/**
+ * How loudly a round's aggregate reads. Delivered is a success; a partial round and a failed one
+ * are warnings; nothing attempted — declined, deferred, switched off, empty — is neutral. Nothing
+ * went wrong in those cases: the user or the configuration meant it not to go, and colouring that
+ * like a failure would make an ordinary choice look like a problem. An outcome this build cannot
+ * name reads neutrally too.
+ */
+private fun roundTone(outcome: RoundOutcome): StatusTone = when (outcome) {
+    RoundOutcome.Delivered -> StatusTone.Positive
+    RoundOutcome.Partial, RoundOutcome.Failed -> StatusTone.Warning
+    RoundOutcome.NotSent, RoundOutcome.Unknown -> StatusTone.Neutral
+}
+
+/**
+ * How loudly a row's own line reads.
+ *
+ * Written counts as success for the same reason SENT does: the round left the app. The two are
+ * separate outcomes because a POST has a code and a file has a name, not because one of them went
+ * less well than the other. Everything else — switched off, declined — is neither.
  */
 private fun recordTone(outcome: String): StatusTone = when (outcome) {
-    // Written counts as success for the same reason SENT does: the round left the app. The two
-    // are separate outcomes because a POST has a code and a file has a name, not because one of
-    // them went less well than the other.
     NoticeOutcome.SENT.name, NoticeOutcome.WRITTEN.name -> StatusTone.Positive
     NoticeOutcome.FAILED.name -> StatusTone.Warning
     else -> StatusTone.Neutral
@@ -276,5 +424,11 @@ private val PayloadMaxHeight = 420.dp
 private fun prettyJson(payload: String): String =
     runCatching { JSONObject(payload).toString(2) }.getOrDefault(payload)
 
-private fun countOfRecords(count: Int): String =
-    "$count record" + if (count == 1) "" else "s"
+/** "N exports · R rounds" when a round can hold more than one; just the exports otherwise. */
+internal fun historyCountLabel(exports: Int, rounds: Int): String =
+    buildList {
+        add(countOfExports(exports))
+        if (rounds != exports) add("$rounds round" + if (rounds == 1) "" else "s")
+    }.joinToString(" · ")
+
+private fun countOfExports(count: Int): String = "$count export" + if (count == 1) "" else "s"

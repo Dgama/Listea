@@ -40,7 +40,27 @@ import com.example.listea.domain.Templates
 data class AppSettings(
     val folderQuickReviewEnabled: Boolean = true,
 
+    /**
+     * Whether configuration dialogs preselect *use default* as the address source.
+     *
+     * **Not a delivery switch.** Until v0.6.2 this gated every post globally; a Todo holds its own
+     * address now, and delivery happens because an export was configured, not because this is on.
+     * The value only decides which answer a new Todo's or List's address question opens on.
+     *
+     * The upgrade's one-time bootstrap reads it in its old sense — *was this install posting
+     * through the default?* — to decide whether existing Todos should keep posting. See
+     * `ListsDao.applyWebhookAddressBootstrap`.
+     */
     val defaultWebhookEnabled: Boolean = false,
+
+    /**
+     * The address a Todo may copy when it is configured with *use default*.
+     *
+     * A value, not the only destination. Each Todo stores the address it was given, so editing
+     * this reaches nothing that already exists — the copy is taken at the moment the user confirms
+     * the address. Tasks that no Todo owns have no stored address and fall back to this live value
+     * at delivery time.
+     */
     val defaultWebhookUrl: String = "",
 
     val videoAutoplay: Boolean = true,

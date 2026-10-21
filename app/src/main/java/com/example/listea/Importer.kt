@@ -77,6 +77,70 @@ data class ImportOptions(
     val templates: List<TemplateVersionRef> = emptyList(),
 
     /**
+     * Whether this run adopts the offered version of every template the Todo already holds.
+     *
+     * **True for Refresh Import, false everywhere else.** Create always submits references the
+     * picker drew from the current versions, so there is nothing to move; a follow-the-upstream
+     * sync has no dialog and must not move a template on its own, exactly as it must not re-decide
+     * the export choice. A refresh is the one run where the user is told *this will attach version
+     * N* and then confirms it — see [upgradeAttachments].
+     *
+     * The upgrade happens in `applyImport`, over the list the dialog submitted, so unticking a row
+     * before confirming is a refusal that is honoured rather than a notice that outvoted it.
+     */
+    val upgradeTemplates: Boolean = false,
+
+    /**
+     * Whether this run leaves the Todo following its upstream: scanning it on entry and importing
+     * what appeared, without asking.
+     *
+     * Asked in the Create Tasks dialog as of v0.6.2, because it is a standing answer about the Todo
+     * that outlives this run — and a new Todo should not have to be created and then found on
+     * another screen to be given the answer the dialog was already showing. Create seeds it from
+     * Settings; Refresh seeds it from the Todo; a sync passes what the Todo already holds.
+     */
+    val followUpstream: Boolean = false,
+
+    /**
+     * Whether deleting the Todo keeps its Tasks and their decisions instead of letting them go.
+     *
+     * The same standing-answer shape as [followUpstream]. There is no Settings default for it: a
+     * new Todo starts with the answer every Todo had before the switch existed, and the dialog is
+     * where a user who wants otherwise says so once.
+     */
+    val keepStateOnDelete: Boolean = false,
+
+    /**
+     * The webhook address this run writes to the Todo, already resolved from the dialog's choice.
+     *
+     * *Use default* resolves to the live default at the moment Confirm is pressed, so the row gets
+     * a copy rather than a promise to follow Settings later; *Custom* resolves to what was typed.
+     * A refresh may also keep the address the Todo already has. The value is final here, which is
+     * what lets [ListsViewModel.applyImport] validate it before registering anything.
+     */
+    val webhookUrl: String = "",
+
+    /**
+     * Whether [webhookUrl] is a copy of the default rather than typed.
+     *
+     * Recorded because the two mean different things to a later reader: *this Todo posts to the
+     * address it was born with* versus *this Todo was given that address on purpose*. It does not
+     * make the row follow later edits to the default — nothing does; the copy is a snapshot.
+     */
+    val webhookFromDefault: Boolean = false,
+
+    /**
+     * Whether the address is a decision this run is making, and may therefore refuse on.
+     *
+     * True for Create and Refresh, whose dialog asked and whose answer is about to be written.
+     * **False for an upstream sync**: it asked nobody, changed no address, and must not refuse to
+     * bring in material because the Todo's standing configuration would fail an export later. A
+     * sync that did so would turn an export problem into an import outage, which is a different
+     * subject from the run and a worse answer than letting the delivery path report it.
+     */
+    val validateWebhookAddress: Boolean = true,
+
+    /**
      * How this Todo's decisions leave the app, chosen here and written back to the row.
      *
      * Defaults to [ExportChoice.Nothing] — *nothing was chosen, so nothing is sent* — and that is

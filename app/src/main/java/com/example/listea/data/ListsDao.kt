@@ -218,7 +218,7 @@ abstract class ListsDao {
     @Query(
         """
         SELECT ti.taskId AS taskId, s.id AS sourceId, s.displayName AS sourceName,
-               s.exportKind AS exportKind
+               s.exportKind AS exportKind, s.webhookUrl AS webhookUrl
         FROM task_imports ti
         JOIN sources s ON s.id = ti.sourceId
         WHERE ti.taskId IN (:taskIds)
@@ -1326,12 +1326,26 @@ abstract class ListsDao {
 
     @Query(
         """
-        SELECT id, event, listTitle, itemCount, at, outcome, detail, kind
+        SELECT id, event, listTitle, itemCount, at, outcome, detail, kind, webhookUrl, roundId
         FROM webhook_history
         ORDER BY at DESC, id DESC
         """
     )
     abstract fun observeWebhookHistory(): Flow<List<ExportRecordSummary>>
+
+    /**
+     * How many rounds the history holds.
+     *
+     * Rows written before v0.6.2 have no round id and were each a round of one, so an empty id is
+     * counted under a key derived from the row rather than all blanks collapsing into one round.
+     */
+    @Query(
+        """
+        SELECT COUNT(DISTINCT CASE WHEN roundId = '' THEN 'row:' || id ELSE roundId END)
+        FROM webhook_history
+        """
+    )
+    abstract fun observeWebhookRoundCount(): Flow<Int>
 
     /** Everything ever recorded, for the Settings line that says how big the history is. */
     @Query("SELECT COUNT(*) FROM webhook_history")
@@ -1378,6 +1392,15 @@ abstract class ListsDao {
     /** The List's own kind, or `inherit`/`none`. Encoded by `domain/Exports.kt`. */
     @Query("UPDATE lists SET exportKind = :kind WHERE id = :id")
     abstract suspend fun setListExportKind(id: Long, kind: String)
+
+    /**
+     * The List's optional address override. Empty means follow each Todo's own address.
+     *
+     * Written only after the caller has validated a non-empty value, so what sits here is either
+     * an address `webhookUrlError` accepts or the empty string that means *no override*.
+     */
+    @Query("UPDATE lists SET webhookUrl = :url WHERE id = :id")
+    abstract suspend fun setListWebhookUrl(id: Long, url: String)
 
     @Query(
         """
@@ -2364,6 +2387,9 @@ abstract class ListsDao {
                s.contentPolicy AS contentPolicy,
                s.followUpstream AS followUpstream,
                s.keepStateOnDelete AS keepStateOnDelete,
+               s.exportKind AS exportKind,
+               s.webhookUrl AS webhookUrl,
+               s.webhookFromDefault AS webhookFromDefault,
                s.lastImportAt AS lastImportAt,
                s.lastImportStatus AS lastImportStatus,
                s.assetControls AS assetControls,
@@ -2389,6 +2415,9 @@ abstract class ListsDao {
                s.contentPolicy AS contentPolicy,
                s.followUpstream AS followUpstream,
                s.keepStateOnDelete AS keepStateOnDelete,
+               s.exportKind AS exportKind,
+               s.webhookUrl AS webhookUrl,
+               s.webhookFromDefault AS webhookFromDefault,
                s.lastImportAt AS lastImportAt,
                s.lastImportStatus AS lastImportStatus,
                s.assetControls AS assetControls,
@@ -2464,7 +2493,10 @@ abstract class ListsDao {
         followUpstream: Boolean = false,
         now: Long,
         assetControls: String = "",
-        exportKind: String = EXPORT_CHOICE_NONE
+        exportKind: String = EXPORT_CHOICE_NONE,
+        keepStateOnDelete: Boolean = false,
+        webhookUrl: String = "",
+        webhookFromDefault: Boolean = false
     ): SourceEntity {
         val source = SourceEntity(
             id = UUID.randomUUID().toString(),
@@ -2477,8 +2509,11 @@ abstract class ListsDao {
             keepTree = normalizeKeepTree(importerKind, keepTree),
             contentPolicy = contentPolicy.key,
             followUpstream = followUpstream,
+            keepStateOnDelete = keepStateOnDelete,
             assetControls = assetControls,
-            exportKind = exportKind
+            exportKind = exportKind,
+            webhookUrl = webhookUrl,
+            webhookFromDefault = webhookFromDefault
         )
         insertSource(source)
         return source
@@ -2504,10 +2539,10 @@ abstract class ListsDao {
      * It is a write even when the answer did not change, because the two are the same statement and
      * a conditional write would be a second rule about when this one applies.
      *
-     * `followUpstream` is deliberately **not** here. It is the one policy that acts without being
-     * asked at the moment it acts, and the dialog that carries this call has no control for it —
-     * [setFollowUpstream] on the Todo's own card is its only writer, and a run that quietly reset a
-     * switch it was never shown would be the app answering a question nobody asked it.
+     * `followUpstream` is here because the run's dialog carries it as of v0.6.2. The policy still
+     * has [setFollowUpstream] on the Todo's own card as its everyday writer; this call writes the
+     * answer the dialog showed, and a caller that never showed the switch passes the value it read
+     * rather than a default, so a run cannot quietly reset it.
      *
      * [assetControls] is the **encoded attachment list**, not a decoded value: the templates the
      * dialog attached, in the order it attached them, written as the same string the resolver reads.
@@ -2523,7 +2558,11 @@ abstract class ListsDao {
         keepTree: Boolean,
         contentPolicy: ContentPolicy = ContentPolicy.Default,
         assetControls: String = "",
-        exportKind: String = EXPORT_CHOICE_NONE
+        exportKind: String = EXPORT_CHOICE_NONE,
+        followUpstream: Boolean = false,
+        keepStateOnDelete: Boolean = false,
+        webhookUrl: String = "",
+        webhookFromDefault: Boolean = false
     ) = setSourceConfig(
         id,
         displayName,
@@ -2531,7 +2570,11 @@ abstract class ListsDao {
         normalizeKeepTree(importerKind, keepTree),
         contentPolicy.key,
         assetControls,
-        exportKind
+        exportKind,
+        followUpstream,
+        keepStateOnDelete,
+        webhookUrl,
+        webhookFromDefault
     )
 
     /**
@@ -2546,6 +2589,55 @@ abstract class ListsDao {
 
     @Query("UPDATE sources SET followUpstream = :follow WHERE id = :id")
     abstract suspend fun setFollowUpstream(id: String, follow: Boolean)
+
+    /**
+     * The address a Todo posts to, and whether it was copied from Settings' default or typed.
+     *
+     * One statement for the pair because they are one answer — a URL with no provenance, or
+     * provenance whose URL was replaced separately, is a state the dialog would have to guess at.
+     * Callers validate a non-empty value before writing; empty is the legitimate *not set*.
+     */
+    @Query("UPDATE sources SET webhookUrl = :url, webhookFromDefault = :fromDefault WHERE id = :id")
+    abstract suspend fun setSourceWebhookAddress(id: String, url: String, fromDefault: Boolean)
+
+    /**
+     * The one-time move of the old global webhook configuration onto the Todos that relied on it.
+     *
+     * Returns whether the marker was still there, which is the only thing that makes this a
+     * backfill: **an absent marker means the work is done, and this returns without writing**. A
+     * second start must not re-copy a default the user has since edited, so the marker is checked
+     * and consumed in the same transaction as the update.
+     *
+     * [gateWasOn] is `defaultWebhookEnabled` as the upgrade found it. On means every existing Todo
+     * was posting through that gate and must keep posting; off means the install had delivery
+     * switched off, and copying the default would start work the user had disabled. In that case
+     * the addresses are written empty on purpose, and the marker is still consumed — the decision
+     * has been made, and a later default edit is not a reason to revisit it.
+     *
+     * [url] is trimmed here rather than by the caller, so a default saved with stray whitespace
+     * cannot become the stored value of every Todo.
+     */
+    @Transaction
+    open suspend fun applyWebhookAddressBootstrap(
+        name: String,
+        url: String,
+        gateWasOn: Boolean
+    ): Boolean {
+        if (schemaBackfillCount(name) == 0) return false
+        val address = if (gateWasOn) url.trim() else ""
+        setAllSourceWebhookAddresses(address, fromDefault = address.isNotEmpty())
+        clearSchemaBackfill(name)
+        return true
+    }
+
+    @Query("SELECT COUNT(*) FROM schema_backfills WHERE name = :name")
+    protected abstract suspend fun schemaBackfillCount(name: String): Int
+
+    @Query("DELETE FROM schema_backfills WHERE name = :name")
+    protected abstract suspend fun clearSchemaBackfill(name: String)
+
+    @Query("UPDATE sources SET webhookUrl = :url, webhookFromDefault = :fromDefault")
+    protected abstract suspend fun setAllSourceWebhookAddresses(url: String, fromDefault: Boolean)
 
     /**
      * Every Source whose import root covers [relativePath], nearest first.
@@ -2907,7 +2999,9 @@ abstract class ListsDao {
     @Query(
         "UPDATE sources SET displayName = :displayName, importerKind = :importerKind, " +
             "keepTree = :keepTree, contentPolicy = :contentPolicy, " +
-            "assetControls = :assetControls, exportKind = :exportKind WHERE id = :id"
+            "assetControls = :assetControls, exportKind = :exportKind, " +
+            "followUpstream = :followUpstream, keepStateOnDelete = :keepStateOnDelete, " +
+            "webhookUrl = :webhookUrl, webhookFromDefault = :webhookFromDefault WHERE id = :id"
     )
     protected abstract suspend fun setSourceConfig(
         id: String,
@@ -2916,7 +3010,11 @@ abstract class ListsDao {
         keepTree: Boolean,
         contentPolicy: String,
         assetControls: String,
-        exportKind: String
+        exportKind: String,
+        followUpstream: Boolean,
+        keepStateOnDelete: Boolean,
+        webhookUrl: String,
+        webhookFromDefault: Boolean
     )
 
     /**

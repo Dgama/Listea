@@ -28,6 +28,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Refresh
@@ -130,19 +132,17 @@ fun ListeaApp(
         mutableStateOf<QuickReviewTarget?>(null)
     }
     var viewingFileUri by rememberSaveable { mutableStateOf<String?>(null) }
-    var webhookHistoryOpen by rememberSaveable { mutableStateOf(false) }
-    // The template manager, which is two screens deep: the list, and the one template opened out of
-    // it. Both are held here for the same reason a list's id is — the shell has to know a nested
-    // destination is open, and a restored screen has to come back where it was. The id is a
-    // primitive and not the row, so the detail page re-reads what it edits rather than showing a
-    // snapshot a version written since would have contradicted.
-    var templatesOpen by rememberSaveable { mutableStateOf(false) }
-    var openTemplateId by rememberSaveable { mutableStateOf<String?>(null) }
-    // The export manager, held the same way and for the same reasons: two levels, the list of
-    // methods and the one opened out of it, and the opened one held as a primitive word rather
-    // than as the enum so a restored screen comes back where it was.
-    var exportsOpen by rememberSaveable { mutableStateOf(false) }
-    var openExportKey by rememberSaveable { mutableStateOf<String?>(null) }
+
+    // Which page of Settings is up, as one saveable route string. It replaces five booleans and ids
+    // that could describe only part of the tree and could disagree about which page was open; a
+    // single word also lets the chrome rule below be one comparison instead of a growing `||`, and
+    // a native "share" or a settings deep link would land here the same way a tab does.
+    var settingsRoute by rememberSaveable { mutableStateOf(SettingsRoute.Index) }
+
+    // The one-time v27 address snapshot. Started here rather than in the ViewModel's constructor so
+    // a test can build one against a database it arranged without the backfill writing to it; the
+    // delivery paths await the same call, so a send cannot race it.
+    LaunchedEffect(Unit) { listsViewModel.ensureWebhookAddressBackfill() }
 
     // The Source whose catalog is open. Held as saveable primitives rather than the SourceSummary
     // itself: the summary is a read of a row that an import can change, and a restored screen
@@ -260,9 +260,14 @@ fun ListeaApp(
     // changed underneath while `openUpstream` stayed set, so returning to Upstreams landed in the
     // folder again with no list above it. Folding the browser in here takes the chrome away and
     // hands Back to the browser, which is where "up one folder, then out" now lives.
+    // Settings counts only while it is the destination showing: the route is deliberately kept
+    // across a tab switch so the user comes back where they were, and a page held by Settings must
+    // not take the chrome off somebody else's tab.
+    val settingsNested = destination == TopLevelDestination.Settings &&
+        settingsRoute != SettingsRoute.Index
     val nested = openListId != null || reviewListId != null ||
-        quickReview != null || viewingFileUri != null || webhookHistoryOpen ||
-        templatesOpen || catalogSourceId != null || previewTaskId != null ||
+        quickReview != null || viewingFileUri != null || settingsNested ||
+        catalogSourceId != null || previewTaskId != null ||
         openUpstream != null
 
     // Every grant the app still holds a persisted permission for, which is what "available" means
@@ -476,27 +481,8 @@ fun ListeaApp(
                 TopLevelDestination.Settings -> SettingsScreen(
                     modifier = contentModifier,
                     viewModel = listsViewModel,
-                    historyOpen = webhookHistoryOpen,
-                    onHistoryOpenChange = { webhookHistoryOpen = it },
-                    templatesOpen = templatesOpen,
-                    // Opening the manager always lands on the list, never on whatever template was
-                    // open when the user last left: the id is restored state, and a restored state
-                    // that skipped the list would put somebody two screens from the tab they tapped.
-                    onTemplatesOpenChange = { open ->
-                        templatesOpen = open
-                        if (open) openTemplateId = null
-                    },
-                    openTemplateId = openTemplateId,
-                    onOpenTemplateChange = { openTemplateId = it },
-                    exportsOpen = exportsOpen,
-                    // Same rule as the template manager: opening it lands on the list, never on
-                    // whatever method was open when the user last left.
-                    onExportsOpenChange = { open ->
-                        exportsOpen = open
-                        if (open) openExportKey = null
-                    },
-                    openExportKind = openExportKey?.let { ExportKind.fromKey(it) },
-                    onOpenExportKindChange = { openExportKey = it?.key }
+                    route = settingsRoute,
+                    onRoute = { settingsRoute = it }
                 )
             }
         }
@@ -1429,6 +1415,10 @@ fun FolderScreen(
 @Composable
 private fun ImportFolderDialogs(viewModel: ListsViewModel) {
     val request by viewModel.importFolderRequest.collectAsStateWithLifecycle()
+    // The live default, read here rather than inside the dialog so the dialog has one value to
+    // draw and no subscription of its own: *Use default* is resolved at Confirm, and what it copies
+    // is whatever Settings says at that moment.
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
 
     when (val current = request) {
         null -> Unit
@@ -1448,6 +1438,7 @@ private fun ImportFolderDialogs(viewModel: ListsViewModel) {
 
         is ImportFolderRequest.Confirm -> ImportConfirmDialog(
             request = current,
+            defaultWebhookUrl = settings.defaultWebhookUrl,
             onConfirm = { options, recoverFrom ->
                 viewModel.confirmImportFolder(options, recoverFrom)
             },
@@ -1502,6 +1493,7 @@ private fun ImportFolderDialogs(viewModel: ListsViewModel) {
 @Composable
 private fun ImportConfirmDialog(
     request: ImportFolderRequest.Confirm,
+    defaultWebhookUrl: String,
     onConfirm: (ImportOptions, DissolvedHistory?) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -1521,9 +1513,42 @@ private fun ImportConfirmDialog(
     var exportWord by rememberSaveable(runKey) {
         mutableStateOf(encodeExportChoice(seed.exportChoice))
     }
+    // The two standing answers this dialog writes back to the Todo. They are drafted here rather
+    // than read live from the row so a refresh can change them in the same gesture as everything
+    // else; a sync never reaches this dialog and keeps whatever the row holds.
+    var followUpstream by rememberSaveable(runKey) { mutableStateOf(seed.followUpstream) }
+    var keepStateOnDelete by rememberSaveable(runKey) { mutableStateOf(seed.keepStateOnDelete) }
     // Null is "start fresh" and is the seeded answer, so a user who does not read this far gets the
     // Todo they would have got before histories existed.
     var recoverFrom by rememberSaveable(runKey) { mutableStateOf<String?>(null) }
+
+    // The address draft, held as one of three words for the same bundle-shaped reason as the export
+    // word above. Refresh opens on *keep* because the Todo already has an answer; Create opens on
+    // whichever radio Settings preselected.
+    var addressMode by rememberSaveable(runKey) {
+        mutableStateOf(
+            when {
+                request.refresh -> ADDRESS_KEEP
+                seed.webhookFromDefault -> ADDRESS_DEFAULT
+                else -> ADDRESS_CUSTOM
+            }
+        )
+    }
+    // The custom field starts on whatever the Todo holds, so a refresh that moves to *Custom* edits
+    // the current address rather than retyping it, and a Create with the default radio off starts
+    // blank — there is no address yet to show.
+    var customUrl by rememberSaveable(runKey) {
+        mutableStateOf(if (request.refresh || !seed.webhookFromDefault) seed.webhookUrl else "")
+    }
+
+    // One section is open at a time by default: Grouping and Review are the two a first run must
+    // read, and the rest carry a summary line until asked. Every toggle survives rotation for the
+    // same reason every draft does — a half-read dialog must come back as it was left.
+    var groupingOpen by rememberSaveable(runKey) { mutableStateOf(true) }
+    var reviewOpen by rememberSaveable(runKey) { mutableStateOf(true) }
+    var syncOpen by rememberSaveable(runKey) { mutableStateOf(false) }
+    var othersOpen by rememberSaveable(runKey) { mutableStateOf(false) }
+    var historyOpen by rememberSaveable(runKey) { mutableStateOf(false) }
 
     // The attachment draft, held *encoded* rather than as a list of objects, and that is not a
     // workaround for `rememberSaveable` — it is the identical value the run will be given and the
@@ -1560,14 +1585,81 @@ private fun ImportConfirmDialog(
     // what it says points at the page that can do it today.
     var newTemplateTapped by rememberSaveable(runKey) { mutableStateOf(false) }
 
+    val method = decodeExportChoice(exportWord, inheritable = false)
+    val address = when (addressMode) {
+        ADDRESS_KEEP -> seed.webhookUrl.trim()
+        ADDRESS_DEFAULT -> defaultWebhookUrl.trim()
+        else -> customUrl.trim()
+    }
+    val addressFromDefault = when (addressMode) {
+        ADDRESS_KEEP -> seed.webhookFromDefault
+        ADDRESS_DEFAULT -> true
+        else -> false
+    }
+    // Only a webhook method can refuse on the address: a Todo that writes txt or sends nothing has
+    // no destination to be wrong, and the address is a standing answer it may carry unspent.
+    val addressProblem = if (method == ExportChoice.By(ExportKind.WEBHOOK)) {
+        webhookAddressProblem(ExportKind.WEBHOOK, address)
+    } else {
+        null
+    }
+    val versionNotice = if (request.refresh) {
+        refreshVersionNotice(attached, request.templates)
+    } else {
+        null
+    }
+    // Resolved here rather than in the ViewModel, because the id is what survives a configuration
+    // change and the object is what the report needs. The selection cannot go stale: the histories
+    // are re-read from the same flow that opened this dialog, and a history is never consumed.
+    val selectedHistory = request.histories.firstOrNull { it.sourceId == recoverFrom }
+
+    /**
+     * Confirm, or open the section that is holding it back.
+     *
+     * The two gates used to be expressed as a disabled button. They are still gates — nothing is
+     * submitted with no template, or with a webhook method and no usable address — but a disabled
+     * button cannot say *why*, and its reason may live in a section the user folded shut. So the
+     * button presses, the offending section opens, and the error is on screen beside the control
+     * that can fix it.
+     */
+    fun confirm() {
+        if (attached.isEmpty()) {
+            reviewOpen = true
+            return
+        }
+        if (addressProblem != null) {
+            syncOpen = true
+            return
+        }
+        onConfirm(
+            ImportOptions(
+                importer = importer,
+                displayName = name,
+                keepTree = keepTree,
+                contentPolicy = policy,
+                templates = attached,
+                // Carried from the run the dialog was opened for: a refresh adopts the offered
+                // version of what it still holds; Create has already picked current versions and
+                // must not "upgrade" anything.
+                upgradeTemplates = seed.upgradeTemplates,
+                followUpstream = followUpstream,
+                keepStateOnDelete = keepStateOnDelete,
+                webhookUrl = address,
+                webhookFromDefault = addressFromDefault,
+                exportChoice = method
+            ),
+            selectedHistory
+        )
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (request.refresh) "Refresh import?" else "Create tasks?") },
         text = {
-            // Scrollable, and it has to be: the histories section makes this the tallest dialog in
-            // the app, and an `AlertDialog` gives its text slot a bounded height. A plain `Column`
-            // that overflows is not scrolled and not clipped — its children are *squeezed*, so the
-            // last rows collapse to nothing and the picker offers an option with no words on it.
+            // Scrollable, and it has to be: five sections make this the tallest dialog in the app,
+            // and an `AlertDialog` gives its text slot a bounded height. A plain `Column` that
+            // overflows is not scrolled and not clipped — its children are *squeezed*, so the last
+            // rows collapse to nothing and the picker offers an option with no words on it.
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 // Scope first, folder second: what is about to be read is the number the user is
                 // deciding on, and the folder names the thing it is being read out of. It also
@@ -1594,8 +1686,11 @@ private fun ImportConfirmDialog(
                 }
                 Spacer(Modifier.height(ListeaDimens.RowGap))
                 if (request.refresh) {
-                    // Nothing to choose: the sentence above already names what is being re-read,
-                    // and the line below is the whole of what a refresh can change (nothing).
+                    // A refresh cannot change what the Source *is*: its name and its grouping are
+                    // the row's identity, and changing them here would describe a different Source
+                    // wearing this one's row. Everything that is a standing answer about what the
+                    // Todo does — its policy, its method, its address, its follow-upstream — is
+                    // still editable below, because those are what a refresh re-stamps.
                     Text(
                         "Re-importing under " + importer.key + ", the grouping this Source already " +
                             "has. Nothing is deleted; folders that lost files are flagged.",
@@ -1611,24 +1706,32 @@ private fun ImportConfirmDialog(
                         modifier = Modifier.fillMaxWidth()
                     )
                     Spacer(Modifier.height(ListeaDimens.RowGap))
-                    Text(
-                        "Grouping decides what a Task is. Nothing is written until you create them.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    ImportImporterChoice(
-                        selected = importer,
-                        onSelect = {
-                            importer = it
-                            // The box disappears for folder-as-Task, so it must not stay ticked
-                            // behind it: the stored value goes through normalizeKeepTree either way,
-                            // and this keeps what the user saw when they pressed Create the same as
-                            // what the Source ends up with.
-                            if (it == ImporterKind.FOLDER_AS_TASK) keepTree = false
+                    ImportSection(
+                        title = "Grouping",
+                        summary = groupingSummary(importer, keepTree),
+                        expanded = groupingOpen,
+                        onToggle = { groupingOpen = !groupingOpen }
+                    ) {
+                        ImportImporterChoice(
+                            selected = importer,
+                            onSelect = {
+                                importer = it
+                                // The box disappears for folder-as-Task, so it must not stay ticked
+                                // behind it: the stored value goes through normalizeKeepTree either
+                                // way, and this keeps what the user saw when they pressed Create the
+                                // same as what the Source ends up with.
+                                if (it == ImporterKind.FOLDER_AS_TASK) keepTree = false
+                            }
+                        )
+                        // Nested directly under *One Task per file*, because it is the one
+                        // importer with a tree to keep: folder-as-Task's Tasks are one per folder
+                        // and its catalog is flat whatever this would say.
+                        if (importer == ImporterKind.FILE_AS_TASK) {
+                            ImportKeepTreeChoice(
+                                keepTree = keepTree,
+                                onToggle = { keepTree = !keepTree }
+                            )
                         }
-                    )
-                    if (importer == ImporterKind.FILE_AS_TASK) {
-                        ImportKeepTreeChoice(keepTree = keepTree, onToggle = { keepTree = !keepTree })
                     }
                 }
                 // Drawn for a refresh as well, and it is the one control here that is. The rule
@@ -1637,84 +1740,292 @@ private fun ImportConfirmDialog(
                 // wearing this one's row. What happens when a Task's content changes is not that;
                 // it is a statement about re-importing, which is precisely what a refresh does, and
                 // it is written back so the answer stands for the next run too.
-                Spacer(Modifier.height(ListeaDimens.RowGap))
-                ContentPolicyChoice(
-                    selected = policy,
-                    onSelect = { policy = it }
-                )
-                // Drawn for a refresh too, and seeded from the Todo's own stored answer there —
-                // see [ListsViewModel.requestSourceRefresh]. A refresh is exactly the run that
-                // re-stamps a Todo, so it is the one place a wrong write would be invisible.
-                Spacer(Modifier.height(ListeaDimens.RowGap))
-                ExportChoiceRow(
-                    selected = decodeExportChoice(exportWord, inheritable = false),
-                    onSelect = { exportWord = encodeExportChoice(it) }
-                )
-                // Drawn for a refresh too, and for the same reason the tier above is: a template is
-                // not a fact about the Source, it is what this run is to be given, and a refresh is
-                // exactly the run that re-stamps every Task it touches.
-                //
-                // It used to draw one tag editor per kind the folder held. It attaches whole
-                // templates now, which is the change v0.5.4 makes: a button's name and its wire value
-                // are edited on the template's own page, and what a run chooses is *which* template
-                // governs its files. So the step is the same one whatever the folder holds — a
-                // folder of PDFs is still offered the templates, and attaching one is how a user
-                // says so; whether any of them admits a PDF is the resolver's answer to give, not
-                // this dialog's to pre-empt.
-                Spacer(Modifier.height(ListeaDimens.RowGap))
-                ImportTemplateAttach(
-                    choices = request.templates,
-                    attached = attached,
-                    newTemplateTapped = newTemplateTapped,
-                    onToggle = ::setAttached,
-                    onNewTemplate = { newTemplateTapped = true }
-                )
+                ImportSection(
+                    title = "Review",
+                    summary = reviewSummary(policy, attached.size),
+                    expanded = reviewOpen,
+                    onToggle = { reviewOpen = !reviewOpen }
+                ) {
+                    ContentPolicyChoice(
+                        selected = policy,
+                        onSelect = { policy = it }
+                    )
+                    // Drawn for a refresh too, and for the same reason the policy above is: a
+                    // template is not a fact about the Source, it is what this run is to be given,
+                    // and a refresh is exactly the run that re-stamps every Task it touches.
+                    //
+                    // It used to draw one tag editor per kind the folder held. It attaches whole
+                    // templates now, which is the change v0.5.4 makes: a button's name and its wire
+                    // value are edited on the template's own page, and what a run chooses is *which*
+                    // template governs its files. So the step is the same one whatever the folder
+                    // holds — a folder of PDFs is still offered the templates, and attaching one is
+                    // how a user says so; whether any of them admits a PDF is the resolver's answer
+                    // to give, not this dialog's to pre-empt.
+                    Spacer(Modifier.height(ListeaDimens.RowGap))
+                    ImportTemplateAttach(
+                        choices = request.templates,
+                        attached = attached,
+                        newTemplateTapped = newTemplateTapped,
+                        onToggle = ::setAttached,
+                        onNewTemplate = { newTemplateTapped = true }
+                    )
+                    // What moving a held version does to marks that already exist, said before the
+                    // button is pressed. Read from the draft rather than from the row, so unticking
+                    // the moved template withdraws the warning together with the write it describes.
+                    if (versionNotice != null) {
+                        Spacer(Modifier.height(ListeaDimens.RowGap))
+                        Text(
+                            versionNotice,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                // What a round leaves behind, and where it goes. The method is the Todo's own
+                // standing choice — a List may still override the address, and *Inherit* is a
+                // List's word, not a Todo's — and the address beneath it is the value this run
+                // snapshots onto the row.
+                ImportSection(
+                    title = "Sync",
+                    summary = exportChoiceSummary(method, address),
+                    expanded = syncOpen,
+                    onToggle = { syncOpen = !syncOpen }
+                ) {
+                    ExportChoiceRow(
+                        selected = method,
+                        onSelect = { exportWord = encodeExportChoice(it) }
+                    )
+                    if (method == ExportChoice.By(ExportKind.WEBHOOK)) {
+                        Spacer(Modifier.height(ListeaDimens.RowGap))
+                        Text("Webhook address", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "This Todo keeps the address it is given. A later change to the " +
+                                "default in Settings does not move it.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (request.refresh) {
+                            ImportAddressRow(
+                                label = "Keep this Todo's address",
+                                detail = when {
+                                    seed.webhookUrl.isNotBlank() ->
+                                        webhookHost(seed.webhookUrl) ?: "address not readable"
+                                    else -> "No address is set on this Todo"
+                                },
+                                selected = addressMode == ADDRESS_KEEP,
+                                onSelect = { addressMode = ADDRESS_KEEP }
+                            )
+                        }
+                        ImportAddressRow(
+                            label = "Use default",
+                            detail = if (defaultWebhookUrl.isBlank()) {
+                                "No default address is set in Settings"
+                            } else {
+                                webhookHost(defaultWebhookUrl) ?: defaultWebhookUrl
+                            },
+                            selected = addressMode == ADDRESS_DEFAULT,
+                            onSelect = { addressMode = ADDRESS_DEFAULT }
+                        )
+                        ImportAddressRow(
+                            label = "Custom",
+                            detail = "Posts to an address you type here",
+                            selected = addressMode == ADDRESS_CUSTOM,
+                            onSelect = { addressMode = ADDRESS_CUSTOM }
+                        )
+                        if (addressMode == ADDRESS_CUSTOM) {
+                            OutlinedTextField(
+                                value = customUrl,
+                                onValueChange = { customUrl = it },
+                                label = { Text("Address") },
+                                singleLine = true,
+                                isError = addressProblem != null,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                        // The same string `applyImport` would refuse on, shown before the button
+                        // rather than after it in an error dialog that wrote nothing.
+                        if (addressProblem != null) {
+                            Spacer(Modifier.height(ListeaDimens.CompactGap))
+                            Text(
+                                addressProblem,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                        Spacer(Modifier.height(ListeaDimens.RowGap))
+                    }
+                    SwitchRow(
+                        label = "Follow the upstream",
+                        checked = followUpstream,
+                        onCheckedChange = { followUpstream = it }
+                    )
+                    Text(
+                        "Scan this Todo's folder when it opens and import what appeared, without " +
+                            "asking. This is a standing answer about the Todo.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                ImportSection(
+                    title = "Others",
+                    summary = othersSummary(keepStateOnDelete),
+                    expanded = othersOpen,
+                    onToggle = { othersOpen = !othersOpen }
+                ) {
+                    SwitchRow(
+                        label = "Keep decisions when deleted",
+                        checked = keepStateOnDelete,
+                        onCheckedChange = { keepStateOnDelete = it }
+                    )
+                    Text(
+                        "Deleting this Todo keeps its Tasks and their decisions instead of " +
+                            "letting them go with it.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 // Read outside the grouping branch, because a history says nothing about grouping:
                 // what it holds is matched against the new Todo's own `groupPath`s, and a history
                 // whose grouping differs simply matches none of them. Only Create Tasks sets it —
                 // see [ListsViewModel.requestSourceRefresh] — so this never draws for a refresh.
                 if (request.histories.isNotEmpty()) {
-                    Spacer(Modifier.height(ListeaDimens.RowGap))
-                    ImportHistoryChoice(
-                        histories = request.histories,
-                        selected = recoverFrom,
-                        onSelect = { recoverFrom = it }
-                    )
+                    ImportSection(
+                        title = "History",
+                        summary = selectedHistory?.sourceName?.ifBlank { "Untitled Todo" }
+                            ?: "Start fresh",
+                        expanded = historyOpen,
+                        onToggle = { historyOpen = !historyOpen }
+                    ) {
+                        ImportHistoryChoice(
+                            histories = request.histories,
+                            selected = recoverFrom,
+                            onSelect = { recoverFrom = it }
+                        )
+                    }
                 }
             }
         },
         confirmButton = {
-            TextButton(
-                // A run with nothing attached is refused rather than confirmed, and this is the one
-                // gate in the dialog. The alternative is a Todo whose every file draws a chip row
-                // with nothing on it and whose Tasks can carry no mark at all — a thing a user would
-                // discover after importing a folder, not before. The gate is here rather than in the
-                // view model because *nothing is attached* is something only this dialog can fix.
-                enabled = attached.isNotEmpty(),
-                onClick = {
-                    onConfirm(
-                        ImportOptions(
-                            importer = importer,
-                            displayName = name,
-                            keepTree = keepTree,
-                            contentPolicy = policy,
-                            templates = attached,
-                            exportChoice = decodeExportChoice(exportWord, inheritable = false)
-                        ),
-                        // Resolved here rather than in the ViewModel, because the id is what
-                        // survives a configuration change and the object is what the report needs.
-                        // The selection cannot go stale: the histories are re-read from the same
-                        // flow that opened this dialog, and a history is never consumed.
-                        request.histories.firstOrNull { it.sourceId == recoverFrom }
-                    )
-                }
-            ) { Text(if (request.refresh) "Refresh" else "Create") }
+            TextButton(onClick = { confirm() }) {
+                Text(if (request.refresh) "Refresh" else "Create")
+            }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Cancel") }
         }
     )
 }
+
+/**
+ * One foldable step of the Create Tasks dialog: a name, the answer it is currently holding, and its
+ * controls when opened.
+ *
+ * The summary line is the point of folding. A section that collapsed to its title would make the
+ * user open it to find out what it says; a header that reads *Webhook · n8n.example* answers the
+ * question without a tap, and opening it is then only about changing the answer.
+ */
+@Composable
+private fun ImportSection(
+    title: String,
+    summary: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    content: @Composable () -> Unit
+) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onToggle)
+                .padding(vertical = ListeaDimens.CompactGap),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleSmall)
+                Text(
+                    summary,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Icon(
+                if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                contentDescription = if (expanded) "Collapse $title" else "Expand $title",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        if (expanded) {
+            content()
+            Spacer(Modifier.height(ListeaDimens.CompactGap))
+        }
+        HorizontalDivider()
+    }
+}
+
+/** One address radio in the Sync section: a word for the choice and what that choice resolves to. */
+@Composable
+private fun ImportAddressRow(
+    label: String,
+    detail: String,
+    selected: Boolean,
+    onSelect: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onSelect)
+            .padding(vertical = ListeaDimens.CompactGap),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        RadioButton(selected = selected, onClick = onSelect)
+        Spacer(Modifier.width(ListeaDimens.RowGap))
+        Column {
+            Text(label, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                detail,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+/** Which address the draft submits; stored as a word so `rememberSaveable` can keep it. */
+private const val ADDRESS_KEEP = "keep"
+private const val ADDRESS_DEFAULT = "default"
+private const val ADDRESS_CUSTOM = "custom"
+
+private fun groupingSummary(importer: ImporterKind, keepTree: Boolean): String = when (importer) {
+    ImporterKind.FILE_AS_TASK ->
+        if (keepTree) "One Task per file · keep the folder tree" else "One Task per file"
+    ImporterKind.FOLDER_AS_TASK -> "One Task per folder"
+}
+
+private fun reviewSummary(policy: ContentPolicy, templates: Int): String {
+    val templatesWord = when (templates) {
+        0 -> "no template"
+        1 -> "1 template"
+        else -> "$templates templates"
+    }
+    return policy.label + " · " + templatesWord
+}
+
+private fun exportChoiceSummary(choice: ExportChoice, address: String): String = when (choice) {
+    ExportChoice.Nothing -> "Don't export"
+    ExportChoice.Inherit -> "Follow the List"
+    is ExportChoice.By -> when (choice.kind) {
+        ExportKind.WEBHOOK -> "Webhook · " + (
+            webhookHost(address)
+                ?: if (address.isEmpty()) "no address set" else "address not readable"
+            )
+        ExportKind.TXT -> "TXT · one file per round"
+    }
+}
+
+private fun othersSummary(keepStateOnDelete: Boolean): String =
+    if (keepStateOnDelete) "Keep decisions when deleted" else "Decisions go with the Todo"
 
 /**
  * The attach step: which templates govern the files this run is about to create Tasks over.

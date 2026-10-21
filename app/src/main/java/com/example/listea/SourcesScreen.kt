@@ -28,6 +28,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -45,6 +47,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.listea.data.DissolutionReport
 import com.example.listea.data.ListLosingItems
 import com.example.listea.data.SourceSummary
+import com.example.listea.domain.ExportKind
 
 /**
  * The **Todo** tab: one row per Todo, each with the name it was given and the state of its last run.
@@ -85,6 +88,12 @@ fun SourcesScreen(
     // Read for the template line on a card, which names what the Tasks' record attaches and so
     // cannot be answered from the row alone.
     val resolver by viewModel.templateResolver.collectAsStateWithLifecycle()
+    // The live default, for the address dialog's *Use default* radio. Read here rather than in the
+    // dialog so the dialog is given one value to draw and takes no subscription of its own.
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
+    // The Todo whose address is being edited, held by value: the dialog closes when the card it was
+    // opened from leaves the list, which is what deleting that Todo should do anyway.
+    var editingAddress by remember { mutableStateOf<SourceSummary?>(null) }
 
     if (sources.isEmpty()) {
         Column(modifier.fillMaxSize().padding(ListeaDimens.PagePadding)) {
@@ -114,9 +123,22 @@ fun SourcesScreen(
                 onRefresh = { viewModel.requestSourceRefresh(source.id) },
                 onDelete = { viewModel.requestDeleteTodo(source.id) },
                 onFollowUpstream = { viewModel.setTodoFollowUpstream(source.id, it) },
-                onKeepStateOnDelete = { viewModel.setTodoKeepStateOnDelete(source.id, it) }
+                onKeepStateOnDelete = { viewModel.setTodoKeepStateOnDelete(source.id, it) },
+                onEditAddress = { editingAddress = source }
             )
         }
+    }
+
+    editingAddress?.let { source ->
+        TodoWebhookAddressDialog(
+            source = source,
+            defaultWebhookUrl = settings.defaultWebhookUrl,
+            onDismiss = { editingAddress = null },
+            onSave = { url, fromDefault ->
+                viewModel.setTodoWebhookAddress(source.id, url, fromDefault)
+                editingAddress = null
+            }
+        )
     }
 }
 
@@ -129,7 +151,8 @@ private fun TodoCard(
     onRefresh: () -> Unit,
     onDelete: () -> Unit,
     onFollowUpstream: (Boolean) -> Unit,
-    onKeepStateOnDelete: (Boolean) -> Unit
+    onKeepStateOnDelete: (Boolean) -> Unit,
+    onEditAddress: () -> Unit
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     // The whole card opens the Todo and the one button acts on it, which is the same split the
@@ -220,6 +243,22 @@ private fun TodoCard(
                             detail = "a later Todo at this folder can load them back",
                             checked = source.keepStateOnDelete,
                             onToggle = onKeepStateOnDelete
+                        )
+                        // A menu item rather than a card line: the address matters at the moment an
+                        // export leaves, and adding a fourth grey line to every card would make the
+                        // row longer for something most Todos never look at. The menu names the host
+                        // so the answer is still readable without opening the dialog.
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    "Webhook address · " +
+                                        (webhookHost(source.webhookUrl) ?: "not set")
+                                )
+                            },
+                            onClick = {
+                                menuOpen = false
+                                onEditAddress()
+                            }
                         )
                         DropdownMenuItem(
                             text = { Text("Delete Todo…") },
@@ -582,6 +621,160 @@ internal fun deleteTodoOutcome(report: DissolutionReport): String = buildString 
             " Its decisions were kept: a Todo created at this folder later can start from them."
         } else {
             " Its decisions went with it."
+        }
+    )
+}
+
+/**
+ * The address this Todo's exports post to, edited where the Todo is rather than in Settings.
+ *
+ * **What is stored is a copy, not a subscription.** *Use default* takes the value Settings holds at
+ * the moment Save is pressed; a later edit to the default moves no existing Todo. That is the whole
+ * reason this dialog exists: the default is where a new Todo starts, and this is where one stops
+ * following it.
+ *
+ * **An address is required only while the delivery method is Webhook.** A Todo that writes txt or
+ * sends nothing may hold no address at all, and may be cleared back to none — the method can be
+ * changed later, and refusing to clear an unused value would make an export setting outlive the
+ * export. An address that is present is validated whichever method is chosen, so an invalid one is
+ * never written into a row a later delivery would trust.
+ */
+@Composable
+private fun TodoWebhookAddressDialog(
+    source: SourceSummary,
+    defaultWebhookUrl: String,
+    onDismiss: () -> Unit,
+    onSave: (url: String, fromDefault: Boolean) -> Unit
+) {
+    val requiresAddress = source.exportKind == ExportKind.WEBHOOK.key
+    // A snapshot that no longer matches the live default *is* this Todo's current address. Only a
+    // Todo still holding exactly the default starts on Use default; anything else starts on Custom
+    // holding the stored value, so the dialog can never show the new default as if the Todo
+    // already posted there.
+    var mode by rememberSaveable(source.id) {
+        mutableStateOf(
+            if (source.webhookFromDefault &&
+                source.webhookUrl.isNotEmpty() &&
+                source.webhookUrl.trim() == defaultWebhookUrl.trim()
+            ) {
+                "default"
+            } else {
+                "custom"
+            }
+        )
+    }
+    // Starts on what the Todo holds, so moving to Custom edits the current address rather than
+    // asking for it again.
+    var customUrl by rememberSaveable(source.id) { mutableStateOf(source.webhookUrl) }
+    val url = if (mode == "default") defaultWebhookUrl.trim() else customUrl.trim()
+    val fromDefault = mode == "default"
+    val problem = when {
+        requiresAddress -> webhookAddressProblem(ExportKind.WEBHOOK, url)
+        url.isNotEmpty() -> webhookUrlError(url)
+        else -> null
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Webhook address") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    "Exports through this Todo post to the address it holds. Copying the default " +
+                        "takes a snapshot: changing the default in Settings afterwards does not " +
+                        "move this Todo.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(ListeaDimens.RowGap))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { mode = "default" }
+                        .padding(vertical = ListeaDimens.CompactGap),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(selected = mode == "default", onClick = { mode = "default" })
+                    Spacer(Modifier.width(ListeaDimens.RowGap))
+                    Column {
+                        Text("Use default", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            if (defaultWebhookUrl.isBlank()) {
+                                "No default address is set in Settings"
+                            } else {
+                                webhookHost(defaultWebhookUrl) ?: defaultWebhookUrl
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { mode = "custom" }
+                        .padding(vertical = ListeaDimens.CompactGap),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(selected = mode == "custom", onClick = { mode = "custom" })
+                    Spacer(Modifier.width(ListeaDimens.RowGap))
+                    Column {
+                        Text("Custom", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "Posts to an address you type here",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                if (mode == "custom") {
+                    Spacer(Modifier.height(ListeaDimens.CompactGap))
+                    OutlinedTextField(
+                        value = customUrl,
+                        onValueChange = { customUrl = it },
+                        label = { Text("Address") },
+                        singleLine = true,
+                        isError = problem != null,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+                if (problem != null) {
+                    Spacer(Modifier.height(ListeaDimens.CompactGap))
+                    Text(
+                        problem,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                } else if (requiresAddress) {
+                    Spacer(Modifier.height(ListeaDimens.CompactGap))
+                    Text(
+                        "This Todo exports through a webhook, so it needs an address.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    Spacer(Modifier.height(ListeaDimens.CompactGap))
+                    Text(
+                        "This Todo does not export through a webhook. The address is kept for " +
+                            "when it does, and may be cleared.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (!requiresAddress && source.webhookUrl.isNotEmpty()) {
+                    TextButton(onClick = { onSave("", false) }) {
+                        Text("Clear the address")
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = problem == null, onClick = { onSave(url, fromDefault) }) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
         }
     )
 }

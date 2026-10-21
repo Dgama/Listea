@@ -1,5 +1,6 @@
 package com.example.listea.data
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
@@ -168,6 +169,28 @@ data class SourceEntity(
      * is the network.
      */
     val exportKind: String = EXPORT_CHOICE_NONE,
+
+    /**
+     * The webhook address this Todo posts to, as a snapshot taken when it was configured.
+     *
+     * A copy and not a reference, on purpose: Settings' default is where a new Todo's address may
+     * come from, but an edit there must not silently redirect work that is already set up. The
+     * Todo card's address dialog is the writer, and the row is read at delivery time, so changing
+     * it affects the next Quick Review or List export without touching the Tasks.
+     *
+     * `""` means no address. A Todo whose [exportKind] is webhook cannot be configured without a
+     * valid one; a Todo that exports nothing, or by txt, may leave it empty.
+     *
+     * The SQL defaults repeat the Kotlin ones so a database created at this version and one
+     * migrated to it have the same column definitions — `MIGRATION_26_27` adds these with the same
+     * defaults, and the migration fixtures insert rows by SQL without naming every column.
+     */
+    @ColumnInfo(defaultValue = "''")
+    val webhookUrl: String = "",
+
+    /** Whether [webhookUrl] was copied from Settings' default rather than typed by the user. */
+    @ColumnInfo(defaultValue = "0")
+    val webhookFromDefault: Boolean = false,
 
     val lastImportAt: Long? = null,
     val lastImportStatus: String? = null

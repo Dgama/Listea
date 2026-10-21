@@ -47,7 +47,13 @@ data class TaskExportSource(
     val taskId: String,
     val sourceId: String,
     val sourceName: String,
-    val exportKind: String
+    val exportKind: String,
+
+    /**
+     * The address the Todo holds, copied when it was configured. Empty means it has none; the
+     * planner decides whether that is a failing group or a fallback to the live default.
+     */
+    val webhookUrl: String = ""
 )
 
 /**
@@ -158,6 +164,18 @@ data class SourceSummary(
      * `''` for a Todo with no Tasks at all, which is a Todo whose next run has not happened yet.
      */
     val taskAssetControls: String = "",
+
+    /**
+     * How this Todo exports, and the address it holds.
+     *
+     * Read for the same reason as the policies above: the Todo card and the next run's dialog have
+     * to open on what this Todo will actually do, and the address is the one setting whose value
+     * is easy to get wrong — a copied default and a typed one look identical and behave
+     * differently when Settings changes.
+     */
+    val exportKind: String = com.example.listea.domain.EXPORT_CHOICE_NONE,
+    val webhookUrl: String = "",
+    val webhookFromDefault: Boolean = false,
 
     val lastImportAt: Long?,
     val lastImportStatus: String?,

@@ -1,6 +1,7 @@
 package com.example.listea.data
 
 import android.content.Context
+import android.util.Log
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
@@ -41,9 +42,10 @@ import java.util.UUID
         UpstreamEntity::class,
         DissolvedTaskStateEntity::class,
         TemplateEntity::class,
-        TemplateVersionEntity::class
+        TemplateVersionEntity::class,
+        SchemaBackfillEntity::class
     ],
-    version = 26,
+    version = 27,
     exportSchema = true
 )
 abstract class ListeaDatabase : RoomDatabase() {
@@ -1221,6 +1223,52 @@ abstract class ListeaDatabase : RoomDatabase() {
         }
 
         /**
+         * The step that gives a Todo its own webhook address.
+         *
+         * Two additive columns on `sources`, two on `webhook_history`, and one deliberate clear:
+         * `lists.webhookUrl` has been dead since v0.5.6 and holds a copy of whatever Settings'
+         * default was on the day the List was made. It becomes the List's *override* in this
+         * release, and keeping those stale copies would silently redirect every existing List
+         * the moment a non-empty value started meaning something. Clearing it is the only way to
+         * say *this List has not chosen an address*.
+         *
+         * **What this step cannot do is fill the sources.** The value a Todo should copy is
+         * Settings' default URL, and whether it should copy at all depends on the old global gate
+         * — both live in DataStore, which a migration cannot read. So the migration records the
+         * work in `schema_backfills` and [ListsDao.applyWebhookAddressBootstrap] performs it once,
+         * after the app can read both stores. See [SchemaBackfillEntity] for why the marker is
+         * deleted only in the same transaction as the write.
+         *
+         * Legacy history rows keep an empty address and round id. The UI reads the empty round id
+         * as a round of one, which is exactly what each old row was.
+         */
+        internal val MIGRATION_26_27 = object : Migration(26, 27) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
+                    "ALTER TABLE sources ADD COLUMN webhookUrl TEXT NOT NULL DEFAULT ''"
+                )
+                connection.execSQL(
+                    "ALTER TABLE sources ADD COLUMN webhookFromDefault INTEGER NOT NULL DEFAULT 0"
+                )
+                connection.execSQL(
+                    "ALTER TABLE webhook_history ADD COLUMN webhookUrl TEXT NOT NULL DEFAULT ''"
+                )
+                connection.execSQL(
+                    "ALTER TABLE webhook_history ADD COLUMN roundId TEXT NOT NULL DEFAULT ''"
+                )
+                connection.execSQL("UPDATE lists SET webhookUrl = ''")
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS schema_backfills (" +
+                        "name TEXT NOT NULL, PRIMARY KEY(name))"
+                )
+                connection.execSQL(
+                    "INSERT OR IGNORE INTO schema_backfills (name) VALUES ('$WEBHOOK_ADDRESS_BACKFILL')"
+                )
+                Log.i("ListeaDatabase", "26 -> 27")
+            }
+        }
+
+        /**
          * Gives every Task and Asset its public id, reading everything before writing anything.
          *
          * The same rule [backfillSelections] records: a cursor stepping over a table while that
@@ -1979,7 +2027,8 @@ abstract class ListeaDatabase : RoomDatabase() {
                     MIGRATION_22_23,
                     MIGRATION_23_24,
                     MIGRATION_24_25,
-                    MIGRATION_25_26
+                    MIGRATION_25_26,
+                    MIGRATION_26_27
                 )
                     .build()
                     .also { instance = it }

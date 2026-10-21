@@ -4,8 +4,10 @@ import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -23,6 +25,7 @@ import androidx.compose.material.icons.filled.FilterAlt
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Visibility
@@ -33,6 +36,8 @@ import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -75,133 +80,357 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.withContext
 
 /**
- * Stable, long-lived configuration, gathered out of the business screens.
+ * Settings: an index of subjects, and the pages behind them.
  *
- * This is where the app is told what it may look at, and that now includes the folders themselves:
- * adding an Upstream is the old "select folder", and it lives here because it is a fact about the
- * app rather than a place in it. The Upstreams tab lists what has been added and opens it — an
- * index, not an editor.
+ * **Why an index.** Settings had grown into one scrolling page holding every switch, every folder,
+ * the template count and the file-cleanup tool, with no summary of any of it. A user looking for
+ * *where do I change how videos play* had to scroll past everything else to find out, and a user
+ * checking *what is this app currently doing* had no single screen that answered it. The index
+ * names each subject with its one-line state; the controls live one tap in, on a page titled with
+ * the same words.
  *
- * Switches persist on the spot. Text fields persist when they lose focus or the user presses Done,
- * so a half-typed URL is never written and DataStore is not hit on every keystroke.
+ * **Why a route string.** The five booleans and ids this used to hoist (`exportsOpen`,
+ * `templatesOpen`, `openTemplateId`, `historyOpen`, `openExportKind`) could describe only some of
+ * the pages and disagreed about which one was up. One string describes every page, survives
+ * rotation through `rememberSaveable`, and lets the app bar decide *is a subpage showing* with a
+ * single comparison rather than a growing `||`. An unknown route falls back to the index rather
+ * than to a blank screen.
  *
- * V4.3 puts each group in the same [SectionCard] the management screens use, so this reads as a
- * page of the app rather than the settings form it used to be. One scroll surface, as everywhere.
+ * Pages that need a back arrow use [ListeaNestedScaffold] with **Settings** as the label, so the
+ * hierarchy is always one gesture from the screen that names it.
  */
+object SettingsRoute {
+    const val Index = "index"
+    const val Upstreams = "upstreams"
+    const val Review = "review"
+    const val Media = "media"
+    const val Todos = "todos"
+    const val Templates = "templates"
+    const val Exports = "exports"
+    const val File = "file"
+    const val History = "history"
+
+    private const val TemplatePrefix = "template/"
+    private const val ExportPrefix = "export/"
+
+    fun template(templateId: String): String = TemplatePrefix + templateId
+
+    fun templateId(route: String): String? =
+        if (route.startsWith(TemplatePrefix)) {
+            route.removePrefix(TemplatePrefix).takeIf { it.isNotEmpty() }
+        } else {
+            null
+        }
+
+    fun export(kind: ExportKind): String = ExportPrefix + kind.key
+
+    fun exportKind(route: String): ExportKind? =
+        if (route.startsWith(ExportPrefix)) {
+            ExportKind.fromKey(route.removePrefix(ExportPrefix))
+        } else {
+            null
+        }
+}
+
+/** The index, or whichever page [route] names. One string, one branch. */
 @Composable
 fun SettingsScreen(
     modifier: Modifier,
     viewModel: ListsViewModel = viewModel(),
-    historyOpen: Boolean = false,
-    onHistoryOpenChange: (Boolean) -> Unit = {},
-    templatesOpen: Boolean = false,
-    onTemplatesOpenChange: (Boolean) -> Unit = {},
-    openTemplateId: String? = null,
-    onOpenTemplateChange: (String?) -> Unit = {},
-    exportsOpen: Boolean = false,
-    onExportsOpenChange: (Boolean) -> Unit = {},
-    openExportKind: ExportKind? = null,
-    onOpenExportKindChange: (ExportKind?) -> Unit = {}
+    route: String = SettingsRoute.Index,
+    onRoute: (String) -> Unit = {}
 ) {
-    // A page of its own rather than a section of this one: the payloads it holds are the app's,
-    // not any one list's, and Settings is where the webhook they were headed for is configured.
-    if (historyOpen) {
-        ExportHistoryScreen(
+    val toIndex = { onRoute(SettingsRoute.Index) }
+    val openTemplate = SettingsRoute.templateId(route)
+    val openExport = SettingsRoute.exportKind(route)
+
+    when {
+        route == SettingsRoute.History -> ExportHistoryScreen(
             modifier = modifier,
             viewModel = viewModel,
-            onBack = { onHistoryOpenChange(false) }
+            onBack = toIndex
         )
-        return
-    }
 
-    // Two pages, and which one is up is `openTemplateId`: the list, and the template somebody
-    // tapped on it. Both are entered from the section below, and neither is a section of this
-    // screen for the reason the webhook history is not — a template is edited over a page, and
-    // editing it inside a scrolling Settings card is what v0.5.4 exists to stop doing.
-    if (templatesOpen) {
-        val open = openTemplateId
-        if (open == null) {
-            TemplateListScreen(
-                modifier = modifier,
-                viewModel = viewModel,
-                onBack = { onTemplatesOpenChange(false) },
-                onOpen = { onOpenTemplateChange(it) }
-            )
-        } else {
-            TemplateDetailScreen(
-                modifier = modifier,
-                viewModel = viewModel,
-                templateId = open,
-                onBack = { onOpenTemplateChange(null) }
-            )
-        }
-        return
-    }
+        route == SettingsRoute.Templates -> TemplateListScreen(
+            modifier = modifier,
+            viewModel = viewModel,
+            onBack = toIndex,
+            onOpen = { onRoute(SettingsRoute.template(it)) }
+        )
 
-    // The export manager, and the same two-level shape for the same reason. A method's page holds
-    // its own history, and a history is a page — so configuring a method inside a dialog would be
-    // a page inside a dialog, which is what the user said not to build.
-    if (exportsOpen) {
-        val open = openExportKind
-        if (open == null) {
-            ExportListScreen(
-                modifier = modifier,
-                viewModel = viewModel,
-                onBack = { onExportsOpenChange(false) },
-                onOpenKind = { onOpenExportKindChange(it) },
-                onHistoryOpenChange = onHistoryOpenChange
-            )
-        } else {
-            ExportDetailScreen(
-                modifier = modifier,
-                viewModel = viewModel,
-                kind = open,
-                onBack = { onOpenExportKindChange(null) },
-                onHistoryOpenChange = onHistoryOpenChange
-            )
-        }
-        return
-    }
+        openTemplate != null -> TemplateDetailScreen(
+            modifier = modifier,
+            viewModel = viewModel,
+            templateId = openTemplate,
+            onBack = { onRoute(SettingsRoute.Templates) }
+        )
 
+        route == SettingsRoute.Exports -> ExportListScreen(
+            modifier = modifier,
+            viewModel = viewModel,
+            onBack = toIndex,
+            onOpenKind = { onRoute(SettingsRoute.export(it)) }
+        )
+
+        openExport != null -> ExportDetailScreen(
+            modifier = modifier,
+            viewModel = viewModel,
+            kind = openExport,
+            onBack = { onRoute(SettingsRoute.Exports) }
+        )
+
+        route == SettingsRoute.Upstreams -> SettingsUpstreamsPage(
+            modifier = modifier,
+            viewModel = viewModel,
+            onBack = toIndex
+        )
+
+        route == SettingsRoute.Review -> SettingsReviewPage(
+            modifier = modifier,
+            viewModel = viewModel,
+            onBack = toIndex
+        )
+
+        route == SettingsRoute.Media -> SettingsMediaPage(
+            modifier = modifier,
+            viewModel = viewModel,
+            onBack = toIndex
+        )
+
+        route == SettingsRoute.Todos -> SettingsTodosPage(
+            modifier = modifier,
+            viewModel = viewModel,
+            onBack = toIndex
+        )
+
+        route == SettingsRoute.File -> SettingsFilePage(
+            modifier = modifier,
+            viewModel = viewModel,
+            onBack = toIndex
+        )
+
+        else -> SettingsIndexScreen(
+            modifier = modifier,
+            viewModel = viewModel,
+            onRoute = onRoute
+        )
+    }
+}
+
+/**
+ * The index: one card, one row per subject, each naming what it currently does.
+ *
+ * A single card rather than eight, because these rows are one list — the subjects of one Settings —
+ * and eight cards would be the old scrolling page with borders between its sections. The row's
+ * state line is the point of the design: it answers *what is this set to* without opening anything,
+ * which is the question the old page could not answer from one screen either.
+ */
+@Composable
+private fun SettingsIndexScreen(
+    modifier: Modifier,
+    viewModel: ListsViewModel,
+    onRoute: (String) -> Unit
+) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
-    // The rows themselves rather than a count, because the count is a nullable read like the rows
-    // are: a number that appeared before the table was read would be a number this screen made up.
     val templates by viewModel.templates.collectAsStateWithLifecycle()
+    val upstreams by viewModel.upstreams.collectAsStateWithLifecycle()
     val historyCount by viewModel.webhookRecordCount.collectAsStateWithLifecycle()
+    val roundCount by viewModel.webhookRoundCount.collectAsStateWithLifecycle()
     val pendingCount by viewModel.pendingWebhookCount.collectAsStateWithLifecycle()
-    val deleteRequest by viewModel.deleteCheckedRequest.collectAsStateWithLifecycle()
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = ListeaDimens.PagePadding),
+        verticalArrangement = Arrangement.spacedBy(ListeaDimens.SectionGap)
+    ) {
+        Spacer(Modifier.height(ListeaDimens.CompactGap))
+
+        SectionCard {
+            SettingsIndexRow(
+                icon = Icons.Filled.Folder,
+                title = "Upstreams",
+                state = if (upstreams.isEmpty()) {
+                    "No folders yet"
+                } else {
+                    countLabel(upstreams.size, "folder")
+                },
+                onOpen = { onRoute(SettingsRoute.Upstreams) }
+            )
+            IndexDivider()
+
+            SettingsIndexRow(
+                icon = Icons.Filled.Visibility,
+                title = "Review",
+                state = if (settings.folderQuickReviewEnabled) {
+                    "Quick Review is available in Todo"
+                } else {
+                    "Quick Review is off in Todo"
+                },
+                onOpen = { onRoute(SettingsRoute.Review) }
+            )
+            IndexDivider()
+
+            SettingsIndexRow(
+                icon = Icons.Filled.PlayArrow,
+                title = "Media and review behaviour",
+                state = listOf(
+                    if (settings.videoAutoplay) "Videos autoplay" else "Videos play on tap",
+                    if (settings.rememberReviewPosition) "Review resumes" else "Review starts over"
+                ).joinToString(" · "),
+                onOpen = { onRoute(SettingsRoute.Media) }
+            )
+            IndexDivider()
+
+            SettingsIndexRow(
+                icon = Icons.Outlined.CheckCircle,
+                title = "Todos",
+                state = settings.defaultContentPolicy.label + " · " +
+                    if (settings.followUpstreamNewTodos) "follows its upstream" else "no auto-update",
+                onOpen = { onRoute(SettingsRoute.Todos) }
+            )
+            IndexDivider()
+
+            SettingsIndexRow(
+                icon = Icons.Filled.Widgets,
+                title = "Templates",
+                state = templates?.let { countLabel(it.size, "template") },
+                onOpen = { onRoute(SettingsRoute.Templates) }
+            )
+            IndexDivider()
+
+            SettingsIndexRow(
+                icon = Icons.AutoMirrored.Filled.ExitToApp,
+                title = "Exports",
+                state = exportMethodsSummary(settings.defaultWebhookUrl),
+                onOpen = { onRoute(SettingsRoute.Exports) }
+            )
+            IndexDivider()
+
+            SettingsIndexRow(
+                icon = Icons.Filled.FilterAlt,
+                title = "File management",
+                state = if (settings.sharedFileArrangement) {
+                    "One filter and sort everywhere"
+                } else {
+                    "Each folder and list keeps its own"
+                },
+                onOpen = { onRoute(SettingsRoute.File) }
+            )
+            IndexDivider()
+
+            // At the bottom because it is a record of what already happened rather than a thing
+            // to configure, and because it is the one row whose state is worth a glance.
+            SettingsIndexRow(
+                icon = Icons.Filled.History,
+                title = "History",
+                state = if (historyCount == 0) {
+                    "Nothing yet"
+                } else {
+                    historyCountLabel(historyCount, roundCount)
+                },
+                tone = if (pendingCount == 0) StatusTone.Neutral else StatusTone.Warning,
+                onOpen = { onRoute(SettingsRoute.History) }
+            )
+        }
+
+        Spacer(Modifier.height(ListeaDimens.SectionGap))
+    }
+}
+
+/** Name, current state, and the way in — the index's one row shape. */
+@Composable
+private fun SettingsIndexRow(
+    icon: ImageVector,
+    title: String,
+    state: String?,
+    onOpen: () -> Unit,
+    tone: StatusTone = StatusTone.Neutral
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
+    ) {
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(ListeaDimens.IconSize)
+        )
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(ListeaDimens.CompactGap)
+        ) {
+            Text(title, style = MaterialTheme.typography.bodyMedium)
+            // Nothing while a count is being read: a count that has not been counted is not one.
+            state?.let { StatusLine(it, tone = tone) }
+        }
+        Button(onClick = onOpen) { Text("Open", maxLines = 1) }
+    }
+}
+
+@Composable
+private fun IndexDivider() {
+    HorizontalDivider(Modifier.padding(vertical = ListeaDimens.CompactGap))
+}
+
+/** The shell every category page shares: title, Settings back, one scroll surface. */
+@Composable
+private fun SettingsPage(
+    title: String,
+    modifier: Modifier,
+    onBack: () -> Unit,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    ListeaNestedScaffold(
+        modifier = modifier,
+        title = title,
+        backLabel = "Settings",
+        onBack = onBack
+    ) { bodyModifier ->
+        Column(
+            modifier = bodyModifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = ListeaDimens.PagePadding),
+            verticalArrangement = Arrangement.spacedBy(ListeaDimens.SectionGap)
+        ) {
+            Spacer(Modifier.height(ListeaDimens.CompactGap))
+            content()
+            Spacer(Modifier.height(ListeaDimens.SectionGap))
+        }
+    }
+}
+
+/**
+ * The folders Listea has been given: the list, and the one place a new one is added.
+ *
+ * Adding lives here rather than on the Upstreams tab because it configures what the app holds, not
+ * what it is showing: the Upstreams tab is a list you open things from, and a button that changed
+ * that list from inside it made the tab both the index and the editor.
+ */
+@Composable
+private fun SettingsUpstreamsPage(
+    modifier: Modifier,
+    viewModel: ListsViewModel,
+    onBack: () -> Unit
+) {
     val context = LocalContext.current
     val upstreams by viewModel.upstreams.collectAsStateWithLifecycle()
-
-    // Bumped by anything that changes what a walk of an Upstream would find, so the sizes on
-    // screen are not left describing files that are no longer there.
-    var storageGeneration by remember { mutableStateOf(0) }
 
     // The folders the app still holds a grant for. Keyed on the list of Upstreams as well as on the
     // context so that adding one re-reads it: the grant is taken in the picker's callback below,
     // and the row it just made would otherwise sit there saying it had no access.
     val heldRoots = remember(context, upstreams) { heldRootUris(context) }
 
-    // The root the checked-file tools work on. A List can only have one root and this app can now
-    // have several, so "delete checked files under the root" has to say *which* root or it is
-    // answering a different question than the one the user is asking.
-    var cleanupRoot by rememberSaveable { mutableStateOf<String?>(null) }
-    val rootChoices = upstreams.map { it.rootUri }.distinct()
-    // Falls back to the first when nothing is chosen or the chosen one is gone, so the section is
-    // never stuck pointing at a folder that was removed.
-    val activeRoot = cleanupRoot?.takeIf { it in rootChoices } ?: rootChoices.firstOrNull()
-    val activeLabel = upstreams.firstOrNull { it.rootUri == activeRoot }?.displayName
-        ?: "the selected folder"
-
-    // Nothing is checked until a root is chosen, and there is nothing to observe either.
-    val checkedFileCount by remember(activeRoot) {
-        activeRoot?.let { viewModel.observeCheckedFileCount(it) } ?: flowOf(0)
-    }.collectAsStateWithLifecycle(0)
-
-    // Why the messages survive the trip: the picker is another activity, and coming back to be
-    // told nothing about what just happened would be the worst part of either flow.
-    var grantNotice by rememberSaveable { mutableStateOf<String?>(null) }
+    // Why the message survives the trip: the picker is another activity, and coming back to be
+    // told nothing about what just happened would be the worst part of the flow.
     var addNotice by rememberSaveable { mutableStateOf<String?>(null) }
+
+    // The Upstream whose removal is being confirmed; the dialog is shared with the Upstreams tab.
+    var removing by remember { mutableStateOf<UpstreamEntity?>(null) }
 
     /**
      * Adding an Upstream: the folder picker, and what a committed pick means.
@@ -222,7 +451,7 @@ fun SettingsScreen(
 
         // Write is asked for alongside read because file management deletes through this grant. A
         // tree offered read-only is still a perfectly good Upstream, so it is taken rather than
-        // refused; what becomes unavailable is deleting, and the File management card says so.
+        // refused; what becomes unavailable is deleting, and the File management page says so.
         fun take(flags: Int) = runCatching {
             context.contentResolver.takePersistableUriPermission(uri, flags)
         }.isSuccess
@@ -239,63 +468,8 @@ fun SettingsScreen(
         }
     }
 
-    /**
-     * Asking for permission to change a folder the app can already read, which is its own trip
-     * through the picker and so gets its own launcher.
-     *
-     * Deliberately not the one above: that one registers whatever comes back as a new Upstream.
-     * Here the answer has to be a folder already in use, so anything else is refused rather than
-     * acted on, and nothing at all is written unless the two match.
-     */
-    val grantWriteAccess = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocumentTree()
-    ) { uri ->
-        val root = activeRoot
-        // Backing out is a real answer: the dialog is still there to try again or cancel.
-        if (uri == null || root == null) return@rememberLauncherForActivityResult
-
-        if (uri.toString() != root) {
-            grantNotice = "That is a different folder, so nothing was changed. Choose " +
-                "$activeLabel itself — the folder Listea is already using — to allow deleting " +
-                "from it."
-            return@rememberLauncherForActivityResult
-        }
-
-        val granted = runCatching {
-            context.contentResolver.takePersistableUriPermission(
-                uri,
-                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            )
-        }.isSuccess
-
-        if (granted) {
-            grantNotice = null
-            // Straight back to where the user was, rather than making them find the button again.
-            viewModel.requestCheckedFileDeletion(root)
-        } else {
-            grantNotice = "Android did not allow changes to this folder. Somewhere in internal " +
-                "storage, or a folder you picked yourself, will work."
-        }
-    }
-
-    // One scroll surface for the whole page; no subsection scrolls on its own.
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = ListeaDimens.PagePadding),
-        verticalArrangement = Arrangement.spacedBy(ListeaDimens.SectionGap)
-    ) {
-        Spacer(Modifier.height(ListeaDimens.CompactGap))
-
-        // The one place a folder is added to Listea, and the list of the ones already added.
-        //
-        // It is here rather than on the Upstreams tab because it configures what the app holds,
-        // not what it is showing: the Upstreams tab is a list you open things from, and a button
-        // that changed that list from inside it made the tab both the index and the editor. The
-        // old Folder tab had no "add folder" for the same reason, and this is what the old
-        // "select folder" was — one folder, granted once, listed here.
-        SectionCard(title = "Upstreams") {
+    SettingsPage("Upstreams", modifier, onBack) {
+        SectionCard {
             if (upstreams.isEmpty()) {
                 Text(
                     "No Upstreams yet",
@@ -306,7 +480,7 @@ fun SettingsScreen(
                 UpstreamRow(
                     upstream = upstream,
                     available = upstream.rootUri in heldRoots,
-                    generation = storageGeneration
+                    onRemove = { removing = upstream }
                 )
             }
 
@@ -339,8 +513,36 @@ fun SettingsScreen(
                     "are about Tasks that still exist, and they stay exactly as they are."
             )
         }
+    }
 
-        SectionCard(title = "Review") {
+    removing?.let { upstream ->
+        RemoveUpstreamDialog(
+            upstream = upstream,
+            onDismiss = { removing = null },
+            onConfirm = {
+                viewModel.deleteUpstream(upstream.id)
+                removing = null
+            }
+        )
+    }
+}
+
+/**
+ * Quick Review's one switch.
+ *
+ * It is alone on its page because that is the whole of what this subject is; grouping it with
+ * media behaviour would suggest it acts on the review in front of the user, which it does not.
+ */
+@Composable
+private fun SettingsReviewPage(
+    modifier: Modifier,
+    viewModel: ListsViewModel,
+    onBack: () -> Unit
+) {
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
+
+    SettingsPage("Review", modifier, onBack) {
+        SectionCard {
             SwitchRow(
                 label = "Enable Quick Review in Todo",
                 icon = Icons.Filled.Visibility,
@@ -349,67 +551,27 @@ fun SettingsScreen(
             )
             // Said in the two places the switch reaches, because it reaches two: the Todo tab,
             // where it takes the action away, and the Upstreams browser, where it stops drawing
-            // what has already been decided. The sentence this replaces described a Folder tab
-            // that no longer exists.
+            // what has already been decided.
             HelperText(
                 "Off takes Quick Review off the Todo tab, and stops the Upstreams browser " +
                     "showing which files are already checked. Lists keep their items, " +
                     "completion and actions."
             )
-
         }
+    }
+}
 
-        // Templates, as the webhook card above leads to its history: one row here, a page behind it.
-        // A template is a thing with a name, a scope and a version — none of which fits on a card in
-        // a scrolling page — so what this screen says about them is how many there are and where
-        // they are edited.
-        SectionCard(title = "Templates") {
-            InfoActionsRow(
-                info = {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
-                    ) {
-                        Icon(
-                            Icons.Filled.Widgets,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(ListeaDimens.IconSize)
-                        )
-                        Text("All templates", style = MaterialTheme.typography.bodyMedium)
-                    }
-                    // Nothing rather than "0 templates" while the table is being read: this app has
-                    // no spinner, and a count that has not been counted is not a count.
-                    templates?.let { StatusLine(countLabel(it.size, "template")) }
-                },
-                actions = {
-                    Button(
-                        onClick = { onTemplatesOpenChange(true) },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Open", maxLines = 1)
-                    }
-                }
-            )
-            HelperText(
-                "A template is what a Todo records with: which files it applies to, and the " +
-                    "buttons it offers. Every install starts with one built-in template, and the " +
-                    "upgrade that brings an existing Todo's own buttons across gives each of those " +
-                    "one of its own."
-            )
-            HelperText(
-                "Editing one appends a version. The version a Task was imported under is kept, so " +
-                    "renaming a button or changing what it sends never reaches back into what a " +
-                    "Task already says it was judged with."
-            )
-            HelperText(
-                "A template is also what a new Todo starts with, so there is one place to edit a " +
-                    "button rather than two. Which templates a Todo was given is shown on its card " +
-                    "under Upstreams."
-            )
-        }
+/** How the apps presents media, and how a review starts. */
+@Composable
+private fun SettingsMediaPage(
+    modifier: Modifier,
+    viewModel: ListsViewModel,
+    onBack: () -> Unit
+) {
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
 
-        SectionCard(title = "Media and review behaviour") {
+    SettingsPage("Media and review behaviour", modifier, onBack) {
+        SectionCard {
             SwitchRow(
                 label = "Play videos automatically",
                 icon = Icons.Filled.PlayArrow,
@@ -452,13 +614,25 @@ fun SettingsScreen(
                     "in front of you until you leave."
             )
         }
+    }
+}
 
-        // A section of its own rather than two more rows on the card above, because neither of these
-        // is about how a screen behaves: they are what a *new* Todo is created with, and the Todo's
-        // own card is where they are changed once it exists. Grouping them with the review switches
-        // would suggest they act on the review in front of the user, which is exactly what they do
-        // not do.
-        SectionCard(title = "Todos") {
+/**
+ * What a *new* Todo is created with. The Todo's own card is where they are changed once it exists.
+ *
+ * A subject of its own rather than two more rows on the media page, because neither is about how
+ * a screen behaves: they are standing answers a future Todo starts from.
+ */
+@Composable
+private fun SettingsTodosPage(
+    modifier: Modifier,
+    viewModel: ListsViewModel,
+    onBack: () -> Unit
+) {
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
+
+    SettingsPage("Todos", modifier, onBack) {
+        SectionCard {
             Text(
                 "What new Todos start with",
                 style = MaterialTheme.typography.bodyMedium
@@ -488,49 +662,86 @@ fun SettingsScreen(
                     "Todo's own card can switch it on or off for that Todo alone."
             )
         }
+    }
+}
 
-        // One row, and a page behind it — the shape the Templates card above already has, and the
-        // shape the user asked for in as many words. It used to be a Webhook card holding the
-        // default URL, three switches that were never about HTTP, and a history button; every one
-        // of those lives in Exports now, at the level it actually belongs to.
-        SectionCard(title = "Exports") {
-            InfoActionsRow(
-                info = {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
-                    ) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.ExitToApp,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(ListeaDimens.IconSize)
-                        )
-                        Text("All export methods", style = MaterialTheme.typography.bodyMedium)
-                    }
-                    StatusLine(exportMethodsSummary(historyCount, pendingCount))
-                },
-                actions = {
-                    Button(
-                        onClick = { onExportsOpenChange(true) },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Open", maxLines = 1)
-                    }
-                }
-            )
-            HelperText(
-                "Where a round's decisions go. Each Todo picks a method when it is created — " +
-                    "webhook, txt, or nothing — and a List can override that for everything it " +
-                    "holds, or leave each Todo to answer for its own Tasks."
-            )
-            HelperText(
-                "The history holds every export by every method, with what became of it, so a " +
-                    "round of review is never lost and can always be checked or sent again."
-            )
+/**
+ * Filter and sort sharing, the post-webhook deletion offer, and the full checked-file cleanup.
+ *
+ * These three are one subject because all three are about the files themselves rather than about
+ * what is shown of them. The cleanup tool is the only thing here that can destroy anything outside
+ * Listea, so it keeps its full listing dialog.
+ */
+@Composable
+private fun SettingsFilePage(
+    modifier: Modifier,
+    viewModel: ListsViewModel,
+    onBack: () -> Unit
+) {
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val deleteRequest by viewModel.deleteCheckedRequest.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val upstreams by viewModel.upstreams.collectAsStateWithLifecycle()
+
+    // The root the checked-file tools work on. A List can only have one root and this app can now
+    // have several, so "delete checked files under the root" has to say *which* root or it is
+    // answering a different question than the one the user is asking.
+    var cleanupRoot by rememberSaveable { mutableStateOf<String?>(null) }
+    val rootChoices = upstreams.map { it.rootUri }.distinct()
+    // Falls back to the first when nothing is chosen or the chosen one is gone, so the section is
+    // never stuck pointing at a folder that was removed.
+    val activeRoot = cleanupRoot?.takeIf { it in rootChoices } ?: rootChoices.firstOrNull()
+    val activeLabel = upstreams.firstOrNull { it.rootUri == activeRoot }?.displayName
+        ?: "the selected folder"
+
+    // Nothing is checked until a root is chosen, and there is nothing to observe either.
+    val checkedFileCount by remember(activeRoot) {
+        activeRoot?.let { viewModel.observeCheckedFileCount(it) } ?: flowOf(0)
+    }.collectAsStateWithLifecycle(0)
+
+    var grantNotice by rememberSaveable { mutableStateOf<String?>(null) }
+
+    /**
+     * Asking for permission to change a folder the app can already read, which is its own trip
+     * through the picker and so gets its own launcher.
+     *
+     * Deliberately not the add launcher: that one registers whatever comes back as a new Upstream.
+     * Here the answer has to be a folder already in use, so anything else is refused rather than
+     * acted on, and nothing at all is written unless the two match.
+     */
+    val grantWriteAccess = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        val root = activeRoot
+        // Backing out is a real answer: the dialog is still there to try again or cancel.
+        if (uri == null || root == null) return@rememberLauncherForActivityResult
+
+        if (uri.toString() != root) {
+            grantNotice = "That is a different folder, so nothing was changed. Choose " +
+                "$activeLabel itself — the folder Listea is already using — to allow deleting " +
+                "from it."
+            return@rememberLauncherForActivityResult
         }
 
-        SectionCard(title = "File management") {
+        val granted = runCatching {
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+        }.isSuccess
+
+        if (granted) {
+            grantNotice = null
+            // Straight back to where the user was, rather than making them find the button again.
+            viewModel.requestCheckedFileDeletion(root)
+        } else {
+            grantNotice = "Android did not allow changes to this folder. Somewhere in internal " +
+                "storage, or a folder you picked yourself, will work."
+        }
+    }
+
+    SettingsPage("File management", modifier, onBack) {
+        SectionCard {
             SwitchRow(
                 label = "Same filter and sort everywhere",
                 checked = settings.sharedFileArrangement,
@@ -575,8 +786,8 @@ fun SettingsScreen(
             )
             HelperText(
                 "A webhook that did not go out deletes nothing. You are told the files are " +
-                    "still there, and the round stays in Every export above to be resent — " +
-                    "or you can clear the checked files here instead."
+                    "still there, and the round stays in History to be resent — or you can " +
+                    "clear the checked files here instead."
             )
 
             Spacer(Modifier.height(ListeaDimens.RowGap))
@@ -667,14 +878,6 @@ fun SettingsScreen(
                     "folder first if things have been moved around outside the app."
             )
         }
-
-        Spacer(Modifier.height(ListeaDimens.SectionGap))
-    }
-
-    // The sizes in the Upstreams card describe files that have just stopped existing, so a
-    // finished run sends the walks round again rather than leaving them to go quietly stale.
-    LaunchedEffect(deleteRequest) {
-        if (deleteRequest is DeleteCheckedRequest.Done) storageGeneration++
     }
 
     DeleteCheckedFilesDialog(
@@ -711,15 +914,15 @@ fun SettingsScreen(
 private fun UpstreamRow(
     upstream: UpstreamEntity,
     available: Boolean,
-    generation: Int
+    onRemove: () -> Unit
 ) {
     val context = LocalContext.current
+    var menuOpen by remember { mutableStateOf(false) }
     val storage by produceState<StorageInfo>(
         StorageInfo.Scanning,
         upstream.id,
         upstream.relativePath,
-        available,
-        generation
+        available
     ) {
         value = StorageInfo.Scanning
         // Resolved and walked in one go, so a folder that has been deleted since it was added is
@@ -756,6 +959,25 @@ private fun UpstreamRow(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            // Reachable whatever the grant says: a folder Listea can no longer read is exactly one
+            // a user may want to stop listing.
+            Box {
+                IconButton(onClick = { menuOpen = true }) {
+                    Icon(
+                        Icons.Filled.MoreVert,
+                        contentDescription = "More actions for ${upstream.displayName}"
+                    )
+                }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Remove Upstream…") },
+                        onClick = {
+                            menuOpen = false
+                            onRemove()
+                        }
                     )
                 }
             }

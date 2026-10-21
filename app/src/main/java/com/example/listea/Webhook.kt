@@ -181,9 +181,15 @@ data class WebhookNotice(
     val outcome: NoticeOutcome,
     val httpCode: Int?,
     val error: String?,
-    /** Whether the app's default webhook was used rather than the list's own, so a switched-off
-     * webhook can name the switch the user actually has to change. */
-    val defaultWebhook: Boolean,
+    /**
+     * Whether this round was split across more than one webhook address.
+     *
+     * A round no longer has one destination to name — a List's items may come from Todos with
+     * different addresses — so the notice names [host] when the round had one and says *several
+     * webhook addresses* when it had more. Per-group notices still carry their own host, which is
+     * what keeps a failure specific.
+     */
+    val severalDestinations: Boolean,
     val at: Long,
 
     /**
@@ -225,7 +231,10 @@ data class WebhookNotice(
             NoticeOutcome.FAILED ->
                 if (kind == ExportKind.TXT) "Txt not written" else "Webhook not sent"
 
-            NoticeOutcome.DISABLED -> "Webhook is off"
+            // A List completion whose switch is off. The app-wide default is no longer a delivery
+            // gate, so a round can no longer be *disabled* by a setting above it — the only
+            // switch that stops one now is the List's own. Legacy history rows read the same way.
+            NoticeOutcome.DISABLED -> "Export is off"
             NoticeOutcome.EMPTY -> "Nothing to send"
             NoticeOutcome.DECLINED -> "Not sent"
             // The same words as a decline, and deliberately: to the List and to the user reading
@@ -243,10 +252,10 @@ data class WebhookNotice(
             NoticeOutcome.SENT -> "Success" + (httpCode?.let { " · HTTP $it" } ?: "")
             NoticeOutcome.WRITTEN -> "Success" + (location?.let { " · $it" } ?: "")
             NoticeOutcome.FAILED -> "Failed · " + (httpCode?.let { "HTTP $it" } ?: error ?: "Failed")
-            // One switch, so one sentence. This used to name a List's own webhook when the round
-            // had come through one — a switch that no longer exists, described to a user who has
-            // no such switch to go and turn on. The only thing that can be off is the app default.
-            NoticeOutcome.DISABLED -> "Nothing was sent · the default webhook is switched off"
+            // One switch, so one sentence. This is a List's own completion switch, off; the app
+            // default is a preference now, not a gate, and a Todo's address is an address rather
+            // than a switch. A round with no address at all fails as a failure, and says so above.
+            NoticeOutcome.DISABLED -> "Nothing was sent · this export is switched off"
             NoticeOutcome.EMPTY -> "Nothing was sent · there were no items to send"
             NoticeOutcome.DECLINED -> "Nothing was sent · you chose not to send it"
             // Not *you chose*: the user was in the middle of another review and was never asked.
@@ -276,7 +285,7 @@ data class WebhookProgress(
     val listTitle: String,
     val host: String?,
     val itemCount: Int,
-    val defaultWebhook: Boolean
+    val severalDestinations: Boolean
 ) {
     val eventLabel: String get() = webhookEventLabel(event)
 
@@ -285,7 +294,7 @@ data class WebhookProgress(
         get() = buildList {
             add(eventLabel)
             add(countOfItems(itemCount))
-            host?.let { add(it) }
+            destinationSummary(host, severalDestinations)?.let { add(it) }
         }.joinToString(" - ")
 }
 
@@ -306,7 +315,7 @@ data class WebhookConfirmation(
     val listTitle: String,
     val host: String?,
     val itemCount: Int,
-    val defaultWebhook: Boolean
+    val severalDestinations: Boolean
 ) {
     val eventLabel: String get() = webhookEventLabel(event)
 
@@ -331,24 +340,32 @@ data class WebhookConfirmation(
     val factsLabel: String
         get() = buildList {
             add(countOfItems(itemCount))
-            host?.let { add(it) }
+            destinationSummary(host, severalDestinations)?.let { add(it) }
         }.joinToString(" - ")
 
     /**
      * Which webhook this would go to.
      *
-     * **There is one answer since v0.5.6, and this used to give two.** A List could carry its own
-     * URL and a round could go to either, so the dialog had to say which; the List's URL is gone
-     * and every webhook is the app default, so the branch that said *this list's webhook* was
-     * naming something the user cannot configure and the release had just deleted. The device pass
-     * caught it saying exactly that over a round bound for the *default* URL.
-     *
-     * [defaultWebhook] survives as a fact — whether the round followed the List's own choice or a
-     * Todo's — but it no longer decides this sentence, because it no longer decides the
-     * destination.
+     * **A round can have more than one destination since v0.6.2.** Each group posts to the address
+     * of the Todo it came from, or to the List's override, so a dialog raised over a round with two
+     * addresses names neither as *the* destination: it says there are several, and the per-group
+     * notices afterwards name the host that failed. One address is still named by its host, which
+     * is what a user recognizes; a round with none says so rather than showing a blank.
      */
     val destinationLabel: String
-        get() = "the default webhook"
+        get() = destinationSummary(host, severalDestinations) ?: "no webhook address"
+}
+
+/**
+ * A round's destination in the one phrase a summary line has room for: its host, *several webhook
+ * addresses* when it split, or null when there is no address to name.
+ *
+ * Shared by the progress and confirmation dialogs so the question and the report cannot describe
+ * the same round differently.
+ */
+private fun destinationSummary(host: String?, severalDestinations: Boolean): String? = when {
+    severalDestinations -> "several webhook addresses"
+    else -> host
 }
 
 /** "1 item" / "42 items", used wherever a payload is sized in front of the user. */
@@ -420,6 +437,23 @@ fun webhookUrlError(url: String): String? {
     if (parsed.protocol !in setOf("http", "https")) return "URL must start with http:// or https://"
     if (parsed.host.isNullOrBlank()) return "URL is missing a host"
     return null
+}
+
+/**
+ * Why an export of [kind] cannot use [url], or null when it can.
+ *
+ * The blank case is the one this differs from [webhookUrlError] on, and it is the case v0.6.2
+ * makes ordinary: a Todo may hold no address at all — the upgrade left old Todos blank rather than
+ * post on their behalf, and *Use default* over an empty default is a tap away. Telling that user
+ * *Enter a webhook URL* over a field they did not leave empty asks them to type an address when the
+ * real answer may be that the default they chose has none. A text export has no address and is
+ * never refused.
+ */
+fun webhookAddressProblem(kind: ExportKind, url: String): String? = when (kind) {
+    ExportKind.TXT -> null
+    ExportKind.WEBHOOK ->
+        if (url.trim().isEmpty()) "No webhook address is set for this export"
+        else webhookUrlError(url)
 }
 
 /**

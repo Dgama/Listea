@@ -53,6 +53,7 @@ import com.example.listea.data.SourceEntity
 import com.example.listea.data.SourceSummary
 import com.example.listea.data.TaskStateEntity
 import com.example.listea.data.UpstreamEntity
+import com.example.listea.data.WEBHOOK_ADDRESS_BACKFILL
 import com.example.listea.data.decisions
 import com.example.listea.data.rootRelativePathOf
 import com.example.listea.data.taskDecisions
@@ -76,6 +77,7 @@ import com.example.listea.domain.TemplateButton
 import com.example.listea.domain.TemplateScope
 import com.example.listea.domain.TemplateVersionRef
 import com.example.listea.domain.Templates
+import java.util.UUID
 
 /** What the Folder screen should be showing about a pending "create list from folder" action. */
 sealed interface FolderListRequest {
@@ -498,7 +500,16 @@ class ListsViewModel @JvmOverloads constructor(
     application: Application,
     private val dao: ListsDao = ListeaDatabase.get(application).listsDao(),
     private val folders: FolderSource = SafFolderSource(application),
-    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    /**
+     * The template tables, when the caller has a database of its own.
+     *
+     * Null on the app's own path, which opens [ListeaDatabase.get] on first use. A test that seeds
+     * an in-memory database and also drives a refresh needs both halves to be the *same* database:
+     * the picker offers what this reads, while the run writes through [dao], and two databases would
+     * quietly disagree about what the offered version is.
+     */
+    private val injectedTemplateStore: TemplateStore? = null
 ) : AndroidViewModel(application) {
 
     private val settingsStore = SettingsStore(application)
@@ -510,6 +521,39 @@ class ListsViewModel @JvmOverloads constructor(
      */
     val settings: StateFlow<AppSettings> = settingsStore.settings
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AppSettings())
+
+    /**
+     * Whether the one-time v27 address backfill has been attempted in this process.
+     *
+     * Deliberately not run in the constructor: most tests build a ViewModel against a database and
+     * a settings store they arranged, and a constructor with a write would make every one of them
+     * depend on the marker table. [ListeaApp] starts [ensureWebhookAddressBackfill] once on launch,
+     * and the delivery, test and resend paths await it, so a send can never race the snapshot.
+     */
+    @Volatile
+    private var webhookAddressBackfillDone = false
+    private val webhookAddressBackfillLock = Mutex()
+
+    /**
+     * Applies `MIGRATION_26_27`'s deferred work: copy the old default address onto existing Todos.
+     *
+     * Idempotent at the database as well as here — the marker is consumed in the same transaction
+     * as the write — so a second call, or a second process, cannot re-copy a default the user has
+     * since edited. The flag only saves the round trip.
+     */
+    suspend fun ensureWebhookAddressBackfill() {
+        if (webhookAddressBackfillDone) return
+        webhookAddressBackfillLock.withLock {
+            if (webhookAddressBackfillDone) return
+            val current = settingsStore.read()
+            dao.applyWebhookAddressBootstrap(
+                name = WEBHOOK_ADDRESS_BACKFILL,
+                url = current.defaultWebhookUrl,
+                gateWasOn = current.defaultWebhookEnabled
+            )
+            webhookAddressBackfillDone = true
+        }
+    }
 
     /**
      * The remembered filters and sort orders. Observed like [settings] and written the same way.
@@ -633,6 +677,13 @@ class ListsViewModel @JvmOverloads constructor(
     val webhookRecordCount: StateFlow<Int> = dao.observeWebhookRecordCount()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
+    /**
+     * How many rounds the history holds, which is not how many rows it holds: one delivery can
+     * leave several exports. Legacy rows without a round id each count as a round of one.
+     */
+    val webhookRoundCount: StateFlow<Int> = dao.observeWebhookRoundCount()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+
     /** How much of it is still owed to a receiver — the part worth drawing attention to. */
     val pendingWebhookCount: StateFlow<Int> = dao.observePendingWebhookCount()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
@@ -643,10 +694,11 @@ class ListsViewModel @JvmOverloads constructor(
      * **Built on first use rather than in the constructor**, and not only to save the work. This is
      * the one thing on this ViewModel that reaches past the [ListsDao] it is handed, so it is the
      * one thing a test that injects a fake DAO would be made to open the app's real database file
-     * for — and none of those tests looks at a template.
+     * for — and none of those tests looks at a template. [injectedTemplateStore] is for the test
+     * that does.
      */
     private val templateStore: TemplateStore by lazy {
-        TemplateStore(ListeaDatabase.get(getApplication()))
+        injectedTemplateStore ?: TemplateStore(ListeaDatabase.get(getApplication()))
     }
 
     /**
@@ -1174,6 +1226,18 @@ class ListsViewModel @JvmOverloads constructor(
     }
 
     /**
+     * Forget one Upstream. The registration goes; everything made from it stays.
+     *
+     * Only the `upstreams` row is deleted. The Todos that were created under it, their Tasks and
+     * decisions, the Lists holding those Tasks and the files on disk are all untouched — an
+     * Upstream is where material came from, not what was made of it, and forgetting the source of
+     * something is not the same act as destroying the thing. The SAF grant is left in place too,
+     * because another Upstream may sit under the same tree and because dropping a permission is a
+     * separate decision the confirmation names rather than takes.
+     */
+    fun deleteUpstream(id: String) = launchDb { dao.deleteUpstream(id) }
+
+    /**
      * Step 1 of dissolving a Todo: read what it holds and which Lists would lose rows. Reads only.
      *
      * The Lists are gathered here rather than inside the delete so the confirmation can *name* them,
@@ -1558,7 +1622,17 @@ class ListsViewModel @JvmOverloads constructor(
             // Seeded from Settings rather than from any Todo, because there is no Todo yet: this is
             // the answer the user usually gives, offered here so they do not have to give it again.
             contentPolicy = settings.value.defaultContentPolicy,
-            templates = listOf(seededAttachment(attachable))
+            templates = listOf(seededAttachment(attachable)),
+            // The standing answer a new Todo is born with, offered as the switch it is rather than
+            // applied silently after registration. A new Todo keeps its decisions on delete, the
+            // behaviour every Todo had before that switch existed.
+            followUpstream = settings.value.followUpstreamNewTodos,
+            keepStateOnDelete = false,
+            // The address starts empty and the radio starts where the preselect preference says.
+            // *Use default* resolves at Confirm, not here, so the Todo gets a copy of what the
+            // default is at the moment the user says yes.
+            webhookUrl = "",
+            webhookFromDefault = settings.value.defaultWebhookEnabled
         )
         pendingImport = PendingImport(rootUri, folderPath, tree, options)
         _importFolderRequest.value = ImportFolderRequest.Confirm(
@@ -1616,6 +1690,19 @@ class ListsViewModel @JvmOverloads constructor(
             // the built-in it was configured with rather than on nothing — see
             // [decodeTemplateAttachments] for the two shapes it accepts.
             templates = decodeTemplateAttachments(source.assetControls),
+            // A refresh is the run that carries a Todo forward: what it holds stays ticked, and
+            // confirming moves each one to the version the picker offered. This is what makes an
+            // untouched row adopt an edited template instead of re-stamping the old version — see
+            // [upgradeAttachments] and the notice the dialog draws from [refreshVersionNotice].
+            upgradeTemplates = true,
+            // The Todo's standing answers, offered here so a refresh can change them without a
+            // second trip to the Todo's card. The address opens on what the row holds and on
+            // whether that value was a default copy; the dialog preselected *Keep this Todo's
+            // address* so an untouched refresh writes the same value back.
+            followUpstream = source.followUpstream,
+            keepStateOnDelete = source.keepStateOnDelete,
+            webhookUrl = source.webhookUrl,
+            webhookFromDefault = source.webhookFromDefault,
             // The same rule a third time: how this Todo exports is the Todo's own answer, and a
             // refresh offers it unchanged rather than re-deciding it. `inheritable = false`
             // because this is a Todo's column — `inherit` on one is *nothing*, which is the
@@ -1749,11 +1836,41 @@ class ListsViewModel @JvmOverloads constructor(
         // a user who clears the field gets what they were shown.
         val name = options.displayName.trim().ifEmpty { sourceNameFor(pending.folderPath) }
 
+        // A refresh adopts the offered version of every template it still holds — see
+        // [upgradeAttachments] — while Create and an upstream sync submit exactly what they were
+        // given. Resolved before the encode so the Todo's row, the run and the write-back all get
+        // one answer.
+        val attachments = if (options.upgradeTemplates) {
+            upgradeAttachments(options.templates, attachableTemplates())
+        } else {
+            options.templates
+        }
+
         // Encoded once, here, and the same string goes to all three writes below — the Todo's row,
         // the run, and the Todo's row again. The dialog collected *references*; what every column
         // holds is the one canonical spelling of them, so no two of those writes can disagree about
         // how a list of attachments is written down.
-        val assetControls = encodeTemplateAttachments(options.templates)
+        val assetControls = encodeTemplateAttachments(attachments)
+
+        // The address is resolved by the dialog (*Use default* copies the live default at Confirm;
+        // *Custom* is what was typed) and arrives here final. A Todo whose method is Webhook must
+        // have a usable one **before anything is written**: *Use default* over an empty default is
+        // a tap away, and letting the run register first and fail later would leave a Todo whose
+        // every export fails. A refresh and a create are the runs that made this decision, so they
+        // are the ones that may refuse on it; a sync asked nobody and must still bring in material.
+        val webhookUrl = options.webhookUrl.trim()
+        val addressProblem = if (options.validateWebhookAddress &&
+            options.exportChoice == ExportChoice.By(ExportKind.WEBHOOK)
+        ) {
+            webhookAddressProblem(ExportKind.WEBHOOK, webhookUrl)
+        } else {
+            null
+        }
+        if (addressProblem != null) {
+            _importFolderRequest.value =
+                ImportFolderRequest.Error("$addressProblem. Nothing was changed.")
+            return
+        }
 
         val source = if (pending.sourceId == null) {
             dao.registerSource(
@@ -1765,7 +1882,10 @@ class ListsViewModel @JvmOverloads constructor(
                 contentPolicy = options.contentPolicy,
                 assetControls = assetControls,
                 exportKind = encodeExportChoice(options.exportChoice),
-                followUpstream = settings.value.followUpstreamNewTodos,
+                followUpstream = options.followUpstream,
+                keepStateOnDelete = options.keepStateOnDelete,
+                webhookUrl = webhookUrl,
+                webhookFromDefault = options.webhookFromDefault,
                 now = now()
             )
         } else {
@@ -1811,7 +1931,15 @@ class ListsViewModel @JvmOverloads constructor(
             // The dialog's answer, written back here rather than in `runImport` above, for the
             // same reason `contentPolicy` is: the run is about this folder's Tasks, and the
             // choice is a standing answer about the Todo that outlives it.
-            exportKind = encodeExportChoice(options.exportChoice)
+            exportKind = encodeExportChoice(options.exportChoice),
+            // The standing answers the dialog now carries. A create has just written them in
+            // `registerSource`; writing them again here keeps one statement of the Todo's
+            // configuration rather than two paths that could disagree. A sync passes back exactly
+            // what it read, so *no dialog* means *no change*, never *reset to default*.
+            followUpstream = options.followUpstream,
+            keepStateOnDelete = options.keepStateOnDelete,
+            webhookUrl = webhookUrl,
+            webhookFromDefault = options.webhookFromDefault
         )
 
         _importVersion.value += 1
@@ -1864,6 +1992,14 @@ class ListsViewModel @JvmOverloads constructor(
             // Todo already names, so following an upstream changes the material and never the
             // buttons.
             templates = decodeTemplateAttachments(source.assetControls),
+            // The same rule for every standing answer the dialog now carries. A sync has no dialog
+            // and asked nobody, so it writes back exactly what it read — including the address,
+            // which it also may not refuse over: see [ImportOptions.validateWebhookAddress].
+            followUpstream = source.followUpstream,
+            keepStateOnDelete = source.keepStateOnDelete,
+            webhookUrl = source.webhookUrl,
+            webhookFromDefault = source.webhookFromDefault,
+            validateWebhookAddress = false,
             // And the same rule for the choice, which matters more here than anywhere else: a
             // sync has no dialog, so a Todo that did not carry its own answer through this call
             // would be silently reset to *export nothing* by the act of following its upstream.
@@ -2010,12 +2146,15 @@ class ListsViewModel @JvmOverloads constructor(
     fun createListFromCatalog(title: String, taskIds: List<String>, onCreated: (Long) -> Unit) =
         launchDb {
             if (taskIds.isEmpty()) return@launchDb
-            val defaults = settingsStore.read()
             val created = runCatching {
                 dao.createListFromTasks(
                     title = title.trim().ifEmpty { "New list" },
                     taskIds = taskIds,
-                    exportOnCompletion = defaults.defaultWebhookEnabled,
+                    // A new List starts with completion export off. Since v0.6.2 the switch is a
+                    // per-List decision, and no List should begin posting because it happened to
+                    // be created — least of all one made right after an install that had delivery
+                    // switched off.
+                    exportOnCompletion = false,
                     now = now()
                 )
             }.getOrNull()
@@ -2064,7 +2203,6 @@ class ListsViewModel @JvmOverloads constructor(
 
     private suspend fun commitPendingFolderList() {
         val pending = pendingFolderList ?: return
-        val defaults = settingsStore.read()
         val created = runCatching {
             dao.createFolderList(
                 title = pending.title,
@@ -2073,8 +2211,9 @@ class ListsViewModel @JvmOverloads constructor(
                 files = pending.files,
                 replacedListIds = pending.replacedIds,
                 // Same template as a manual list gets, including when this replaces an
-                // overlapping list: there is one default, not one per kind of list.
-                exportOnCompletion = defaults.defaultWebhookEnabled,
+                // overlapping list: there is one default, not one per kind of list — and it is
+                // off. A folder List is no more entitled to start posting than a picked one.
+                exportOnCompletion = false,
                 now = now()
             )
         }
@@ -2448,6 +2587,28 @@ class ListsViewModel @JvmOverloads constructor(
 
     fun setDefaultWebhookUrl(url: String) = launchDb { settingsStore.setDefaultWebhookUrl(url) }
 
+    /**
+     * Saves a Todo's own webhook address, and whether it is a copy of the default or typed.
+     *
+     * The copy is a snapshot, not a subscription: nothing re-reads Settings afterwards, which is
+     * what lets a Todo keep posting where it was configured while the default moves on. The
+     * backfill is awaited first for the same reason the delivery paths await it — a user can reach
+     * this dialog before the one-time upgrade has marked old Todos, and an edit made during that
+     * window must not be overwritten by the snapshot a moment later.
+     */
+    fun setTodoWebhookAddress(sourceId: String, url: String, fromDefault: Boolean) = launchDb {
+        ensureWebhookAddressBackfill()
+        dao.setSourceWebhookAddress(sourceId, url.trim(), fromDefault)
+    }
+
+    /**
+     * Saves a List's webhook address override. Empty means *follow each Todo*, which is the
+     * ordinary case and why the field can be cleared.
+     */
+    fun setListWebhookUrl(listId: Long, url: String) = launchDb {
+        dao.setListWebhookUrl(listId, url.trim())
+    }
+
     fun setVideoAutoplay(enabled: Boolean) = launchDb { settingsStore.setVideoAutoplay(enabled) }
 
     fun setVideoStartMuted(muted: Boolean) = launchDb { settingsStore.setVideoStartMuted(muted) }
@@ -2552,7 +2713,7 @@ class ListsViewModel @JvmOverloads constructor(
     }
 
     /**
-     * Explicit user action, so it posts regardless of the enabled toggle and never touches state.
+     * Explicit user action, so it posts regardless of any switch and never touches state.
      *
      * **A payload of its own and not a List's**, as of v0.5.6. It used to send whatever List the
      * user happened to be looking at, which made the button a statement about that List wearing a
@@ -2560,31 +2721,34 @@ class ListsViewModel @JvmOverloads constructor(
      * The button now sits on the webhook method's own page in Settings and posts a payload naming
      * nothing, because the only question it answers is *can this URL receive?*.
      *
+     * **It is a round of one, history included.** v0.6.2 made the History the single place to see
+     * what left and to resend it, so a test that posted without leaving a record would be the one
+     * delivery the History cannot account for — and a test that *failed* would leave no trace of
+     * the address that was tried. It is recorded even when the URL is unusable, for the same
+     * reason every other failed attempt is.
+     *
      * The one export that does not ask first, along with a resend: pressing a button labelled
      * *Send a test payload* is the confirmation. It still shows the progress dialog, because a
      * receiver can be slow and the seconds in between otherwise look like nothing happening.
      */
     fun testWebhook() = launchDb {
+        ensureWebhookAddressBackfill()
         val current = settingsStore.read()
         val url = current.defaultWebhookUrl.trim()
+        val at = now()
+        val roundId = UUID.randomUUID().toString()
 
         fun tell(outcome: NoticeOutcome, httpCode: Int?, error: String?) = announce(
             listTitle = "",
             event = EVENT_EXPORT_TEST,
             url = url,
             kind = ExportKind.WEBHOOK,
-            defaultWebhook = true,
+            severalDestinations = false,
             itemCount = 1,
             outcome = outcome,
             httpCode = httpCode,
             error = error
         )
-
-        val urlProblem = webhookUrlError(url)
-        if (urlProblem != null) {
-            tell(NoticeOutcome.FAILED, null, urlProblem)
-            return@launchDb
-        }
 
         val payload = ExportPayload(
             event = EVENT_EXPORT_TEST,
@@ -2593,7 +2757,7 @@ class ListsViewModel @JvmOverloads constructor(
             completedAt = null,
             sourceId = null,
             sourceTitle = null,
-            at = now(),
+            at = at,
             tasks = listOf(
                 ExportTaskView(
                     publicId = "test",
@@ -2612,33 +2776,62 @@ class ListsViewModel @JvmOverloads constructor(
                 )
             )
         )
+        val body = buildWebhookPayload(payload)
+
+        suspend fun keep(notice: WebhookNotice) = dao.insertWebhookRecord(
+            ExportRecordEntity(
+                event = EVENT_EXPORT_TEST,
+                listTitle = "",
+                itemCount = payload.tasks.size,
+                payload = body,
+                at = now(),
+                outcome = notice.outcome.name,
+                detail = notice.outcomeLabel,
+                kind = ExportKind.WEBHOOK.key,
+                webhookUrl = url,
+                roundId = roundId
+            )
+        )
+
+        val urlProblem = webhookAddressProblem(ExportKind.WEBHOOK, url)
+        if (urlProblem != null) {
+            keep(tell(NoticeOutcome.FAILED, null, urlProblem))
+            return@launchDb
+        }
+
         val result = post(
             WebhookProgress(
                 event = EVENT_EXPORT_TEST,
                 listTitle = "",
                 host = webhookHost(url),
                 itemCount = 1,
-                defaultWebhook = true
+                severalDestinations = false
             ),
             url,
-            buildWebhookPayload(payload)
+            body
         )
-        tell(
-            if (result.status == DeliveryStatus.SUCCESS) NoticeOutcome.SENT else NoticeOutcome.FAILED,
-            result.httpCode,
-            result.error
+        keep(
+            tell(
+                if (result.status == DeliveryStatus.SUCCESS) {
+                    NoticeOutcome.SENT
+                } else {
+                    NoticeOutcome.FAILED
+                },
+                result.httpCode,
+                result.error
+            )
         )
     }
 
     /**
      * A Quick Review reached the end of its queue.
      *
-     * Sends only when [AppSettings.quickReviewWebhookEnabled] is on, and then through the app's
-     * default webhook whole: Quick Review has no configuration of its own, by design, so the
-     * default URL is where it posts and the default switch is what enables it. Nothing is sent
-     * — and nothing is said — when Quick Review webhooks are off, because that is the state
-     * Quick Review has always been in. The payload covers [queueIds], the folder that was
-     * reviewed, not the whole list.
+     * Sends only when [AppSettings.quickReviewWebhookEnabled] is on. Quick Review has no
+     * configuration of its own, by design, so it defers to the Todos its files came from: each
+     * group posts to its Todo's address, and files no Todo owns fall back to the live default.
+     * Nothing is sent — and nothing is said — when Quick Review webhooks are off, because that is
+     * the state Quick Review has always been in. The payload covers [queueIds], the folder that
+     * was reviewed, not the whole list.
      *
      * The settings are read from the store rather than from the observed [settings] flow: this
      * fires on a swipe, and a delivery must never act on a value that has not warmed up yet.
@@ -3014,9 +3207,18 @@ class ListsViewModel @JvmOverloads constructor(
         facts: PayloadFacts,
         assumeNotNow: Boolean = false
     ) {
+        // The one-time snapshot must have finished before any round asks where it goes: on an
+        // upgraded install this call fills every Todo's address from Settings, and a round that
+        // ran ahead of it would see every Todo blank and refuse them all.
+        ensureWebhookAddressBackfill()
         val current = settingsStore.read()
         val listId = list.id
-        val url = current.defaultWebhookUrl.trim()
+        val defaultUrl = current.defaultWebhookUrl.trim()
+        val listUrl = list.webhookUrl.trim()
+        // For the outcomes that end before any group exists — switched off, nothing to send,
+        // nothing configured — there is no group to take an address from. The List's own address
+        // when it has one, the live default otherwise.
+        val roundUrl = listUrl.ifEmpty { defaultUrl }
 
         // The one door every notice in this method goes through, so a round that is being kept
         // quietly cannot leak one out of the branch nobody remembered. The notice is still built
@@ -3042,6 +3244,11 @@ class ListsViewModel @JvmOverloads constructor(
         // says a different second — and so the two are assertable together rather than being a
         // thing that is usually right.
         val at = now()
+
+        // One round, one id, however many groups it splits into. History groups by this so a
+        // split round reads as one event with several deliveries; an empty id means a row written
+        // before v0.6.2, which is a round of one.
+        val roundId = UUID.randomUUID().toString()
 
         // The round's payload, in the shape the pre-split code already had: only the origin moves.
         // Every group of a split round walks the same facts, so the two bodies are two views of one
@@ -3076,12 +3283,15 @@ class ListsViewModel @JvmOverloads constructor(
             val payload = payloadOf(items, null, null)
             val notice = queued(
                 noticeOf(
-                    list.title, event, url, kind = kind, defaultWebhook = true,
+                    list.title, event, roundUrl, kind = kind, severalDestinations = false,
                     itemCount = payload.tasks.size,
                     outcome = NoticeOutcome.DISABLED, httpCode = null, error = null
                 )
             )
-            keepRound(list, event, kind, payload, bodyOf(kind, url, payload), notice)
+            keepRound(
+                list, event, kind, payload, bodyOf(kind, roundUrl, payload), notice,
+                roundUrl, roundId
+            )
             return
         }
 
@@ -3093,8 +3303,8 @@ class ListsViewModel @JvmOverloads constructor(
         if (items.isEmpty()) {
             queued(
                 noticeOf(
-                    list.title, event, url, kind = roundKind, defaultWebhook = true, itemCount = 0,
-                    outcome = NoticeOutcome.EMPTY, httpCode = null, error = null
+                    list.title, event, roundUrl, kind = roundKind, severalDestinations = false,
+                    itemCount = 0, outcome = NoticeOutcome.EMPTY, httpCode = null, error = null
                 )
             )
             return
@@ -3108,19 +3318,30 @@ class ListsViewModel @JvmOverloads constructor(
             dao.getExportSources(items.map { it.taskId }.distinct())
         }.associateBy { it.taskId }
 
-        val groups = planExports(items, listChoice) { row ->
-            sources[row.taskId]?.let { stored ->
-                ExportSource(
-                    id = stored.sourceId,
-                    title = stored.sourceName,
-                    // A Todo's word decoded as a Todo's: `inherit` on one is Nothing, because a
-                    // Todo has nothing above it to follow. This is decision 6's asymmetry, met at
-                    // the one place the two columns' vocabularies touch.
-                    kind = (decodeExportChoice(stored.exportKind, inheritable = false)
-                        as? ExportChoice.By)?.kind
-                )
-            }
-        }
+        val groups = planExports(
+            items = items,
+            listChoice = listChoice,
+            sourceOf = { row ->
+                sources[row.taskId]?.let { stored ->
+                    ExportSource(
+                        id = stored.sourceId,
+                        title = stored.sourceName,
+                        // A Todo's word decoded as a Todo's: `inherit` on one is Nothing, because a
+                        // Todo has nothing above it to follow. This is decision 6's asymmetry, met
+                        // at the one place the two columns' vocabularies touch.
+                        kind = (decodeExportChoice(stored.exportKind, inheritable = false)
+                            as? ExportChoice.By)?.kind,
+                        // The address this Todo holds. Empty is a fact, not a gap: the planner
+                        // keeps it and the group fails visibly instead of borrowing the default.
+                        webhookUrl = stored.webhookUrl.trim()
+                    )
+                }
+            },
+            // A List's non-empty address overrides every webhook group it produces; when it has
+            // none, each group falls back to its Todo, and unowned items to the live default.
+            listWebhookUrl = listUrl,
+            defaultWebhookUrl = defaultUrl
+        )
 
         // Every Todo this round touched said nothing exports, so there is no group to deliver and
         // no payload to keep. **The round is reported anyway, and that is the point.**
@@ -3139,13 +3360,25 @@ class ListsViewModel @JvmOverloads constructor(
         if (groups.isEmpty()) {
             queued(
                 noticeOf(
-                    list.title, event, url, kind = roundKind, defaultWebhook = true,
+                    list.title, event, roundUrl, kind = roundKind, severalDestinations = false,
                     itemCount = items.size,
                     outcome = NoticeOutcome.UNCONFIGURED, httpCode = null, error = null
                 )
             )
             return
         }
+
+        // How many different receivers this round has, said once so the one confirmation it asks
+        // and the summary it shows cannot disagree. Blank addresses are left out: a group with no
+        // address fails before anything is sent, and counting it would make a round with one real
+        // destination claim to have several.
+        val roundAddresses = groups
+            .filter { it.kind == ExportKind.WEBHOOK }
+            .map { it.webhookUrl.trim() }
+            .filter { it.isNotEmpty() }
+            .toSet()
+        val severalDestinations = roundAddresses.size > 1
+        val roundHost = roundAddresses.singleOrNull()?.let { webhookHost(it) }
 
         val notices = mutableListOf<WebhookNotice>()
 
@@ -3155,8 +3388,11 @@ class ListsViewModel @JvmOverloads constructor(
         var roundAnswer: Boolean? = null
 
         groups.forEach { group ->
+            // Where this group posts. Resolved by the planner and used for the check, the body,
+            // the exporter, the progress and the history row, so all five name one destination.
+            val groupUrl = group.webhookUrl.trim()
             val payload = payloadOf(group.items, group.sourceId, group.sourceTitle)
-            val body = bodyOf(group.kind, url, payload)
+            val body = bodyOf(group.kind, groupUrl, payload)
 
             fun describe(
                 outcome: NoticeOutcome,
@@ -3166,9 +3402,10 @@ class ListsViewModel @JvmOverloads constructor(
             ) = noticeOf(
                 listTitle = list.title,
                 event = event,
-                url = url,
+                url = groupUrl,
                 kind = group.kind,
-                defaultWebhook = group.sourceId == null,
+                // Per-group notices name this group's own host, so they are never *several*.
+                severalDestinations = false,
                 itemCount = payload.tasks.size,
                 outcome = outcome,
                 httpCode = httpCode,
@@ -3186,37 +3423,35 @@ class ListsViewModel @JvmOverloads constructor(
 
             // A webhook with nowhere to go is the failure the user most needs telling about, and
             // it is recorded against the List as every other failure is: the round happened, and
-            // the reason it did not leave is configuration the user can fix.
-            val urlProblem = if (group.kind == ExportKind.WEBHOOK) webhookUrlError(url) else null
+            // the reason it did not leave is configuration the user can fix. The message
+            // distinguishes *no address at all* from a malformed one, because the fix differs.
+            val urlProblem = webhookAddressProblem(group.kind, groupUrl)
             if (urlProblem != null) {
                 if (recordAgainstList) {
                     dao.recordDelivery(listId, now(), DeliveryStatus.FAILED.name, null, urlProblem)
                 }
-                keepRound(list, event, group.kind, payload, body, tell(NoticeOutcome.FAILED, null, urlProblem))
-                return@forEach
-            }
-
-            val exporter = exporterFor(group.kind, url, getApplication())
-            if (exporter == null) {
                 keepRound(
                     list, event, group.kind, payload, body,
-                    tell(NoticeOutcome.FAILED, null, "there is nowhere for this to go")
+                    tell(NoticeOutcome.FAILED, null, urlProblem),
+                    groupUrl, roundId
                 )
                 return@forEach
             }
 
-            // A webhook switch that is off is not a failure and not a decision to put to the user:
-            // nothing is attempted, so there is nothing to confirm and nothing to retry. Only the
-            // webhook kind has such a switch — a file write needs no permission to happen.
-            if (group.kind == ExportKind.WEBHOOK && !current.defaultWebhookEnabled) {
-                keepRound(list, event, group.kind, payload, body, tell(NoticeOutcome.DISABLED, null, null))
+            val exporter = exporterFor(group.kind, groupUrl, getApplication())
+            if (exporter == null) {
+                keepRound(
+                    list, event, group.kind, payload, body,
+                    tell(NoticeOutcome.FAILED, null, "there is nowhere for this to go"),
+                    groupUrl, roundId
+                )
                 return@forEach
             }
 
             // Everything is settled and something really is about to leave — so this is where an
-            // automatic delivery asks. Deliberately after the checks above and not before: a
-            // switched-off webhook or an unusable URL is not a decision to put to the user, and
-            // asking whether to export only to answer that it was off anyway would be theatre.
+            // automatic delivery asks. Deliberately after the checks above and not before: an
+            // address that cannot be used is not a decision to put to the user, and asking
+            // whether to export only to answer that it had nowhere to go would be theatre.
             //
             // `asksBeforeDelivering` is what keeps a file write out of it. Asking before every
             // round would train the user to tap through the one dialog that matters.
@@ -3227,29 +3462,32 @@ class ListsViewModel @JvmOverloads constructor(
             // way. There is no notice for it: the user just pressed the button, and telling them
             // what they did is noise. The List is told all the same — see the record below.
             //
-            // Sits exactly here, and not before the three checks above, so that *the app is
-            // answering for the user* means the same thing it means when the user answers: this is
-            // the point past which something would actually go. A URL that cannot be used, or a
-            // webhook that is switched off, is still recorded as the failure and the state it is
-            // — dismissing a List's export as *not now* because its URL happens to be blank would
-            // file a configuration problem under a choice the user never made.
+            // Sits exactly here, and not before the checks above, so that *the app is answering
+            // for the user* means the same thing it means when the user answers: this is the point
+            // past which something would actually go. An unusable address is still recorded as
+            // the failure it is — dismissing a List's export as *not now* because its address
+            // happens to be blank would file a configuration problem under a choice the user never
+            // made.
             if (assumeNotNow) {
                 val held = describe(NoticeOutcome.DEFERRED, null, null)
                 if (recordAgainstList) {
                     dao.recordDelivery(listId, now(), DeliveryStatus.NOT_SENT.name, null, null)
                 }
-                keepRound(list, event, group.kind, payload, body, held)
+                keepRound(list, event, group.kind, payload, body, held, groupUrl, roundId)
                 return@forEach
             }
 
             if (confirm && exporter.asksBeforeDelivering) {
+                // One question for the whole round, so it describes the round: the one host when
+                // every group shares it, and *several webhook addresses* when they do not. The
+                // per-group notices afterwards are the ones that name which host failed.
                 val allowed = roundAnswer ?: awaitConfirmation(
                     WebhookProgress(
                         event = event,
                         listTitle = list.title,
-                        host = webhookHost(url),
+                        host = roundHost,
                         itemCount = payload.tasks.size,
-                        defaultWebhook = group.sourceId == null
+                        severalDestinations = severalDestinations
                     )
                 ).also { roundAnswer = it }
                 if (!allowed) {
@@ -3261,7 +3499,11 @@ class ListsViewModel @JvmOverloads constructor(
                     if (recordAgainstList) {
                         dao.recordDelivery(listId, now(), DeliveryStatus.NOT_SENT.name, null, null)
                     }
-                    keepRound(list, event, group.kind, payload, body, describe(NoticeOutcome.DECLINED, null, null))
+                    keepRound(
+                        list, event, group.kind, payload, body,
+                        describe(NoticeOutcome.DECLINED, null, null),
+                        groupUrl, roundId
+                    )
                     return@forEach
                 }
             }
@@ -3284,7 +3526,7 @@ class ListsViewModel @JvmOverloads constructor(
                 }
                 ExportAttempt.Skipped -> tell(NoticeOutcome.DISABLED, null, null)
             }
-            keepRound(list, event, group.kind, payload, body, notice)
+            keepRound(list, event, group.kind, payload, body, notice, groupUrl, roundId)
         }
 
         // What the round leaves on the device, once the round itself has been reported.
@@ -3327,11 +3569,16 @@ class ListsViewModel @JvmOverloads constructor(
         exporterFor(kind, url, getApplication())?.render(payload) ?: buildWebhookPayload(payload)
 
     /**
-     * Keeps one group's round in the history, in the same words the user was just given.
+     * Keeps one group's delivery in the history, in the same words the user was just given.
      *
      * Successes included: a history that holds only failures cannot answer *did that round actually
      * go out?*, which is the question people have. Nothing is kept for a group with nothing in it —
      * there would be nothing to resend.
+     *
+     * [webhookUrl] is the address this attempt used, recorded so a resend can go back to it rather
+     * than to whatever Settings happens to say later; it is empty for a text export, which has no
+     * destination of that kind. [roundId] is shared by every group of one `deliverPayload` call, so
+     * the History can show a split round as one event.
      */
     private suspend fun keepRound(
         list: ListEntity,
@@ -3339,7 +3586,9 @@ class ListsViewModel @JvmOverloads constructor(
         kind: ExportKind,
         payload: ExportPayload,
         body: String,
-        notice: WebhookNotice
+        notice: WebhookNotice,
+        webhookUrl: String,
+        roundId: String
     ) {
         if (payload.tasks.isEmpty()) return
         dao.insertWebhookRecord(
@@ -3351,7 +3600,9 @@ class ListsViewModel @JvmOverloads constructor(
                 at = now(),
                 outcome = notice.outcome.name,
                 detail = notice.outcomeLabel,
-                kind = kind.key
+                kind = kind.key,
+                webhookUrl = webhookUrl,
+                roundId = roundId
             )
         )
     }
@@ -3375,7 +3626,7 @@ class ListsViewModel @JvmOverloads constructor(
                 listTitle = describing.listTitle,
                 host = describing.host,
                 itemCount = describing.itemCount,
-                defaultWebhook = describing.defaultWebhook
+                severalDestinations = describing.severalDestinations
             )
         )
         _webhookConfirmations.update { it + pending }
@@ -3422,19 +3673,38 @@ class ListsViewModel @JvmOverloads constructor(
     }
 
     /**
-     * Sends a kept payload again, to the default URL as it stands right now.
+     * Sends a kept payload again.
      *
-     * Only the URL is required: a record exists precisely because something was misconfigured,
-     * and refusing to retry it because *Default enabled* is still off would be refusing to fix
-     * the thing the user came here to fix. The body is replayed byte for byte rather than
-     * rebuilt, so what arrives is what failed, whatever has happened to the list since.
+     * The address, in order of preference: [address] when the caller supplies one — the History's
+     * resend dialog prefills it and the user may edit it for this attempt — then the address the
+     * record itself used, then the live default. The middle one is why resend can fix a round that
+     * went to a Todo's own address after that Todo has moved on; the last is all a row written
+     * before v0.6.2 can offer, and such a row says its original address was not recorded.
      *
-     * A record is deleted only once a receiver has actually accepted it. Anything else leaves it
-     * exactly where it was and says why.
+     * A temporary [address] is for one attempt only: neither it nor the round id is written back,
+     * so the record keeps saying where the original went. Only `at`, `outcome` and `detail` move,
+     * and the detail gains the host when the retry went somewhere else.
+     *
+     * Only the URL is required: a record exists precisely because something was misconfigured, and
+     * refusing to retry it because a switch elsewhere is off would be refusing to fix the thing the
+     * user came here to fix. The body is replayed byte for byte rather than rebuilt, so what
+     * arrives is what failed, whatever has happened to the list since.
      */
-    fun resendWebhookRecord(id: Long) = launchDb {
+    fun resendWebhookRecord(id: Long, address: String? = null) = launchDb {
         val record = dao.getWebhookRecord(id) ?: return@launchDb
-        val url = settingsStore.read().defaultWebhookUrl.trim()
+        val stored = record.webhookUrl.trim()
+        val current = settingsStore.read().defaultWebhookUrl.trim()
+        val url = address?.trim()?.takeIf { it.isNotEmpty() }
+            ?: stored.takeIf { it.isNotEmpty() }
+            ?: current
+
+        // Said beside the outcome, never written into the address column: what this attempt should
+        // be findable by is where it went and why there is no record of the original.
+        val note = when {
+            stored.isEmpty() -> "original address not recorded"
+            url != stored -> webhookHost(url)?.let { "resent to $it" }
+            else -> null
+        }
 
         fun tell(outcome: NoticeOutcome, httpCode: Int?, error: String?) = announce(
             listTitle = record.listTitle,
@@ -3443,17 +3713,21 @@ class ListsViewModel @JvmOverloads constructor(
             // The record's own kind, so a replayed round is described as what it was. Only a
             // webhook record is offered a Resend at all; a txt one never reaches here.
             kind = ExportKind.fromKey(record.kind) ?: ExportKind.WEBHOOK,
-            defaultWebhook = true,
+            severalDestinations = false,
             itemCount = record.itemCount,
             outcome = outcome,
             httpCode = httpCode,
             error = error
         )
 
-        suspend fun settle(notice: WebhookNotice) =
-            dao.updateWebhookRecord(id, now(), notice.outcome.name, notice.outcomeLabel)
+        suspend fun settle(notice: WebhookNotice) = dao.updateWebhookRecord(
+            id,
+            now(),
+            notice.outcome.name,
+            notice.outcomeLabel + (note?.let { " · $it" } ?: "")
+        )
 
-        val urlProblem = webhookUrlError(url)
+        val urlProblem = webhookAddressProblem(ExportKind.WEBHOOK, url)
         if (urlProblem != null) {
             settle(tell(NoticeOutcome.FAILED, null, urlProblem))
             return@launchDb
@@ -3465,7 +3739,7 @@ class ListsViewModel @JvmOverloads constructor(
                 listTitle = record.listTitle,
                 host = webhookHost(url),
                 itemCount = record.itemCount,
-                defaultWebhook = true
+                severalDestinations = false
             ),
             url,
             record.payload
@@ -3515,7 +3789,7 @@ class ListsViewModel @JvmOverloads constructor(
         event: String,
         url: String,
         kind: ExportKind,
-        defaultWebhook: Boolean,
+        severalDestinations: Boolean,
         itemCount: Int?,
         outcome: NoticeOutcome,
         httpCode: Int?,
@@ -3523,7 +3797,8 @@ class ListsViewModel @JvmOverloads constructor(
         location: String? = null
     ): WebhookNotice = raise(
         noticeOf(
-            listTitle, event, url, kind, defaultWebhook, itemCount, outcome, httpCode, error, location
+            listTitle, event, url, kind, severalDestinations,
+            itemCount, outcome, httpCode, error, location
         )
     )
 
@@ -3540,7 +3815,7 @@ class ListsViewModel @JvmOverloads constructor(
         event: String,
         url: String,
         kind: ExportKind,
-        defaultWebhook: Boolean,
+        severalDestinations: Boolean,
         itemCount: Int?,
         outcome: NoticeOutcome,
         httpCode: Int?,
@@ -3550,18 +3825,18 @@ class ListsViewModel @JvmOverloads constructor(
         event = event,
         listTitle = listTitle,
         kind = kind,
-        // The URL that was actually used, which since v0.5.6 is always the app default - there is
-        // no list URL left to prefer.
+        // The address this attempt actually used — a group's Todo, a List's override, or the
+        // default — and never a value read from Settings at display time.
         //
         // Null when the round was not going anywhere over the wire. A text export has no host, and
-        // a URL sitting in Settings because it is used by *other* rounds is not this round's
+        // a URL sitting anywhere else because it is used by *other* rounds is not this round's
         // destination - showing it on a txt notice names a machine the file never went near.
         host = if (kind == ExportKind.WEBHOOK) webhookHost(url) else null,
         itemCount = itemCount,
         outcome = outcome,
         httpCode = httpCode,
         error = error,
-        defaultWebhook = defaultWebhook,
+        severalDestinations = severalDestinations,
         at = now(),
         location = location
     )

@@ -131,6 +131,58 @@ fun withAttachment(
 }
 
 /**
+ * The attachments a run should write when it is carrying a Todo forward.
+ *
+ * **Every held reference moves to the offered version of the same lineage, and nothing else
+ * changes.** Order is kept because it decides which template governs a file; a lineage the offered
+ * list no longer knows keeps the reference it had, because a run that cannot name the current
+ * version has no better answer than the one already recorded; and no lineage is ever added, because
+ * this is a refresh of what a Todo holds rather than a re-choosing of it.
+ *
+ * This is the write half of Refresh Import's version promise. A Todo holding `T@1` opens the dialog
+ * ticked — the row is the same lineage — and a user who touches nothing would otherwise confirm a
+ * run that re-stamps every Task with the version it already had, leaving the template edit stuck at
+ * the old version forever. See [refreshVersionNotice] for what the dialog says before that happens.
+ */
+fun upgradeAttachments(
+    held: List<TemplateVersionRef>,
+    offered: List<StoredTemplateVersion>
+): List<TemplateVersionRef> {
+    val current = offered.associateBy { it.ref.templateId }
+    return held.map { ref -> current[ref.templateId]?.ref ?: ref }
+}
+
+/**
+ * What a refresh that moves a held template must say before it is confirmed, or null when nothing
+ * moves.
+ *
+ * The sentence is entry 12's, and it is a copy requirement rather than a delivery change: one run
+ * re-stamps every Task it touches, so Tasks marked under the old version will be read under the new
+ * one. A removed button's marks stay on the file and are neither shown nor sent — never rewritten —
+ * and a new button starts unmarked. Renaming a button changes neither its id nor its wire value, so
+ * it moves nothing material; the notice still names the version because the version is what is
+ * changing.
+ *
+ * Computed from the refs the run will actually submit, not from the row: a refresh where the user
+ * unticks the moved template has nothing to warn about, and saying it anyway would describe a write
+ * that will not happen.
+ */
+fun refreshVersionNotice(
+    held: List<TemplateVersionRef>,
+    offered: List<StoredTemplateVersion>
+): String? {
+    val moved = held.mapNotNull { ref ->
+        val current = offered.firstOrNull { it.ref.templateId == ref.templateId }
+        current?.takeIf { it.ref.version != ref.version }
+    }
+    if (moved.isEmpty()) return null
+    val names = moved.map { it.name }.distinct().joinToString(", ")
+    return "Tasks already marked will be read under the new version of $names. " +
+        "A button the new version removed keeps its marks on the file, but they are no longer " +
+        "shown or sent; a button it added starts unmarked."
+}
+
+/**
  * The templates a Task or a Todo is attached to, as the buttons they offer.
  *
  * **The successor to `AppSettings.controlFor` and `AppSettings.controlForTask`, and the whole of
