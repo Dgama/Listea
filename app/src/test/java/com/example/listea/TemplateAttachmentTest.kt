@@ -17,6 +17,7 @@ import com.example.listea.domain.encodeTemplateButtons
 import com.example.listea.domain.encodeTemplateScope
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -169,6 +170,72 @@ class TemplateAttachmentTest {
             listOf(TemplateVersionRef(TemplateId("b"), 1)),
             withAttachment(attached, stored("a"), on = false)
         )
+    }
+
+    // --- the refresh that carries a Todo forward --------------------------------------------------
+
+    @Test
+    fun `an upgrade moves every held lineage to the offered version and keeps the order`() {
+        // The write half of the dialog's *Held at version 1. This run will attach version 2.* A
+        // refresh that re-attached what the Todo already held would make that sentence a lie and the
+        // edit permanently unreachable — the same defect `withAttachment` fixed on the tick.
+        val held = listOf(
+            TemplateVersionRef(TemplateId("b"), 1),
+            TemplateVersionRef(TemplateId("a"), 3)
+        )
+        val offered = listOf(stored("a", version = 4), stored("b", version = 2))
+
+        assertEquals(
+            listOf(TemplateVersionRef(TemplateId("b"), 2), TemplateVersionRef(TemplateId("a"), 4)),
+            upgradeAttachments(held, offered)
+        )
+    }
+
+    @Test
+    fun `an upgrade never adds a lineage, and one no longer offered keeps what it holds`() {
+        // The picker is a snapshot of what exists; a refresh is not a re-choosing. A lineage missing
+        // from it is one this build cannot read, and the reference already on the row is the better
+        // answer than dropping the attachment silently.
+        val held = listOf(
+            TemplateVersionRef(TemplateId("a"), 1),
+            TemplateVersionRef(TemplateId("gone"), 2)
+        )
+        val offered = listOf(stored("a", version = 2), stored("new", version = 1))
+
+        assertEquals(
+            listOf(
+                TemplateVersionRef(TemplateId("a"), 2),
+                TemplateVersionRef(TemplateId("gone"), 2)
+            ),
+            upgradeAttachments(held, offered)
+        )
+    }
+
+    @Test
+    fun `an empty attachment list stays empty, and a current version does not move`() {
+        assertEquals(
+            emptyList<TemplateVersionRef>(),
+            upgradeAttachments(emptyList(), listOf(stored("a", version = 2)))
+        )
+        val current = listOf(TemplateVersionRef(TemplateId("a"), 2))
+        assertEquals(current, upgradeAttachments(current, listOf(stored("a", version = 2))))
+    }
+
+    @Test
+    fun `the version notice is drawn only when a held version actually moves`() {
+        val held = listOf(TemplateVersionRef(TemplateId("a"), 1))
+        val notice = refreshVersionNotice(held, listOf(stored("a", version = 2)))
+
+        assertNotNull(notice)
+        assertTrue(notice!!.contains("a"))
+        assertTrue(notice.contains("Tasks already marked will be read under the new version"))
+        assertTrue(notice.contains("no longer shown or sent"))
+        assertTrue(notice.contains("starts unmarked"))
+
+        // Nothing moved: same version, a lineage no longer offered, no attachments, no offered list.
+        assertNull(refreshVersionNotice(held, listOf(stored("a", version = 1))))
+        assertNull(refreshVersionNotice(held, emptyList()))
+        assertNull(refreshVersionNotice(emptyList(), listOf(stored("a", version = 2))))
     }
 
     @Test

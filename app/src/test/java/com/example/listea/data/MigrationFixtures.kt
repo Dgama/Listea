@@ -34,7 +34,7 @@ package com.example.listea.data
  * is there to catch. Subtracting these keeps each one about the step it was written for, and keeps
  * the list that has to be maintained as the chain grows in a single place.
  */
-internal val TablesFromLaterSteps = listOf("templates", "template_versions")
+internal val TablesFromLaterSteps = listOf("templates", "template_versions", "schema_backfills")
 
 /**
  * The columns a step *newer* than the fixtures' own appends to tables that already existed.
@@ -58,15 +58,18 @@ internal val TablesFromLaterSteps = listOf("templates", "template_versions")
  * reason that is not the step under test.
  */
 internal val ColumnsFromLaterSteps = mapOf(
-    "task_asset_state" to "selections",
-    "list_items" to "selections",
-    "file_review_state" to "selections",
-    "sources" to "exportKind",
-    "lists" to "exportKind",
-    "webhook_history" to "kind",
+    "task_asset_state" to setOf("selections"),
+    "list_items" to setOf("selections"),
+    "file_review_state" to setOf("selections"),
+    // The 24 → 25 step's export choice, then the 26 → 27 step's Todo address. A Set because more
+    // than one release appends to `sources` and `webhook_history`, and the fixture has to subtract
+    // all of them to come back to the version under test.
+    "sources" to setOf("exportKind", "webhookUrl", "webhookFromDefault"),
+    "lists" to setOf("exportKind"),
+    "webhook_history" to setOf("kind", "webhookUrl", "roundId"),
     // The newest step's wire identity, appended to the two rows that leave the device.
-    "tasks" to "publicId",
-    "assets" to "publicId"
+    "tasks" to setOf("publicId"),
+    "assets" to setOf("publicId")
 )
 
 /** One statement, against a database being built or wound back. */
@@ -274,6 +277,10 @@ internal fun ListeaDatabase.subtractV25Additions() {
  * with `legacy_alter_table` off would rewrite it to the temporary name.
  */
 internal fun ListeaDatabase.subtractV26Additions() {
+    // The step above this one, first: this fixture has to come back to v25, and a database left
+    // at v27 would still hold the address columns and the marker table.
+    subtractV27Additions()
+
     exec("PRAGMA foreign_keys = OFF")
     exec("PRAGMA legacy_alter_table = ON")
 
@@ -312,6 +319,68 @@ internal fun ListeaDatabase.subtractV26Additions() {
         "CREATE INDEX IF NOT EXISTS `index_assets_rootUri_relativePath` " +
             "ON `assets` (`rootUri`, `relativePath`)"
     )
+
+    exec("PRAGMA legacy_alter_table = OFF")
+    exec("PRAGMA foreign_keys = ON")
+}
+
+/**
+ * Takes everything `MIGRATION_26_27` adds back off, leaving a database in v26's shape.
+ *
+ * Four `ALTER`s added columns and one `CREATE` added a table, so both altered tables are rebuilt
+ * to remove their columns — [subtractV24Additions]'s rule, and here for the same reason: minSdk 24
+ * has no `DROP COLUMN`. The DDL is transcribed from `26.json`. `schema_backfills` drops outright.
+ *
+ * `lists.webhookUrl` is deliberately left alone. The migration clears it, but the column predates
+ * this step; a v26 fixture may hold any value in it, and the step under test is the one that turns
+ * it into the empty override.
+ */
+internal fun ListeaDatabase.subtractV27Additions() {
+    exec("DROP TABLE IF EXISTS schema_backfills")
+
+    exec("PRAGMA foreign_keys = OFF")
+    exec("PRAGMA legacy_alter_table = ON")
+
+    // --- sources: no webhookUrl, webhookFromDefault ------------------------------------------
+    exec(
+        "CREATE TABLE sources_v26 (`id` TEXT NOT NULL, `rootUri` TEXT NOT NULL, " +
+            "`relativePath` TEXT NOT NULL, `displayName` TEXT NOT NULL, " +
+            "`importerKind` TEXT NOT NULL, `importerVersion` INTEGER NOT NULL, " +
+            "`createdAt` INTEGER NOT NULL, `keepTree` INTEGER NOT NULL, " +
+            "`keepStateOnDelete` INTEGER NOT NULL, `contentPolicy` TEXT NOT NULL, " +
+            "`followUpstream` INTEGER NOT NULL, `assetControls` TEXT NOT NULL, " +
+            "`exportKind` TEXT NOT NULL, `lastImportAt` INTEGER, `lastImportStatus` TEXT, " +
+            "PRIMARY KEY(`id`))"
+    )
+    exec(
+        "INSERT INTO sources_v26 (id, rootUri, relativePath, displayName, importerKind, " +
+            "importerVersion, createdAt, keepTree, keepStateOnDelete, contentPolicy, " +
+            "followUpstream, assetControls, exportKind, lastImportAt, lastImportStatus) " +
+            "SELECT id, rootUri, relativePath, displayName, importerKind, importerVersion, " +
+            "createdAt, keepTree, keepStateOnDelete, contentPolicy, followUpstream, " +
+            "assetControls, exportKind, lastImportAt, lastImportStatus FROM sources"
+    )
+    exec("DROP TABLE sources")
+    exec("ALTER TABLE sources_v26 RENAME TO sources")
+    exec(
+        "CREATE INDEX IF NOT EXISTS `index_sources_rootUri_relativePath` " +
+            "ON `sources` (`rootUri`, `relativePath`)"
+    )
+
+    // --- webhook_history: no webhookUrl, roundId ----------------------------------------------
+    exec(
+        "CREATE TABLE webhook_history_v26 (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+            "`event` TEXT NOT NULL, `listTitle` TEXT NOT NULL, `itemCount` INTEGER NOT NULL, " +
+            "`payload` TEXT NOT NULL, `at` INTEGER NOT NULL, `outcome` TEXT NOT NULL, " +
+            "`detail` TEXT NOT NULL, `kind` TEXT NOT NULL)"
+    )
+    exec(
+        "INSERT INTO webhook_history_v26 (id, event, listTitle, itemCount, payload, at, " +
+            "outcome, detail, kind) SELECT id, event, listTitle, itemCount, payload, at, " +
+            "outcome, detail, kind FROM webhook_history"
+    )
+    exec("DROP TABLE webhook_history")
+    exec("ALTER TABLE webhook_history_v26 RENAME TO webhook_history")
 
     exec("PRAGMA legacy_alter_table = OFF")
     exec("PRAGMA foreign_keys = ON")

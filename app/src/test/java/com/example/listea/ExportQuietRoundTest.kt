@@ -242,6 +242,9 @@ class ExportQuietRoundTest {
             displayName = folder,
             importerKind = ImporterKind.FILE_AS_TASK,
             exportKind = encodeExportChoice(ExportChoice.By(kind)),
+            // Since v0.6.2 the address is the Todo's own, not the app default: a webhook Todo
+            // without one would fail before reaching the branch under test.
+            webhookUrl = if (kind == ExportKind.WEBHOOK) HOOK else "",
             now = 1000
         )
         dao.runImport(
@@ -281,17 +284,17 @@ class ExportQuietRoundTest {
     )
 
     /**
-     * A URL and the switch, waited for rather than assumed.
+     * The app default, waited for rather than assumed.
      *
-     * The store is a DataStore, so the write lands on its own coroutine and `advanceUntilIdle` has
-     * nothing to do with it — the same reason `ConsentGateViewModelTest` waits on the flow. Without
-     * this the delivery reads an empty URL, reports *there is nowhere for this to go*, and the
-     * test passes or fails for a reason that has nothing to do with what it is asking.
+     * Since v0.6.2 a webhook group posts to the address its Todo holds, and the fixtures write that
+     * themselves; the default still matters as the fallback for items no Todo owns and as the value
+     * an upgrade would copy. The store is a DataStore, so the write lands on its own coroutine and
+     * `advanceUntilIdle` has nothing to do with it — the same reason `ConsentGateViewModelTest`
+     * waits on the flow.
      */
     private suspend fun ListsViewModel.webhookTo(url: String) {
-        setDefaultWebhookEnabled(true)
         setDefaultWebhookUrl(url)
-        settings.first { it.defaultWebhookUrl == url && it.defaultWebhookEnabled }
+        settings.first { it.defaultWebhookUrl == url }
     }
 
     /**

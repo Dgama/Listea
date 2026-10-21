@@ -262,24 +262,32 @@ class ExportDispatchTest {
         // The dispatcher reports an empty round before it gets here for an inheriting List, and
         // never gets here for a List that chose nothing. Both must still be a loop over nothing
         // rather than a loop over one empty payload.
-        listOf(
-            ExportChoice.Inherit,
-            ExportChoice.Nothing,
-            ExportChoice.By(ExportKind.WEBHOOK),
-            ExportChoice.By(ExportKind.TXT)
-        ).forEach { choice ->
-            val groups = planExports(emptyList(), choice) { null }
-
-            // A List that chose a kind still plans one group, which the dispatcher's empty check
-            // has already refused by then. Asserted here so the shape of the function is explicit:
-            // this function never invents items, and never drops a choice.
-            if (choice is ExportChoice.By) {
-                assertEquals(1, groups.size)
-                assertTrue(groups.single().items.isEmpty())
-            } else {
-                assertTrue("$choice planned a group over nothing", groups.isEmpty())
-            }
+        listOf(ExportChoice.Inherit, ExportChoice.Nothing).forEach { choice ->
+            assertTrue(
+                "$choice planned a group over nothing",
+                planExports(emptyList(), choice, sourceOf = { null }).isEmpty()
+            )
         }
+        // A List that chose a kind still plans one group, which the dispatcher's empty check has
+        // already refused by then. Asserted here so the shape of the function is explicit: this
+        // function never invents items, and never drops a choice. A text choice has no address
+        // rule to run, so it keeps that shape with nothing in it.
+        val text = planExports(
+            emptyList(),
+            ExportChoice.By(ExportKind.TXT),
+            sourceOf = { null }
+        )
+        assertEquals(1, text.size)
+        assertTrue(text.single().items.isEmpty())
+        // A webhook choice splits by address, and an empty round has no addresses to key groups
+        // by — so it plans nothing. The dispatcher's empty check means this is never sent.
+        assertTrue(
+            planExports(
+                emptyList(),
+                ExportChoice.By(ExportKind.WEBHOOK),
+                sourceOf = { null }
+            ).isEmpty()
+        )
     }
 
 }

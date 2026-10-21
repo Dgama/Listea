@@ -262,7 +262,8 @@ class MigrationV23ToV24Test {
             .addMigrations(
                 ListeaDatabase.MIGRATION_23_24,
                 ListeaDatabase.MIGRATION_24_25,
-                ListeaDatabase.MIGRATION_25_26
+                ListeaDatabase.MIGRATION_25_26,
+                ListeaDatabase.MIGRATION_26_27
             )
             .build()
             .also { it.openHelper.writableDatabase }

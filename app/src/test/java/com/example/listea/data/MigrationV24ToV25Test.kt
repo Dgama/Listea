@@ -38,9 +38,9 @@ import org.robolectric.annotation.Config
  * asserted below, so the transcription is checked rather than trusted.
  *
  * **The step is additive.** Nothing already stored changes meaning: three columns arrive with a
- * default, and one `UPDATE` writes a value the switch already implied. `lists.webhookUrl` is left
- * exactly where it was, holding exactly what it held — it is dead after this release, and dead is not
- * the same as gone. See [ListEntity.webhookUrl].
+ * default, and one `UPDATE` writes a value the switch already implied. `lists.webhookUrl` is not
+ * touched here; it is dead after this release and `MIGRATION_26_27` clears it when it becomes the
+ * List's live override — see [ListEntity.webhookUrl].
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -143,17 +143,18 @@ class MigrationV24ToV25Test {
     }
 
     @Test
-    fun `the List switch is still the switch, and the URL is still there`() {
-        // The step changes no column it did not add. `webhookUrl` is dead after this release — no
-        // caller reads it — and a dead column is not a deleted one: it is the only remaining copy of
-        // a URL somebody typed, and it goes in a later release once no reader is provable.
+    fun `the List switch is still the switch`() {
+        // The step changes no column it did not add. `webhookUrl` survives *this* step untouched;
+        // the later step that makes it the List's live override is the one that clears the stale
+        // copies, and [MigrationV26ToV27Test] asserts that. This test runs the whole chain to the
+        // current version, so it sees the cleared value rather than the v24 one.
         writeFixture()
         val database = migrate()
 
         assertEquals(1, count(database, "SELECT webhookEnabled FROM lists WHERE id = 1"))
         assertEquals(0, count(database, "SELECT webhookEnabled FROM lists WHERE id = 2"))
-        assertEquals("https://on.example/hook", text(database, "SELECT webhookUrl FROM lists WHERE id = 1"))
-        assertEquals("https://stale.example/hook", text(database, "SELECT webhookUrl FROM lists WHERE id = 2"))
+        assertEquals("", text(database, "SELECT webhookUrl FROM lists WHERE id = 1"))
+        assertEquals("", text(database, "SELECT webhookUrl FROM lists WHERE id = 2"))
     }
 
     // --- what the history says it was --------------------------------------------------------------
@@ -294,7 +295,11 @@ class MigrationV24ToV25Test {
 
     private fun migrate(): ListeaDatabase =
         Room.databaseBuilder(context, ListeaDatabase::class.java, V24_DB)
-            .addMigrations(ListeaDatabase.MIGRATION_24_25, ListeaDatabase.MIGRATION_25_26)
+            .addMigrations(
+                ListeaDatabase.MIGRATION_24_25,
+                ListeaDatabase.MIGRATION_25_26,
+                ListeaDatabase.MIGRATION_26_27
+            )
             .build()
             .also { it.openHelper.writableDatabase }
 
@@ -379,7 +384,7 @@ class MigrationV24ToV25Test {
         const val V24 = 24
 
         /** The version the entities declare, which this step plus every later one reaches. */
-        const val CURRENT = 26
+        const val CURRENT = 27
 
         /** The table `the step takes a v24 database to the current version` writes its column into. */
         const val GONE = "sources"

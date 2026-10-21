@@ -151,8 +151,12 @@ class MigrationV22ToV23Test {
         // of them. `list_items` and `file_review_state` are in that set for the same reason
         // `task_asset_state` is — v0.5.4 puts a `selections` on all three — and if it ever stops
         // being true of one of them, this line fails rather than the exclusion quietly widening.
-        ColumnsFromLaterSteps.forEach { (table, column) ->
-            assertEquals("columns of $table", columnsBefore.getValue(table) + column, columnsOf(table))
+        ColumnsFromLaterSteps.forEach { (table, columns) ->
+            assertEquals(
+                "columns of $table",
+                columnsBefore.getValue(table) + columns.toList(),
+                columnsOf(table)
+            )
         }
     }
 
@@ -245,7 +249,8 @@ class MigrationV22ToV23Test {
                 ListeaDatabase.MIGRATION_22_23,
                 ListeaDatabase.MIGRATION_23_24,
                 ListeaDatabase.MIGRATION_24_25,
-                ListeaDatabase.MIGRATION_25_26
+                ListeaDatabase.MIGRATION_25_26,
+                ListeaDatabase.MIGRATION_26_27
             )
             .build()
             .also { it.openHelper.writableDatabase }

@@ -69,7 +69,7 @@ class MigrationV19ToV20Test {
         // is what lets the second grow without the first silently meaning something else.
         V19_COLUMNS.forEach { (table, before) ->
             val step = if (table in TABLES_THAT_GAINED_A_COLUMN) 1 else 0
-            val later = if (table in ColumnsFromLaterSteps) 1 else 0
+            val later = ColumnsFromLaterSteps[table]?.size ?: 0
             assertEquals("columns of $table", before + step + later, database.columns(table).size)
         }
         // And the two that did change, by name and position — the count alone would not say *which*
@@ -444,7 +444,8 @@ class MigrationV19ToV20Test {
                 ListeaDatabase.MIGRATION_22_23,
                 ListeaDatabase.MIGRATION_23_24,
                 ListeaDatabase.MIGRATION_24_25,
-                ListeaDatabase.MIGRATION_25_26
+                ListeaDatabase.MIGRATION_25_26,
+                ListeaDatabase.MIGRATION_26_27
             )
             .build()
 

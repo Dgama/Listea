@@ -64,7 +64,11 @@ class FolderRoundRowTest {
             "task-2" to ExportSource("s2", "Demo", ExportKind.WEBHOOK)
         )
 
-        val groups = planExports(rows, listChoice = ExportChoice.Inherit) { byTask[it.taskId] }
+        val groups = planExports(
+            rows,
+            listChoice = ExportChoice.Inherit,
+            sourceOf = { byTask[it.taskId] }
+        )
 
         // Two Todos, so two exports — the plural case the release exists for, reached through a
         // folder rather than through a List.
@@ -86,7 +90,7 @@ class FolderRoundRowTest {
     fun `a Task no Todo owns is still the webhook's`() {
         val rows = listOf(folderItem(taskId = "stranger").toPayloadRow(0))
 
-        val groups = planExports(rows, listChoice = ExportChoice.Inherit) { null }
+        val groups = planExports(rows, listChoice = ExportChoice.Inherit, sourceOf = { null })
 
         assertEquals(1, groups.size)
         assertEquals(ExportKind.WEBHOOK, groups.single().kind)

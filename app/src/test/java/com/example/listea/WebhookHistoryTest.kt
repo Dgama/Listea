@@ -20,7 +20,7 @@ class WebhookHistoryTest {
     private fun notice(
         event: String,
         outcome: NoticeOutcome,
-        defaultWebhook: Boolean = false,
+        severalDestinations: Boolean = false,
         kind: ExportKind = ExportKind.WEBHOOK
     ) = WebhookNotice(
             event = event,
@@ -31,20 +31,21 @@ class WebhookHistoryTest {
             outcome = outcome,
             httpCode = if (outcome == NoticeOutcome.SENT) 200 else 500,
             error = null,
-            defaultWebhook = defaultWebhook,
+            severalDestinations = severalDestinations,
             at = 0
         )
 
     private fun confirmation(
-        defaultWebhook: Boolean,
+        severalDestinations: Boolean = false,
         event: String = EVENT_REVIEW_EXITED,
-        listTitle: String = "2026-07-11"
+        listTitle: String = "2026-07-11",
+        host: String? = "example.com"
     ) = WebhookConfirmation(
         event = event,
         listTitle = listTitle,
-        host = "example.com",
+        host = host,
         itemCount = 4,
-        defaultWebhook = defaultWebhook
+        severalDestinations = severalDestinations
     )
 
     @Test
@@ -72,19 +73,17 @@ class WebhookHistoryTest {
         // A record's detail is the notice's outcome label verbatim, so these must stay readable
         // on their own, away from the dialog that first said them.
         assertEquals("Failed · HTTP 500", notice(EVENT_REVIEW_EXITED, NoticeOutcome.FAILED).outcomeLabel)
-        // One sentence for both cases since v0.5.6: a List has no webhook of its own to switch
-        // off, so a round that came through one was being told to go and change a control the
-        // release had removed.
-        listOf(true, false).forEach { defaultWebhook ->
-            assertEquals(
-                "Nothing was sent · the default webhook is switched off",
-                notice(
-                    EVENT_QUICK_REVIEW_COMPLETED,
-                    NoticeOutcome.DISABLED,
-                    defaultWebhook = defaultWebhook
-                ).outcomeLabel
-            )
-        }
+        // The only switch that can stop a round is a List's own completion switch; since v0.6.2
+        // the app default is a preference for new Todos rather than a gate, so a sentence telling
+        // the user to go and turn the default on would be naming a control that does nothing here.
+        assertEquals(
+            "Nothing was sent · this export is switched off",
+            notice(EVENT_QUICK_REVIEW_COMPLETED, NoticeOutcome.DISABLED).outcomeLabel
+        )
+        assertEquals(
+            "Export is off",
+            notice(EVENT_QUICK_REVIEW_COMPLETED, NoticeOutcome.DISABLED).headline
+        )
     }
 
     @Test
@@ -192,17 +191,17 @@ class WebhookHistoryTest {
     }
 
     @Test
-    fun `the confirmation names the one webhook a payload can go to`() {
-        // Quick Review and a List both post through the app default since v0.5.6 — the List's own
-        // URL is gone — so the question must not offer a choice of destinations that no longer
-        // exists. The device pass caught it saying "this list's webhook" over a round bound for
-        // the default one.
-        listOf(true, false).forEach { defaultWebhook ->
-            assertEquals(
-                "the default webhook",
-                confirmation(defaultWebhook = defaultWebhook).destinationLabel
-            )
-        }
+    fun `the confirmation names the destination a round has, or says there are several`() {
+        // Since v0.6.2 a round's groups may post to different Todos' addresses, so there is no
+        // longer one destination to name. One address is named by its host — the thing a user
+        // recognizes — several are said to be several, and none is said plainly rather than left
+        // blank.
+        assertEquals("example.com", confirmation().destinationLabel)
+        assertEquals(
+            "several webhook addresses",
+            confirmation(severalDestinations = true).destinationLabel
+        )
+        assertEquals("no webhook address", confirmation(host = null).destinationLabel)
     }
 
     @Test
@@ -212,13 +211,26 @@ class WebhookHistoryTest {
             listTitle = "2026-07-11",
             host = "example.com",
             itemCount = 4,
-            defaultWebhook = false
+            severalDestinations = false
         )
 
         assertEquals("Review left - 4 items - example.com", progress.summaryLabel)
         // The asking dialog does not repeat the event inside its facts line — its first line is a
         // sentence that already names it — so the two are compared on the part they share.
-        assertEquals("4 items - example.com", confirmation(defaultWebhook = false).factsLabel)
+        assertEquals("4 items - example.com", confirmation().factsLabel)
+        // A split round says so in the same words in both dialogs.
+        val split = WebhookProgress(
+            event = EVENT_REVIEW_EXITED,
+            listTitle = "2026-07-11",
+            host = null,
+            itemCount = 4,
+            severalDestinations = true
+        )
+        assertEquals("Review left - 4 items - several webhook addresses", split.summaryLabel)
+        assertEquals(
+            "4 items - several webhook addresses",
+            confirmation(severalDestinations = true).factsLabel
+        )
     }
 
     /**
@@ -252,7 +264,6 @@ class WebhookHistoryTest {
         assertEquals(
             "The Quick Review of 2026-09-11 finished",
             confirmation(
-                defaultWebhook = false,
                 event = EVENT_QUICK_REVIEW_COMPLETED,
                 listTitle = "2026-09-11"
             ).triggerLabel

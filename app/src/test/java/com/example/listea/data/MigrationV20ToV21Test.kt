@@ -64,7 +64,7 @@ class MigrationV20ToV21Test {
         // The permitted difference is a named column on a named table rather than a bare `+ 1`, so
         // an `ALTER` landing somewhere it has no business still shows up as a count that is wrong.
         V20_COLUMNS.forEach { (table, columns) ->
-            val later = if (table in ColumnsFromLaterSteps) 1 else 0
+            val later = ColumnsFromLaterSteps[table]?.size ?: 0
             assertEquals("columns of $table", columns + later, database.columns(table).size)
         }
         // `selections` is on the end because a later step appends it, and appended is where SQLite
@@ -534,7 +534,8 @@ class MigrationV20ToV21Test {
                 ListeaDatabase.MIGRATION_22_23,
                 ListeaDatabase.MIGRATION_23_24,
                 ListeaDatabase.MIGRATION_24_25,
-                ListeaDatabase.MIGRATION_25_26
+                ListeaDatabase.MIGRATION_25_26,
+                ListeaDatabase.MIGRATION_26_27
             )
             .build()
 
