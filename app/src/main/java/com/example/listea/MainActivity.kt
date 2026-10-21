@@ -1771,17 +1771,19 @@ private fun ImportConfirmDialogBody(
                                 // way, and this keeps what the user saw when they pressed Create the
                                 // same as what the Source ends up with.
                                 if (it == ImporterKind.FOLDER_AS_TASK) keepTree = false
+                            },
+                            // Nested directly under *One Task per file*, because it is the one
+                            // importer with a tree to keep: folder-as-Task's Tasks are one per
+                            // folder and its catalog is flat whatever this would say.
+                            underFileChoice = {
+                                if (importer == ImporterKind.FILE_AS_TASK) {
+                                    ImportKeepTreeChoice(
+                                        keepTree = keepTree,
+                                        onToggle = { keepTree = !keepTree }
+                                    )
+                                }
                             }
                         )
-                        // Nested directly under *One Task per file*, because it is the one
-                        // importer with a tree to keep: folder-as-Task's Tasks are one per
-                        // folder and its catalog is flat whatever this would say.
-                        if (importer == ImporterKind.FILE_AS_TASK) {
-                            ImportKeepTreeChoice(
-                                keepTree = keepTree,
-                                onToggle = { keepTree = !keepTree }
-                            )
-                        }
                     }
                 }
                 // Drawn for a refresh as well, and it is the one control here that is. The rule
@@ -2256,7 +2258,11 @@ internal fun importScope(request: ImportFolderRequest.Confirm): String =
  * user has to read in order to answer.
  */
 @Composable
-private fun ImportImporterChoice(selected: ImporterKind, onSelect: (ImporterKind) -> Unit) {
+private fun ImportImporterChoice(
+    selected: ImporterKind,
+    onSelect: (ImporterKind) -> Unit,
+    underFileChoice: @Composable () -> Unit = {}
+) {
     Column {
         ImportImporterRow(
             label = "One Task per file",
@@ -2264,6 +2270,11 @@ private fun ImportImporterChoice(selected: ImporterKind, onSelect: (ImporterKind
             selected = selected == ImporterKind.FILE_AS_TASK,
             onSelect = { onSelect(ImporterKind.FILE_AS_TASK) }
         )
+        // Anything that *only* this rule has to say sits between the two rows. A setting that
+        // belongs to one of two choices, drawn after both, reads as a third option belonging to
+        // neither: keep-the-tree was the last line of the section and nobody could tell it was
+        // about *One Task per file*.
+        underFileChoice()
         ImportImporterRow(
             label = "One Task per folder",
             detail = "folder-as-task · each child folder becomes one Task of its pictures, " +
@@ -2394,6 +2405,10 @@ private fun ImportKeepTreeChoice(keepTree: Boolean, onToggle: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            // Aligned under the *One Task per file* row's own text, not under its radio button:
+            // this is that rule's sub-option, and an option drawn flush with its parents is a
+            // third rule.
+            .padding(start = 48.dp)
             .clickable(onClick = onToggle)
             .padding(vertical = ListeaDimens.CompactGap),
         verticalAlignment = Alignment.CenterVertically
