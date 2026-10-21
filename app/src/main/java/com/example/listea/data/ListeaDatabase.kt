@@ -12,7 +12,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.execSQL
 import com.example.listea.domain.AssetKind
 import com.example.listea.domain.ButtonType
-import com.example.listea.domain.TEMPLATE_BUTTONS_VERSION
+import com.example.listea.domain.buttonsVersionFor
 import com.example.listea.domain.TemplateButton
 import com.example.listea.domain.TemplateId
 import com.example.listea.domain.TemplateScope
@@ -43,9 +43,10 @@ import java.util.UUID
         DissolvedTaskStateEntity::class,
         TemplateEntity::class,
         TemplateVersionEntity::class,
-        SchemaBackfillEntity::class
+        SchemaBackfillEntity::class,
+        AssetMarkEntity::class
     ],
-    version = 27,
+    version = 28,
     exportSchema = true
 )
 abstract class ListeaDatabase : RoomDatabase() {
@@ -1269,6 +1270,57 @@ abstract class ListeaDatabase : RoomDatabase() {
         }
 
         /**
+         * Gives a PDF Asset a place to keep the marks made on its passages.
+         *
+         * One table and one index, and nothing existing is touched. A database that has never held
+         * a PDF simply has no rows in it, which is the same state a fresh install reaches through
+         * Room's create path.
+         *
+         * **The foreign key is to the Asset, and that is the only cascade.** An Asset an import run
+         * stops finding takes its marks with it, because a passage with no file under it is not a
+         * statement about anything. A template or a tool is deliberately *not* referenced: removing
+         * one must hide its marks, never delete them, so `authoredTemplateId` and
+         * `authoredTemplateVersion` are plain columns recording where a mark came from.
+         *
+         * The columns are written out one to a line for the reason [createImportTables] gives: a
+         * column that changes in [AssetMarkEntity] is a line that has to change here, and the two
+         * can be diffed against `28.json` by eye.
+         */
+        internal val MIGRATION_27_28 = object : Migration(27, 28) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS task_asset_marks (" +
+                        "id TEXT NOT NULL, " +
+                        "assetId TEXT NOT NULL, " +
+                        "toolId TEXT NOT NULL, " +
+                        "authoredTemplateId TEXT NOT NULL, " +
+                        "authoredTemplateVersion INTEGER NOT NULL, " +
+                        "kind TEXT NOT NULL, " +
+                        "value TEXT NOT NULL, " +
+                        "anchorVersion INTEGER NOT NULL, " +
+                        "documentFingerprint TEXT NOT NULL, " +
+                        "pageIndex INTEGER NOT NULL, " +
+                        "charStart INTEGER NOT NULL, " +
+                        "charEnd INTEGER NOT NULL, " +
+                        "charParser TEXT NOT NULL, " +
+                        "exactText TEXT NOT NULL, " +
+                        "prefix TEXT NOT NULL, " +
+                        "suffix TEXT NOT NULL, " +
+                        "createdAt INTEGER NOT NULL, " +
+                        "updatedAt INTEGER NOT NULL, " +
+                        "PRIMARY KEY(id), " +
+                        "FOREIGN KEY(assetId) REFERENCES assets(id) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE)"
+                )
+                connection.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_task_asset_marks_assetId " +
+                        "ON task_asset_marks (assetId)"
+                )
+                Log.i("ListeaDatabase", "27 -> 28")
+            }
+        }
+
+        /**
          * Gives every Task and Asset its public id, reading everything before writing anything.
          *
          * The same rule [backfillSelections] records: a cursor stepping over a table while that
@@ -1587,8 +1639,8 @@ abstract class ListeaDatabase : RoomDatabase() {
                     // `1`, for the reason `MIGRATION_21_22` gives for its own: a migration writes the
                     // version it shipped with. Unlike [builtInAssetControlRows], which the creation
                     // callback shares and which therefore has to mean "the version this build writes",
-                    // this function has one caller and it is a step that will still be running when
-                    // `TEMPLATE_BUTTONS_VERSION` is no longer 1.
+                    // this function has one caller and it is a step that must keep describing what it
+                    // wrote even if a later encoding adds a version.
                     1,
                     now
                 )
@@ -1941,7 +1993,7 @@ abstract class ListeaDatabase : RoomDatabase() {
                         seed.ref.version,
                         encodeTemplateScope(seed.scope),
                         encodeTemplateButtons(seed.buttons),
-                        TEMPLATE_BUTTONS_VERSION,
+                        buttonsVersionFor(seed.buttons),
                         now
                     )
             )
@@ -2028,7 +2080,8 @@ abstract class ListeaDatabase : RoomDatabase() {
                     MIGRATION_23_24,
                     MIGRATION_24_25,
                     MIGRATION_25_26,
-                    MIGRATION_26_27
+                    MIGRATION_26_27,
+                    MIGRATION_27_28
                 )
                     .build()
                     .also { instance = it }

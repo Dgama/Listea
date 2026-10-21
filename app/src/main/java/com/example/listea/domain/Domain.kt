@@ -31,7 +31,7 @@ data class SourceRef(val rootUri: String, val relativePath: String)
 /**
  * What kind of content an Asset holds.
  *
- * Three members, and [OTHER] is not a placeholder for laziness: a Task must be representable when
+ * Four members, and [OTHER] is not a placeholder for laziness: a Task must be representable when
  * its content is something no viewer claims yet, and the alternative — refusing to construct the
  * Asset, or guessing a kind — turns "Listea cannot show you this yet" into "this file is gone".
  *
@@ -63,6 +63,16 @@ data class SourceRef(val rootUri: String, val relativePath: String)
 enum class AssetKind(val key: String) {
     IMAGE("image"),
     VIDEO("video"),
+
+    /**
+     * A document the viewer can render and whose text it can name.
+     *
+     * A kind of its own rather than [OTHER], because a template's scope is what decides which
+     * tools a file offers: scoping a PDF template to `OTHER` would also hand it every text file and
+     * archive this build cannot render. The kind is name-based like the other two, so an import
+     * can stamp it before anything is opened; the MIME type still decides how the bytes are drawn.
+     */
+    PDF("pdf"),
     OTHER("other");
 
     companion object {

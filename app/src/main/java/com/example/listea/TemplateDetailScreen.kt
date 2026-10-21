@@ -45,6 +45,7 @@ import com.example.listea.domain.decodeTemplateButtons
 import com.example.listea.domain.decodeTemplateScope
 import com.example.listea.domain.encodeTemplateButtons
 import com.example.listea.domain.encodeTemplateScope
+import com.example.listea.domain.templateDraftVersion
 
 /**
  * One template: its name, what it governs, and the buttons it offers — and the one gesture that
@@ -63,7 +64,10 @@ import com.example.listea.domain.encodeTemplateScope
  * draft is exactly the string an Update would store, so there is no second representation that could
  * disagree with the first — and comparing it against the stored row is what answers *has anything
  * changed*, the question the bottom bar exists to answer. It also means the draft survives rotation
- * for free, through the same encoding the database uses.
+ * for free, through the same encoding the database uses. The one thing the string does not carry is
+ * the vocabulary it is written in, and that is not the row's once the draft is edited: a comment
+ * button is version-2 vocabulary, so the draft is read at [templateDraftVersion] rather than at the
+ * version it started from.
  *
  * **The version is what the page is about.** The bar names the version being edited and the one
  * Update would write, because a user renaming a button should be able to see that they have not
@@ -163,8 +167,14 @@ private fun TemplateEditor(
 
     val scope = remember(scopeText) { decodeTemplateScope(scopeText) }
     val kinds = scope.kinds
-    val buttons = remember(buttonsText) {
-        decodeTemplateButtons(buttonsText, current.buttonsVersion)
+    // The draft may say more than the row it started from: changing a button to a Comment writes
+    // version-2 vocabulary into it. Reading it at the stored version would drop the very row the
+    // change added, so the version travels with the draft rather than with the row.
+    val buttonsVersion = remember(buttonsText, current.buttons, current.buttonsVersion) {
+        templateDraftVersion(current.buttons, current.buttonsVersion, buttonsText)
+    }
+    val buttons = remember(buttonsText, buttonsVersion) {
+        decodeTemplateButtons(buttonsText, buttonsVersion)
     }.orEmpty()
 
     fun setButtons(next: List<TemplateButton>) {
@@ -242,8 +252,23 @@ private fun TemplateEditor(
                             },
                             onRemove = { setButtons(buttons.filterNot { it.id == button.id }) },
                             buttonType = button.type,
-                            onButtonTypeChange = {
-                                setButtons(buttons.replacing(index, button.copy(type = it)))
+                            onButtonTypeChange = { type ->
+                                setButtons(
+                                    buttons.replacing(
+                                        index,
+                                        button.copy(
+                                            type = type,
+                                            // A comment has no configured word; clearing the
+                                            // field keeps a later type change from inheriting text
+                                            // that never applied to it.
+                                            recordValue = if (type == ButtonType.COMMENT) {
+                                                ""
+                                            } else {
+                                                button.recordValue
+                                            }
+                                        )
+                                    )
+                                )
                             },
                             // Every keystroke reaches the draft. This page's edit is never
                             // *finished* — Update is what finishes it — so a field that waited for

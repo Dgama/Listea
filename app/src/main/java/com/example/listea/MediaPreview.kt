@@ -37,6 +37,9 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import coil3.ImageLoader
+import com.example.listea.domain.AssetMark
+import com.example.listea.domain.QuoteAnchor
+import com.example.listea.domain.TemplateButton
 import coil3.compose.AsyncImage
 import coil3.compose.AsyncImagePainter
 import coil3.gif.AnimatedImageDecoder
@@ -46,7 +49,7 @@ import coil3.request.crossfade
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-private enum class PreviewKind { Image, Video, Unsupported }
+private enum class PreviewKind { Image, Video, Pdf, Unsupported }
 
 /**
  * Renders whatever a content URI points at: still images, animated GIF/WebP, video, and a
@@ -67,7 +70,19 @@ fun MediaPreview(
     unsupportedHeadline: String = "Preview unavailable",
     videoAutoplay: Boolean = true,
     videoStartMuted: Boolean = false,
-    zoom: MediaZoomState? = null
+    zoom: MediaZoomState? = null,
+    // PDF-only, and null on every read-only surface: a selection becomes a mark only where a
+    // template governs the file and somebody is reviewing it. See [PdfPreview]. The surface that
+    // writes marks supplies all four; the read-only ones supply none and get Copy alone.
+    pdfTools: List<TemplateButton> = emptyList(),
+    pdfMarks: List<AssetMark> = emptyList(),
+    onPdfCreateMark: ((TemplateButton, String?, QuoteAnchor) -> Unit)? = null,
+    onPdfEditMark: ((String, String) -> Unit)? = null,
+    onPdfDeleteMark: ((String) -> Unit)? = null,
+    onPdfRelocateMark: ((String, QuoteAnchor) -> Unit)? = null,
+    // What the viewer's resolution found, for the Info sheet. Null on the read-only surfaces,
+    // which have no Info sheet that lists marks.
+    onPdfMarksResolved: ((List<PdfMarkInfo>) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val kind by produceState(PreviewKind.Unsupported, uri, name) {
@@ -85,6 +100,20 @@ fun MediaPreview(
             autoplay = videoAutoplay,
             startMuted = videoStartMuted,
             zoom = zoom
+        )
+
+        PreviewKind.Pdf -> PdfPreview(
+            uri = uri,
+            name = name,
+            modifier = modifier,
+            zoom = zoom,
+            tools = pdfTools,
+            marks = pdfMarks,
+            onCreateMark = onPdfCreateMark,
+            onEditMark = onPdfEditMark,
+            onDeleteMark = onPdfDeleteMark,
+            onRelocateMark = onPdfRelocateMark,
+            onMarksResolved = onPdfMarksResolved
         )
 
         PreviewKind.Unsupported -> {
@@ -287,6 +316,7 @@ private fun previewKindOf(context: Context, uri: String, name: String): PreviewK
         mime == null -> PreviewKind.Unsupported
         mime.startsWith("image/") -> PreviewKind.Image
         mime.startsWith("video/") -> PreviewKind.Video
+        mime == "application/pdf" -> PreviewKind.Pdf
         else -> PreviewKind.Unsupported
     }
 }

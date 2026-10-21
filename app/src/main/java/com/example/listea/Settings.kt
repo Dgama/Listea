@@ -18,6 +18,7 @@ import com.example.listea.data.ReviewDecisions
 import com.example.listea.data.ListItemEntity
 import com.example.listea.data.newActionId
 import com.example.listea.domain.AssetKind
+import com.example.listea.domain.ButtonType
 import com.example.listea.domain.ScopeRule
 import com.example.listea.domain.TemplateDefinition
 import com.example.listea.domain.TemplateId
@@ -245,13 +246,20 @@ data class ResolvedAssetControl(
     val buttons: List<TemplateButton> = emptyList()
 ) {
     /**
-     * Every action the row offers, in the buttons' own order.
+     * Every **file-level** action the row offers, in the buttons' own order.
      *
      * The one place that order is decided, so the chip row, the badge and the payload cannot
      * disagree about it. `★` is wherever the template listed it — first for the built-in, because
      * that is where its seed puts it — since order is the template's to decide and not this type's.
+     *
+     * A **Comment** button is not one of these. It writes the reviewer's words against a passage,
+     * so it has no file-level form: on an image or a video there is no passage to attach it to, and
+     * on a PDF its tools live in the selection menu instead of the chip row. It stays in [buttons]
+     * — the PDF viewer asks that list for its passage tools — and is omitted here, which is what
+     * keeps it from becoming a chip, a badge or an entry in an exported `actions` array.
      */
-    val actions: List<ItemAction> get() = buttons.map { ItemAction(it.id) }
+    val actions: List<ItemAction>
+        get() = buttons.filter { it.type != ButtonType.COMMENT }.map { ItemAction(it.id) }
 
     /** The ids this control offers, for the callers that ask that question rather than the order. */
     val ids: Set<String> get() = buttons.mapTo(mutableSetOf()) { it.id }
@@ -286,28 +294,27 @@ data class ResolvedAssetControl(
 }
 
 /**
- * The file kinds an asset control may be configured for: the built-in's own answer, in declaration
- * order.
+ * The file kinds a template may be scoped over, in declaration order.
  *
- * Read from the definition rather than written out as `listOf(IMAGE, VIDEO)`, because the *only*
- * thing that makes a tag settable for a kind is that a control accepts that kind — `OTHER` is not
- * configurable because [Templates.MediaAssetControl] does not accept it, not because a screen
- * happens to leave it out. A second control that accepted a third kind would then be a definition
- * change and nothing else.
+ * **Explicit since v0.7.0, and no longer derived from the built-in definition.** Until this round
+ * the two questions happened to have the same answer: the built-in Media Asset Control admitted
+ * images and video, and those were exactly the kinds a template editor offered. PDF separates
+ * them — the built-in control still governs images and video only, but a user-made PDF template is
+ * a legitimate thing to scope — so deriving the list from that definition would silently hide the
+ * new kind from the editor.
  *
- * Declaration order rather than the set's, so the chip rows a user sees do not reshuffle between
+ * `OTHER` is deliberately absent. A template scoped to it would govern every file this build
+ * cannot present, which is a control whose effect nobody can see. The set here is the kinds Listea
+ * has a viewer for, and [AssetKind.PDF] earns its place because v0.7.0 ships one.
+ *
+ * Declaration order rather than a set's, so the chip rows a user sees do not reshuffle between
  * builds.
- *
- * Still read off the built-in definition since v0.5.4, even though what governs a file is now a
- * *stored* template rather than this definition. The two questions have come apart — a user-made
- * template's scope can name any kind — and this one is no longer "which kinds may be configured"
- * but "which kinds a template editor offers to scope over", which is still the built-in's shape.
  */
-fun configurableAssetKinds(): List<AssetKind> {
-    val accepted =
-        (Templates.MediaAssetControl.definition as TemplateDefinition.AssetControl).compatibleKinds
-    return AssetKind.entries.filter { it in accepted }
-}
+fun configurableAssetKinds(): List<AssetKind> = listOf(
+    AssetKind.IMAGE,
+    AssetKind.VIDEO,
+    AssetKind.PDF
+)
 
 /**
  * What one kind's asset control is called, everywhere it is named.
@@ -325,6 +332,7 @@ fun configurableAssetKinds(): List<AssetKind> {
 fun assetControlHeading(kind: AssetKind): String = when (kind) {
     AssetKind.IMAGE -> "Image asset control"
     AssetKind.VIDEO -> "Video asset control"
+    AssetKind.PDF -> "PDF asset control"
     AssetKind.OTHER -> "File asset control"
 }
 
@@ -379,6 +387,7 @@ fun templateScopeWarning(scope: TemplateScope): String? {
 fun assetKindChipLabel(kind: AssetKind): String = when (kind) {
     AssetKind.IMAGE -> "Images"
     AssetKind.VIDEO -> "Videos"
+    AssetKind.PDF -> "PDFs"
     AssetKind.OTHER -> "Other files"
 }
 

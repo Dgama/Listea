@@ -44,11 +44,18 @@ import com.example.listea.data.AssetDecisions
 import com.example.listea.data.ReviewAsset
 import com.example.listea.data.ReviewItem
 import com.example.listea.data.taskDecisions
+import com.example.listea.domain.AssetKind
+import com.example.listea.domain.AssetMark
 import com.example.listea.domain.ListId
+import com.example.listea.domain.MarkKind
+import com.example.listea.domain.QuoteAnchor
 import com.example.listea.domain.ReviewContext
 import com.example.listea.domain.TaskAction
+import com.example.listea.domain.TemplateButton
 import com.example.listea.domain.TemplateId
 import com.example.listea.domain.TemplateVersionRef
+import com.example.listea.domain.markKind
+import kotlinx.coroutines.flow.flowOf
 
 /**
  * The few strings that distinguish one review context from another. Everything else — the queue
@@ -621,18 +628,80 @@ fun ReviewSession(
     // [control] is this page's own, resolved from the Task's record and the file's kind, and
     // [ReviewAsset.decisions] is this page's own record — the pair, both halves of it, which is
     // what the band is.
+    //
+    // A PDF's tools live in its selection menu, not in a file-level chip row: a comment or a tag
+    // applies to a passage, and a row of chips above the page would offer to mark the file as a
+    // whole when the template governs nothing but passages. The decision is made here and not in
+    // `ReviewAssetControls`, so a PDF cannot draw a row nobody can use.
+    //
+    // What a PDF keeps is the frame's other half, the Info entry, which every template carries and
+    // none may remove: the band is the same dismissible strip the other kinds get, holding only the
+    // icon that opens what this file carries. Tapping the page where no highlight sits puts it away
+    // and brings it back, exactly as on a picture.
     val assetBand: (@Composable () -> Unit)? = page?.let { current ->
-        {
-            ReviewAssetControls(
-                decisions = current.decisions,
-                control = control,
-                onToggleAction = { action, enabled ->
-                    viewModel.setItemAction(item, current, action, enabled)
-                },
-                onInfo = { infoOpen = true }
-            )
+        if (kind == AssetKind.PDF) {
+            {
+                MediaInfoBar(contentDescription = "PDF info") { infoOpen = true }
+            }
+        } else {
+            {
+                ReviewAssetControls(
+                    decisions = current.decisions,
+                    control = control,
+                    onToggleAction = { action, enabled ->
+                        viewModel.setItemAction(item, current, action, enabled)
+                    },
+                    onInfo = { infoOpen = true }
+                )
+            }
         }
     }
+    // The PDF's tools and marks, both resolved against the *current* governing version. `control`
+    // is already that version's button list for a PDF, so `PdfTools.of` is the same filter the
+    // viewer applies — one authority for "which tools does this passage menu offer".
+    //
+    // A mark's visibility is decided by the tools, never by the version that authored it, which is
+    // why the marks Flow is read alongside the resolver rather than through a join: removing a
+    // button hides its marks without touching a row, and restoring it brings them back.
+    val pdfGoverning = page
+        ?.takeIf { kind == AssetKind.PDF }
+        ?.let { resolver.governingFor(item.assetControls, AssetKind.PDF) }
+    val pdfTools = remember(control) { PdfTools.of(control) }
+    val pdfMarks by remember(page?.assetId, kind) {
+        val assetId = page?.assetId
+        if (kind == AssetKind.PDF && !assetId.isNullOrEmpty()) {
+            viewModel.observeAssetMarks(assetId)
+        } else {
+            flowOf(emptyList<AssetMark>())
+        }
+    }.collectAsStateWithLifecycle(initialValue = emptyList())
+
+    // What the viewer's last resolution found, for the Info sheet. Keyed on the Asset, so paging to
+    // another file cannot leave the previous one's marks in this one's sheet; the viewer reports it
+    // after resolving, not while composing, and reports an empty list when nothing is visible.
+    var pdfMarkInfo by remember(page?.assetId) { mutableStateOf<List<PdfMarkInfo>>(emptyList()) }
+
+    // Creation needs both the file and the version that offered the tool; a PDF with no governing
+    // version has neither, and its selection menu offers Copy alone. The viewer never calls a
+    // ViewModel itself — the same split the read-only viewer relies on.
+    val onCreatePdfMark: ((TemplateButton, String?, QuoteAnchor) -> Unit)? =
+        if (page != null && pdfGoverning != null) {
+            { tool, comment, anchor ->
+                val markKind = tool.type.markKind()
+                if (markKind != null) {
+                    viewModel.createPdfMark(
+                        assetId = page.assetId,
+                        tool = tool,
+                        kind = markKind,
+                        value = comment.orEmpty(),
+                        anchor = anchor,
+                        authored = pdfGoverning
+                    )
+                }
+            }
+        } else {
+            null
+        }
 
     MediaShell(
         modifier = modifier,
@@ -705,6 +774,16 @@ fun ReviewSession(
             // the run and not the run itself.
             canLeaveForward = item.reviewBlocked == null,
             canLeaveBack = navigation.canGoPrevious,
+            pdfTools = pdfTools,
+            pdfMarks = pdfMarks,
+            onPdfCreateMark = onCreatePdfMark,
+            onPdfEditMark = { id, text -> viewModel.editMarkValue(id, text) },
+            onPdfDeleteMark = { id -> viewModel.deleteMark(id) },
+            // A mark the resolver had to move is corrected in the store, not only on screen: the
+            // next open then takes the fast path, and an export sees the same passage this frame
+            // drew.
+            onPdfRelocateMark = { id, anchor -> viewModel.relocateMark(id, anchor) },
+            onPdfMarksResolved = { pdfMarkInfo = it },
             onLeaveForward = { dispatch(TaskAction.CompleteTask) },
             // Backwards is never a judgment: it steps the queue and changes nothing about the
             // Task that was left behind.
@@ -722,6 +801,10 @@ fun ReviewSession(
             // for several files has no single source to save or share and the offers disappear —
             // which is exactly what a folder-as-Task used to do.
             asset = page,
+            // The PDF's marks, placed and missing alike. The sheet is the only place a mark this
+            // document cannot place is named; nothing on the page says so. Null for every other
+            // kind, where a marks section would be a question the file cannot answer.
+            marks = if (kind == AssetKind.PDF) pdfMarkInfo else null,
             onDismiss = { infoOpen = false }
         )
     }
@@ -768,7 +851,14 @@ fun AssetRun(
     onLeaveBack: () -> Unit,
     onSelectAsset: (Int) -> Unit,
     onTap: () -> Unit,
-    modifier: Modifier
+    modifier: Modifier,
+    pdfTools: List<TemplateButton> = emptyList(),
+    pdfMarks: List<AssetMark> = emptyList(),
+    onPdfCreateMark: ((TemplateButton, String?, QuoteAnchor) -> Unit)? = null,
+    onPdfEditMark: ((String, String) -> Unit)? = null,
+    onPdfDeleteMark: ((String) -> Unit)? = null,
+    onPdfRelocateMark: ((String, QuoteAnchor) -> Unit)? = null,
+    onPdfMarksResolved: ((List<PdfMarkInfo>) -> Unit)? = null
 ) {
     val assets = assetsOf(item)
     val asset = assets.getOrNull(selectedIndex)
@@ -814,7 +904,14 @@ fun AssetRun(
             imageLoader = imageLoader,
             settings = settings,
             zoom = zoom,
-            modifier = Modifier.fillMaxSize()
+            modifier = Modifier.fillMaxSize(),
+            pdfTools = pdfTools,
+            pdfMarks = pdfMarks,
+            onPdfCreateMark = onPdfCreateMark,
+            onPdfEditMark = onPdfEditMark,
+            onPdfDeleteMark = onPdfDeleteMark,
+            onPdfRelocateMark = onPdfRelocateMark,
+            onPdfMarksResolved = onPdfMarksResolved
         )
     }
 }
@@ -859,9 +956,19 @@ internal fun assetStep(assetCount: Int, index: Int, forward: Boolean): Int? {
  * Save is offered only when there is a file to copy: a manual item has no source at all, and one
  * whose source has gone missing has a URI that no longer resolves. Both say so in a row above
  * instead of showing a button that could only fail.
+ *
+ * [marks] is a PDF's review record, already resolved by the viewer and handed down rather than
+ * looked up here. Null is "nothing to report" — every kind but a PDF, and every surface that cannot
+ * resolve marks — and is deliberately different from an empty list, which says this document holds
+ * none. See [pdfMarkRows].
  */
 @Composable
-fun ReviewItemInfoSheet(info: ReviewItemInfo, asset: ReviewAsset?, onDismiss: () -> Unit) {
+fun ReviewItemInfoSheet(
+    info: ReviewItemInfo,
+    asset: ReviewAsset?,
+    onDismiss: () -> Unit,
+    marks: List<PdfMarkInfo>? = null
+) {
     val context = LocalContext.current
     val sourceUri = asset?.sourceUri?.takeIf { it.isNotEmpty() } ?: info.sourceUri
     val sourceMissing = asset?.sourceMissing ?: info.sourceMissing
@@ -869,6 +976,10 @@ fun ReviewItemInfoSheet(info: ReviewItemInfo, asset: ReviewAsset?, onDismiss: ()
     val facts by produceState(MediaFacts(), sourceUri) {
         value = sourceUri?.let { readMediaFacts(context, it) } ?: MediaFacts()
     }
+    // A PDF's file-level actions are always empty: its tools apply to passages, and its review
+    // record is the marks below. Listing "Actions None" on one would describe a control the file
+    // deliberately does not offer.
+    val isPdf = asset?.let { assetKindOf(it.name) == AssetKind.PDF } == true
 
     ItemInfoSheet(
         title = title,
@@ -877,18 +988,59 @@ fun ReviewItemInfoSheet(info: ReviewItemInfo, asset: ReviewAsset?, onDismiss: ()
             info.relativePath?.let { add(InfoField("Path in source folder", it)) }
             info.listTitle?.let { add(InfoField("List", it)) }
             add(InfoField("Status", if (info.isCompleted) "Checked" else "Not checked"))
-            add(InfoField("Actions", info.actionLabel ?: "None"))
+            if (!isPdf) add(InfoField("Actions", info.actionLabel ?: "None"))
             when {
                 sourceUri == null -> add(InfoField("Source", "Manual item — no file"))
                 sourceMissing ->
                     add(InfoField("Source", "Missing from the source folder"))
             }
+            // What this document carries, comment by comment and tag by tag — including a mark
+            // whose passage is no longer in it. Null means the caller has no resolution to report
+            // (a read-only viewer, or a file that is not a PDF), not that the file is unmarked.
+            marks?.let { addAll(pdfMarkRows(it)) }
             addAll(mediaFactRows(facts, title))
         },
         footer = sourceUri
             ?.takeIf { !sourceMissing }
             ?.let { uri -> { MediaFileActions(sourceUri = uri, name = title) } }
     )
+}
+
+/**
+ * The marks section of a PDF's Info sheet: one summary line, then one row per mark.
+ *
+ * Each row is the tool that made it, what kind it is and where it landed, with the quoted passage
+ * and the reviewer's value beneath. A mark the document could not place says so in its own label —
+ * that is the whole of the missing-mark report now. It is not drawn over the page and nothing pops
+ * up to announce it; a reviewer who wants to know what the file carries asks the file, and finds it
+ * here beside the marks that did land.
+ *
+ * Pure and separate from the sheet so the wording can be pinned without a Compose test.
+ */
+fun pdfMarkRows(marks: List<PdfMarkInfo>): List<InfoField> = buildList {
+    val missing = marks.count { it.detached }
+    add(
+        InfoField(
+            "Marks",
+            when {
+                marks.isEmpty() -> "None"
+                missing == 0 -> "${marks.size} in this document"
+                else -> "${marks.size} · $missing not found in this document"
+            }
+        )
+    )
+    marks.forEach { mark ->
+        val kind = if (mark.kind == MarkKind.COMMENT) "Comment" else "Tag"
+        val where = mark.pageIndex?.let { "Page ${it + 1}" } ?: "Not in this document"
+        add(
+            InfoField(
+                label = "${mark.toolName} · $kind · $where",
+                // The quote first, because it is what a person verifies the mark against, then
+                // the value: a comment's words or a tag's configured value.
+                value = "“${mark.quote}”\n${mark.value}"
+            )
+        )
+    }
 }
 
 /**
@@ -1023,7 +1175,14 @@ fun ItemPreview(
     imageLoader: ImageLoader,
     settings: AppSettings,
     zoom: MediaZoomState,
-    modifier: Modifier
+    modifier: Modifier,
+    pdfTools: List<TemplateButton> = emptyList(),
+    pdfMarks: List<AssetMark> = emptyList(),
+    onPdfCreateMark: ((TemplateButton, String?, QuoteAnchor) -> Unit)? = null,
+    onPdfEditMark: ((String, String) -> Unit)? = null,
+    onPdfDeleteMark: ((String) -> Unit)? = null,
+    onPdfRelocateMark: ((String, QuoteAnchor) -> Unit)? = null,
+    onPdfMarksResolved: ((List<PdfMarkInfo>) -> Unit)? = null
 ) {
     if (asset.sourceMissing) {
         LaunchedEffect(zoom) { zoom.contentAspect = null }
@@ -1039,6 +1198,13 @@ fun ItemPreview(
         modifier = modifier,
         videoAutoplay = settings.videoAutoplay,
         videoStartMuted = settings.videoStartMuted,
-        zoom = zoom
+        zoom = zoom,
+        pdfTools = pdfTools,
+        pdfMarks = pdfMarks,
+        onPdfCreateMark = onPdfCreateMark,
+        onPdfEditMark = onPdfEditMark,
+        onPdfDeleteMark = onPdfDeleteMark,
+        onPdfRelocateMark = onPdfRelocateMark,
+        onPdfMarksResolved = onPdfMarksResolved
     )
 }

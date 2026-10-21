@@ -5,11 +5,14 @@ import com.example.listea.data.AssetDecisions
 import com.example.listea.data.DecisionTarget
 import com.example.listea.data.ListItemEntity
 import com.example.listea.data.PayloadAssetRow
+import com.example.listea.data.PayloadMarkRow
 import com.example.listea.data.PayloadTaskRow
 import com.example.listea.data.ReviewItem
 import com.example.listea.data.decodeActionIds
 import com.example.listea.domain.ExportChoice
 import com.example.listea.domain.ExportKind
+import com.example.listea.domain.MarkKind
+import com.example.listea.domain.markKind
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -55,6 +58,16 @@ import java.util.Locale
  */
 const val EXPORT_VERSION = 2
 
+/**
+ * The version a body carries **only when it actually contains a PDF mark**.
+ *
+ * Version 3 adds a `marks` array beside an Asset's `actions`; an Asset without marks does not write
+ * the key, and a payload without one does not claim the version. That is what keeps every image and
+ * video body byte-for-byte the one it was under v0.6.2 — a receiver sees the contract change only on
+ * the rounds that contain the new kind of fact.
+ */
+const val EXPORT_VERSION_MARKS = 3
+
 /** One template a Task was imported under: identity only, never its controls. */
 data class ExportTemplateView(
     val id: String,
@@ -73,13 +86,36 @@ data class ExportTemplateView(
  *
  * [actions] are the wire values recorded on **this pair**, resolved through the control that governs
  * this file's kind — the same resolution the chip row draws.
+ *
+ * [marks] are the PDF's stored passages that still resolve against the document being sent. It is
+ * empty for every image and video, and for a PDF no mark survives. `actions` stays empty for a PDF
+ * rather than carrying an overloaded form: a passage is not a file-level selection.
  */
 data class ExportAssetView(
     val publicId: String,
     val title: String,
     val relativePath: String?,
     val sourceMissing: Boolean,
-    val actions: List<String>
+    val actions: List<String>,
+    val marks: List<ExportMarkView> = emptyList()
+)
+
+/**
+ * One passage as the receiver sees it.
+ *
+ * [pageIndex] and [text] are the stored anchor — the same quote the viewer verified when it drew
+ * the mark. The character range and the parser hint stay on the device: they make the anchor cheap
+ * to re-find locally and say nothing a receiver can use. [value] is a comment's stored text or a
+ * tag's **current** configured value, which is why it is resolved here rather than copied from the
+ * mark's row.
+ */
+data class ExportMarkView(
+    val id: String,
+    val kind: MarkKind,
+    val toolId: String,
+    val pageIndex: Int,
+    val text: String,
+    val value: String
 )
 
 /**
@@ -125,7 +161,9 @@ fun exportTaskViews(
     rows: List<ListItemEntity>,
     tasks: Map<String, PayloadTaskRow>,
     assetsByTask: Map<String, List<PayloadAssetRow>>,
-    resolver: TemplateResolver
+    resolver: TemplateResolver,
+    marksByAsset: Map<String, List<PayloadMarkRow>> = emptyMap(),
+    fingerprintByAsset: Map<String, String> = emptyMap()
 ): List<ExportTaskView> = rows.distinctBy { it.taskId }.map { row ->
     val task = tasks[row.taskId]
     val attachments = task?.assetControls.orEmpty()
@@ -142,7 +180,13 @@ fun exportTaskViews(
         isCompleted = row.isCompleted,
         templates = templates,
         assets = assetsByTask[row.taskId].orEmpty().map { asset ->
-            exportAssetView(asset, attachments, resolver)
+            exportAssetView(
+                asset = asset,
+                attachments = attachments,
+                resolver = resolver,
+                markRows = marksByAsset[asset.assetId].orEmpty(),
+                documentFingerprint = fingerprintByAsset[asset.assetId]
+            )
         }
     )
 }
@@ -151,7 +195,9 @@ fun exportTaskViews(
 private fun exportAssetView(
     asset: PayloadAssetRow,
     attachments: String,
-    resolver: TemplateResolver
+    resolver: TemplateResolver,
+    markRows: List<PayloadMarkRow>,
+    documentFingerprint: String?
 ): ExportAssetView {
     val path = asset.relativePath
     val title = path?.substringAfterLast('/').orEmpty()
@@ -168,8 +214,55 @@ private fun exportAssetView(
         actions = itemActionNames(
             AssetDecisions(decodeActionIds(asset.selections.orEmpty())),
             control
-        )
+        ),
+        marks = exportMarkViews(markRows, control, documentFingerprint)
     )
+}
+
+/**
+ * The marks a receiver may be told about, or none.
+ *
+ * Three independent facts must all still hold, and each is asked of the thing that knows it:
+ *
+ * - **The document is the one the anchor was verified against.** A file whose hash differs from the
+ *   stored one may no longer contain the quoted sentence — or may contain it somewhere else. Sending
+ *   the old quote anyway would be a false statement about the file, so the mark is omitted, exactly
+ *   as a detached mark is. A file that could not be hashed at all answers null and omits everything.
+ * - **The current template still offers the tool, as the same kind.** Editing the template is how a
+ *   mark is hidden; it is never how it is deleted. This is the export half of that rule.
+ * - **The kind is one this build can read**, so a row written by a later build is skipped rather
+ *   than sent under a guess.
+ *
+ * A tag's value is read from the current tool, not from the row: a tag means *the passage is funny*,
+ * and what "funny" is configured to send is current configuration — the same rule file-level tags
+ * have always followed. A comment's value is its stored text, because that text is what the
+ * reviewer wrote.
+ *
+ * Order is creation order, tie-broken by id for a stable array, exactly as the marks were made.
+ */
+private fun exportMarkViews(
+    rows: List<PayloadMarkRow>,
+    control: ResolvedAssetControl,
+    documentFingerprint: String?
+): List<ExportMarkView> {
+    if (rows.isEmpty() || documentFingerprint == null) return emptyList()
+    return rows
+        .sortedWith(compareBy({ it.createdAt }, { it.id }))
+        .mapNotNull { row ->
+            if (row.documentFingerprint != documentFingerprint) return@mapNotNull null
+            val kind = MarkKind.fromKey(row.kind) ?: return@mapNotNull null
+            val tool = control.buttons.firstOrNull {
+                it.id == row.toolId && it.type.markKind() == kind
+            } ?: return@mapNotNull null
+            ExportMarkView(
+                id = row.id,
+                kind = kind,
+                toolId = row.toolId,
+                pageIndex = row.pageIndex,
+                text = row.exactText,
+                value = if (kind == MarkKind.COMMENT) row.value else tool.recordValue
+            )
+        }
 }
 
 /**
@@ -387,9 +480,11 @@ data class PlannedExport(
  * the same reason the mechanism is: the confirmation, the POST and the history row must name one
  * destination. The rules:
  *
- * - a non-empty [listWebhookUrl] overrides the webhook address of every group — a List with an
- *   address of its own is saying *this folder's work goes here*, whatever its Todos hold;
- * - a webhook group otherwise posts to the address of the Todo its items came from;
+ * - a non-empty [listWebhookUrl] overrides the address only when the List chose WEBHOOK itself.
+ *   That is the one case the List page shows the field for, and an address the page does not show
+ *   must not change what a round does — *same as the Todos* means exactly that, each Todo's own
+ *   address, including on a List that once held an override;
+ * - an inheriting webhook group posts to the address of the Todo its items came from;
  * - items no Todo owns fall back to [defaultWebhookUrl], the live Settings value;
  * - a Todo that holds no address keeps an empty one. It is not quietly given the default: an
  *   address snapshot is a snapshot, and the upgrade deliberately left old Todos blank.
@@ -483,10 +578,12 @@ fun planExports(
         val key = source?.id
         val existing = ordered[key]
         if (existing == null) {
+            // The List's own address is an override for a List that chose webhook, and only for
+            // one: *same as the Todos* is the List saying it has no destination of its own. The
+            // List page hides the field in this case, and a hidden setting that still redirected
+            // a round would be the page lying about what it shows.
             val address = if (kind == ExportKind.WEBHOOK) {
-                listUrl.ifEmpty {
-                    if (source == null) defaultUrl else source.webhookUrl.trim()
-                }
+                if (source == null) defaultUrl else source.webhookUrl.trim()
             } else {
                 ""
             }

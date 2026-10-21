@@ -45,7 +45,16 @@ enum class MediaKind(val key: String, val label: String, val extensions: Set<Str
             "txt", "md", "log", "csv", "tsv", "json", "xml",
             "yaml", "yml", "ini", "rtf", "srt", "vtt"
         )
-    )
+    ),
+
+    /**
+     * Documents the PDF viewer can present, and whose text it can select.
+     *
+     * A filter of its own because the viewer and the filter share one vocabulary: a file that can
+     * be opened should be nameable where files are narrowed, and [assetKindOf] must give the same
+     * answer both places.
+     */
+    PDF("pdf", "PDFs", setOf("pdf"))
 }
 
 /** What the checked-status filter can ask for. */
@@ -223,6 +232,7 @@ fun mediaKindOf(name: String): MediaKind? {
 fun assetKindOf(name: String): AssetKind = when (mediaKindOf(name)) {
     MediaKind.PICTURE -> AssetKind.IMAGE
     MediaKind.VIDEO -> AssetKind.VIDEO
+    MediaKind.PDF -> AssetKind.PDF
     MediaKind.TEXT, null -> AssetKind.OTHER
 }
 

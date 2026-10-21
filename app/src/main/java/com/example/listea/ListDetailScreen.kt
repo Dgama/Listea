@@ -542,11 +542,13 @@ private fun ProgressCard(
  * - **How it went** — *Last export*, one line, because a List whose exports are failing should say
  *   so here rather than only in a history three screens away.
  *
- * **The address field is back, with a different meaning.** The URL that used to live here in
- * v0.5.6 was a copy of the app default, seeded once and never updated, so changing the default
- * reached no existing List. This one is an *override*: empty means each Todo still posts where it
- * says, and a non-empty value replaces every webhook group this List would otherwise split into.
- * The Test button stays in Settings, where the default it tests lives.
+ * **The address field belongs to the webhook method.** The URL that used to live here in v0.5.6
+ * was a copy of the app default, seeded once and never updated, so changing the default reached no
+ * existing List. This one is an *override* for a List that chose **WEBHOOK**: empty means the
+ * Todos' own addresses split the round, and a non-empty value replaces them. Under *same as the
+ * Todos* or a txt method there is no override to make — inheritance is the List saying it has no
+ * destination of its own — so the field is not drawn. The Test button stays in Settings, where the
+ * default it tests lives.
  */
 @Composable
 private fun ExportCard(
@@ -600,10 +602,10 @@ private fun ExportCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = ListeaDimens.CompactGap)
             )
-            // Only where the List can actually post. Under *Export nothing* or a txt method there
-            // is no webhook group for an override to reach, and a field that changes nothing is a
-            // field a user will think is broken.
-            if (choice == ExportChoice.Inherit || choice == ExportChoice.By(ExportKind.WEBHOOK)) {
+            // Only where the List posts by webhook itself. *Same as the Todos* is the List having
+            // no destination of its own, and under it an override is not applied — see
+            // [planExports] — so drawing the field would offer a control that changes nothing.
+            if (choice == ExportChoice.By(ExportKind.WEBHOOK)) {
                 Spacer(Modifier.height(ListeaDimens.RowGap))
                 ListWebhookField(
                     value = list.webhookUrl,

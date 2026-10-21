@@ -6,13 +6,13 @@ junitVersion = "1.1.5"
 espressoCore = "3.5.1"
 lifecycleRuntimeKtx = "2.6.1"
 activityCompose = "1.8.0"
-kotlin = "2.2.10"
+kotlin = "2.3.20"
 composeBom = "2026.02.01"
 documentfile = "1.1.0"
 lifecycleRuntimeCompose = "2.9.4"
 lifecycleViewmodelCompose = "2.9.4"
 room = "2.8.2"
-ksp = "2.2.10-2.0.2"
+ksp = "2.3.12"
 coil = "3.4.0"
 media3 = "1.8.0"
 datastore = "1.1.7"
@@ -21,6 +21,7 @@ robolectric = "4.16"
 androidxTestCore = "1.5.0"
 
 [libraries]
+nucleus-pdfium = { group = "dev.nucleusframework", name = "pdfium", version = "158.0.8111.0" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }

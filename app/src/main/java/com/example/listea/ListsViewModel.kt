@@ -27,6 +27,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.example.listea.data.AssetDecisions
 import com.example.listea.data.CatalogRow
+import com.example.listea.data.toAssetMark
+import com.example.listea.data.toEntity
 import com.example.listea.data.DissolutionReport
 import com.example.listea.data.DissolvedHistory
 import com.example.listea.data.FileReviewStateEntity
@@ -44,6 +46,7 @@ import com.example.listea.data.ListeaDatabase
 import com.example.listea.data.ListsDao
 import com.example.listea.data.newItemPublicId
 import com.example.listea.data.PayloadAssetRow
+import com.example.listea.data.PayloadMarkRow
 import com.example.listea.data.PayloadTaskRow
 import com.example.listea.data.ReviewAsset
 import com.example.listea.data.ReviewItem
@@ -66,7 +69,10 @@ import com.example.listea.data.toReviewItem
 import com.example.listea.data.ExportRecordEntity
 import com.example.listea.data.ExportRecordSummary
 import com.example.listea.domain.AssetKind
+import com.example.listea.domain.AssetMark
 import com.example.listea.domain.ExportChoice
+import com.example.listea.domain.MarkKind
+import com.example.listea.domain.QuoteAnchor
 import com.example.listea.domain.ExportKind
 import com.example.listea.domain.ReviewContext
 import com.example.listea.domain.decodeExportChoice
@@ -1101,6 +1107,102 @@ class ListsViewModel @JvmOverloads constructor(
         ) { states, assetStates ->
             FolderReview.Ready(items = withLiveDecisions(queue, states, assetStates))
         }
+
+    /**
+     * The passage marks on one Asset, live.
+     *
+     * A Flow rather than a one-off read because a mark is created from a selection menu, edited in
+     * a sheet and deleted from the same surface that draws it: the next frame has to show the
+     * result, and re-reading the whole Task to notice would be the review surface asking itself for
+     * an answer it already has. Rows this build's vocabulary cannot read — a kind written by a later
+     * release — are dropped rather than guessed at, the same rule the button decoder follows.
+     */
+    fun observeAssetMarks(assetId: String): Flow<List<AssetMark>> =
+        dao.observeMarksForAsset(assetId).map { rows -> rows.mapNotNull { it.toAssetMark() } }
+
+    /**
+     * Writes one mark authored by [tool] under [authored], and answers its id.
+     *
+     * **A tag's value is the tool's record value at creation.** The export reads the tool again, so
+     * a renamed record value follows the template; what is stored here is what the reviewer saw
+     * when they tapped, which is the only honest thing to keep for a surface that has to explain an
+     * old mark without the template that made it.
+     *
+     * Null when a comment is blank — the Save button is disabled for that, and this is the second
+     * gate the write path owns, for the caller that skipped the button — or when the tool is not a
+     * passage tool of the kind claimed. Nothing is written in either case.
+     */
+    fun createPdfMark(
+        assetId: String,
+        tool: TemplateButton,
+        kind: MarkKind,
+        value: String,
+        anchor: QuoteAnchor,
+        authored: StoredTemplateVersion
+    ): String? {
+        if (PdfTools.toolFor(listOf(tool), tool.id, kind) == null) return null
+        val text = if (kind == MarkKind.COMMENT) value.trim() else tool.recordValue
+        if (kind == MarkKind.COMMENT && text.isEmpty()) return null
+
+        val id = UUID.randomUUID().toString()
+        val at = now()
+        val mark = AssetMark(
+            id = id,
+            assetId = assetId,
+            toolId = tool.id,
+            authoredTemplateId = authored.ref.templateId.value,
+            authoredTemplateVersion = authored.ref.version,
+            kind = kind,
+            value = text,
+            anchor = anchor,
+            createdAt = at,
+            updatedAt = at
+        )
+        launchDb { writeOrder.withLock { dao.insertMark(mark.toEntity()) } }
+        return id
+    }
+
+    /**
+     * Replaces a comment's text. A blank edit is refused, and a tag is refused outright: its value
+     * is the template's word, not something a reviewer typed.
+     */
+    fun editMarkValue(id: String, value: String) = launchDb {
+        val text = value.trim()
+        if (text.isEmpty()) return@launchDb
+        writeOrder.withLock {
+            val mark = dao.getMark(id) ?: return@withLock
+            if (MarkKind.fromKey(mark.kind) != MarkKind.COMMENT) return@withLock
+            dao.updateMarkValue(id, text, now())
+        }
+    }
+
+    fun deleteMark(id: String) = launchDb {
+        writeOrder.withLock { dao.deleteMark(id) }
+    }
+
+    /**
+     * Stores the anchor a later reading of the same document resolved to.
+     *
+     * Called from the viewer when [resolveMarks] reports a relocation, and deliberately not inside
+     * it: resolution is pure over an open session and has to stay usable in a JVM test, while this
+     * is the write that makes the next open take the fast path.
+     */
+    fun relocateMark(id: String, anchor: QuoteAnchor) = launchDb {
+        writeOrder.withLock {
+            dao.updateMarkAnchor(
+                id = id,
+                documentFingerprint = anchor.documentFingerprint,
+                pageIndex = anchor.pageIndex,
+                charStart = anchor.charStart,
+                charEnd = anchor.charEnd,
+                exactText = anchor.exactText,
+                prefix = anchor.prefix,
+                suffix = anchor.suffix,
+                charParser = anchor.charParser,
+                updatedAt = now()
+            )
+        }
+    }
 
     /**
      * Reads a browsed folder's direct files. Blocking: call on IO. Null when it cannot be read.
@@ -3155,23 +3257,61 @@ class ListsViewModel @JvmOverloads constructor(
     private data class PayloadFacts(
         val tasks: Map<String, PayloadTaskRow>,
         val assetsByTask: Map<String, List<PayloadAssetRow>>,
-        val resolver: TemplateResolver
+        val resolver: TemplateResolver,
+        /**
+         * Stored passages, by Asset. Grouped here rather than joined into the Asset query so a
+         * PDF with many marks stays one row per mark and an image pays nothing.
+         */
+        val marksByAsset: Map<String, List<PayloadMarkRow>> = emptyMap(),
+        /**
+         * The hash of each marked Asset's file as it is now. Absent for a file that could not be
+         * read within the viewer's own cap, which omits its marks rather than sending them against
+         * bytes nobody compared.
+         */
+        val fingerprintByAsset: Map<String, String> = emptyMap()
     )
 
     private suspend fun payloadFacts(rows: List<ListItemEntity>): PayloadFacts {
         val taskIds = rows.map { it.taskId }.distinct()
+        val assetsByTask = if (taskIds.isEmpty()) {
+            emptyMap()
+        } else {
+            dao.getPayloadAssets(taskIds).groupBy { it.taskId }
+        }
+        val assets = assetsByTask.values.flatten()
+        val marksByAsset = if (assets.isEmpty()) {
+            emptyMap()
+        } else {
+            dao.getPayloadMarks(assets.map { it.assetId }).groupBy { it.assetId }
+        }
+        // Only marked Assets are hashed, and on IO: this runs on the ViewModel's scope, whose
+        // dispatcher is the main thread. A round of many PDFs is bounded by the same 64 MiB cap the
+        // viewer applies, one file at a time.
+        val assetsById = assets.associateBy { it.assetId }
+        val fingerprintByAsset = if (marksByAsset.isEmpty()) {
+            emptyMap()
+        } else {
+            withContext(Dispatchers.IO) {
+                marksByAsset.keys.mapNotNull { assetId ->
+                    val uri = assetsById[assetId]?.sourceUri
+                    if (uri.isNullOrEmpty()) {
+                        null
+                    } else {
+                        fingerprintPdf(getApplication(), uri)?.let { assetId to it }
+                    }
+                }.toMap()
+            }
+        }
         return PayloadFacts(
             tasks = if (taskIds.isEmpty()) {
                 emptyMap()
             } else {
                 dao.getPayloadTasks(taskIds).associateBy { it.taskId }
             },
-            assetsByTask = if (taskIds.isEmpty()) {
-                emptyMap()
-            } else {
-                dao.getPayloadAssets(taskIds).groupBy { it.taskId }
-            },
-            resolver = resolverNow()
+            assetsByTask = assetsByTask,
+            resolver = resolverNow(),
+            marksByAsset = marksByAsset,
+            fingerprintByAsset = fingerprintByAsset
         )
     }
 
@@ -3268,7 +3408,14 @@ class ListsViewModel @JvmOverloads constructor(
                 sourceId = sourceId,
                 sourceTitle = sourceTitle,
                 at = at,
-                tasks = exportTaskViews(rowsToSend, facts.tasks, facts.assetsByTask, facts.resolver)
+                tasks = exportTaskViews(
+                    rows = rowsToSend,
+                    tasks = facts.tasks,
+                    assetsByTask = facts.assetsByTask,
+                    resolver = facts.resolver,
+                    marksByAsset = facts.marksByAsset,
+                    fingerprintByAsset = facts.fingerprintByAsset
+                )
             )
 
         // No delivery is recorded against the list for a switched-off List — there was no attempt

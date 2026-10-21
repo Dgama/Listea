@@ -240,8 +240,20 @@ class TemplateResolver(
      * picked by, say, scope size would be an answer nobody asked for and could not see.
      */
     fun controlFor(attachments: String, kind: AssetKind): ResolvedAssetControl? =
+        governingFor(attachments, kind)?.let { ResolvedAssetControl(it.buttons) }
+
+    /**
+     * The first attached template version whose scope admits [kind], or null when none does.
+     *
+     * The same first-match rule [controlFor] draws its buttons from, exposed as the version itself
+     * for the two facts that are not a button list: which template a new PDF mark was authored
+     * under, and which version's tool a stored mark must still find. Exposing it here rather than
+     * repeating the walk keeps visibility and creation from disagreeing about *which* template
+     * governs a file.
+     */
+    fun governingFor(attachments: String, kind: AssetKind): StoredTemplateVersion? =
         decodeTemplateAttachments(attachments)
-            .firstNotNullOfOrNull { ref -> controlAt(ref, kind) }
+            .firstNotNullOfOrNull { ref -> stored(ref)?.takeIf { it.scope.admits(kind) } }
 
     /**
      * What governs a whole Task: every attached template's buttons, together.
@@ -264,13 +276,6 @@ class TemplateResolver(
         }.filter { seen.add(it.id) }
 
         return ResolvedAssetControl(buttons)
-    }
-
-    /** One attachment, resolved against one kind, or null when it does not apply or is unreadable. */
-    private fun controlAt(ref: TemplateVersionRef, kind: AssetKind): ResolvedAssetControl? {
-        val stored = stored(ref) ?: return null
-        if (!stored.scope.admits(kind)) return null
-        return ResolvedAssetControl(stored.buttons)
     }
 
     /** One stored version, or null for a reference this build's tables do not hold. */

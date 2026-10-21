@@ -1,7 +1,8 @@
 package com.example.listea.data
 
 import androidx.room.withTransaction
-import com.example.listea.domain.TEMPLATE_BUTTONS_VERSION
+import com.example.listea.domain.SUPPORTED_TEMPLATE_BUTTON_VERSIONS
+import com.example.listea.domain.buttonsVersionFor
 import com.example.listea.domain.TemplateButton
 import com.example.listea.domain.TemplateScope
 import com.example.listea.domain.Templates
@@ -91,7 +92,7 @@ class TemplateStore(private val database: ListeaDatabase) {
                     version = 1,
                     scope = encodeTemplateScope(seed.scope),
                     buttons = encodeTemplateButtons(seed.buttons),
-                    buttonsVersion = TEMPLATE_BUTTONS_VERSION,
+                    buttonsVersion = buttonsVersionFor(seed.buttons),
                     createdAt = System.currentTimeMillis()
                 )
             )
@@ -129,7 +130,9 @@ class TemplateStore(private val database: ListeaDatabase) {
         database.withTransaction {
             val lineage = reads.template(templateId) ?: return@withTransaction
             val latest = reads.versionsOf(templateId).lastOrNull() ?: return@withTransaction
-            if (latest.buttonsVersion != TEMPLATE_BUTTONS_VERSION) return@withTransaction
+            if (latest.buttonsVersion !in SUPPORTED_TEMPLATE_BUTTON_VERSIONS) {
+                return@withTransaction
+            }
 
             // Typed text is kept to one line on the way in, exactly as it is for a configured tag
             // (`SettingsStore.updateCustomAction`), and by the same function. One sanitiser rather
@@ -159,7 +162,7 @@ class TemplateStore(private val database: ListeaDatabase) {
                     version = latest.version + 1,
                     scope = scopeText,
                     buttons = buttonsText,
-                    buttonsVersion = TEMPLATE_BUTTONS_VERSION,
+                    buttonsVersion = buttonsVersionFor(cleanButtons),
                     createdAt = System.currentTimeMillis()
                 )
             )

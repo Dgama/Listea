@@ -3,11 +3,11 @@ package com.example.listea.domain
 /**
  * What a [TemplateButton] records, which decides how its mark is read.
  *
- * Two ship and they store identically, which is deliberate rather than a duplicate: a tag *is* a
- * boolean whose meaning is decided downstream. What separates them is not on/off, it is the shape of
- * the types that come next — an `option` holds one of several, a `field` or a `note` holds text, and
- * both want a *value* where these two want a presence. Naming the distinction now is what lets those
- * arrive as a member here plus a column of their own, rather than as a rewrite of what a mark is.
+ * [BOOLEAN] and [TAG] store identically and deliberately: a tag *is* a boolean whose meaning is
+ * decided downstream. [COMMENT] is the first type to hold a value of its own — the reviewer's
+ * text — and it is why the button payload has a version 2. The distinction is worth naming because
+ * a mark's *shape* follows it: the first two are a presence on a file, a comment is a statement
+ * attached to a passage.
  *
  * The key is what goes to storage, spelled out rather than taken from the ordinal, for the reason
  * [AssetKind] spells its own: an ordinal is a position in this file, and inserting a member above
@@ -19,7 +19,16 @@ enum class ButtonType(val key: String) {
     BOOLEAN("boolean"),
 
     /** On or off, with a meaning the export decides: a tag a person configured. */
-    TAG("tag");
+    TAG("tag"),
+
+    /**
+     * Free text written by the reviewer and attached to the selection.
+     *
+     * The button itself carries no record value: what leaves is the text the reviewer typed, not a
+     * word configured on the template. On a PDF it is a passage tool; a file-level chip row has no
+     * use for it, which is why the review surface does not draw one for a PDF.
+     */
+    COMMENT("comment");
 
     companion object {
         /** The type a stored [key] names, or null for one this build has never written. */
@@ -50,15 +59,64 @@ data class TemplateButton(
 )
 
 /**
- * The version of the encoding below, stored beside every payload that uses it.
+ * The first version of the encoding below: four fields, `boolean` and `tag`.
  *
- * The move `dissolved_task_state` makes with its `recordVersion` column and `review_events` makes
- * with `templateId`: a payload is never read without knowing what wrote it. This one earns the
- * column rather than an argument that it will never change — [ButtonType] exists precisely so that
- * a type holding a *value* can arrive, and a type holding a value needs a field this format does
- * not have.
+ * Still written for a list that contains no comment — a template edited in this build but holding
+ * only tags stays readable by a build that has never heard of version 2. That is a compatibility
+ * choice, not a claim that this is the newest version.
  */
 const val TEMPLATE_BUTTONS_VERSION = 1
+
+/**
+ * The version that can name a [ButtonType.COMMENT].
+ *
+ * The row shape did not change — a comment has no record value, so the fourth field is empty — but
+ * the *vocabulary* did, and a build that predates it must not offer a button it cannot honour. A
+ * version line is how the payload says which vocabulary it uses.
+ */
+const val TEMPLATE_BUTTONS_COMMENT_VERSION = 2
+
+/**
+ * Every version this build can decode and edit.
+ *
+ * `TemplateStore` refuses to append a version after an unreadable one, so this is also the set of
+ * versions it is allowed to extend. Reading version 1 is not a courtesy: every template that has
+ * ever been stored without a comment is still version 1, and an editor that could not open it would
+ * strand it.
+ */
+val SUPPORTED_TEMPLATE_BUTTON_VERSIONS: IntRange =
+    TEMPLATE_BUTTONS_VERSION..TEMPLATE_BUTTONS_COMMENT_VERSION
+
+/**
+ * The encoding version [buttons] needs: 2 when a comment is present, 1 otherwise.
+ *
+ * Chosen from the content rather than from a build-wide constant so the two promises hold at once:
+ * a new build can write a comment, and appending a version to a comment-free template does not make
+ * every earlier build treat the whole template as unreadable.
+ */
+fun buttonsVersionFor(buttons: List<TemplateButton>): Int =
+    if (buttons.any { it.type == ButtonType.COMMENT }) {
+        TEMPLATE_BUTTONS_COMMENT_VERSION
+    } else {
+        TEMPLATE_BUTTONS_VERSION
+    }
+
+/**
+ * The vocabulary an editor must read its **draft** with, which is not always the one on the row.
+ *
+ * A draft is encoded by this build, so an edited draft can name a comment even when the stored
+ * version is 1 — that is exactly what adding a Comment button does. Reading it back at the stored
+ * version would drop the row the edit just added, because version 1 cannot read `comment`: the
+ * button would disappear between the tap that made it a comment and the next keystroke, and an
+ * Update from such a draft would write the template without it.
+ *
+ * An **untouched** draft is still the stored row, and is read at the stored version. A version-1
+ * row that somehow carries a comment line therefore stays dropped, exactly as it is when the
+ * template is first opened — the tolerance rule for a corrupt line is not relaxed just because the
+ * page can now also write the newer vocabulary.
+ */
+fun templateDraftVersion(storedText: String, storedVersion: Int, draftText: String): Int =
+    if (draftText == storedText) storedVersion else SUPPORTED_TEMPLATE_BUTTON_VERSIONS.last
 
 /**
  * A template version's buttons, as one string: one line per button, four tab-separated fields.
@@ -90,6 +148,11 @@ fun encodeTemplateButtons(buttons: List<TemplateButton>): String =
  * later release meant by a field onto today's meaning of it, silently, and a template whose bar is
  * misread is a template whose marks mean something nobody chose.
  *
+ * A `comment` line inside version 1 is dropped as well, because version 1 could not have written
+ * one: a row like that was hand-edited or corrupted, and offering free-text collection from a
+ * payload that never promised it is the same guess the version gate exists to refuse. Version 2
+ * reads all three types.
+ *
  * Below that the tolerance is this codebase's usual one: a line this build cannot read costs its own
  * line and never the whole payload. A button with no id, an id carrying a comma — the separator the
  * *record* stores ids with — or a type this build has never heard of is dropped, and the buttons
@@ -97,7 +160,7 @@ fun encodeTemplateButtons(buttons: List<TemplateButton>): String =
  * and the two must not be conflated.
  */
 fun decodeTemplateButtons(text: String, version: Int): List<TemplateButton>? {
-    if (version != TEMPLATE_BUTTONS_VERSION) return null
+    if (version !in SUPPORTED_TEMPLATE_BUTTON_VERSIONS) return null
     if (text.isEmpty()) return emptyList()
 
     return text.split('\n').mapNotNull { line ->
@@ -106,6 +169,9 @@ fun decodeTemplateButtons(text: String, version: Int): List<TemplateButton>? {
         val id = fields.getOrNull(0)?.trim().orEmpty()
         if (id.isEmpty() || id.contains(',')) return@mapNotNull null
         val type = ButtonType.fromKey(fields.getOrNull(2)?.trim()) ?: return@mapNotNull null
+        if (type == ButtonType.COMMENT && version < TEMPLATE_BUTTONS_COMMENT_VERSION) {
+            return@mapNotNull null
+        }
         TemplateButton(
             id = id,
             name = fields.getOrNull(1).orEmpty(),

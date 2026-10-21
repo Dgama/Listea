@@ -42,11 +42,10 @@ fun directChildOf(groupPath: String, scope: String): Boolean =
     groupPath.substringBeforeLast('/', "") == scope
 
 /**
- * Whether a file of this name has a viewer in this build: the picture and video extensions
- * [MediaPreview] renders, and nothing else — PDF and unknown types included. Eligibility and the
- * catalog badge both call this; it is filename-based because a Task nobody is looking at must still
- * be answerable, and because `MediaPreview` classifies mime-first at render time, which a stored
- * fact would not.
+ * Whether a file of this name has a viewer in this build: the picture, video and PDF extensions
+ * [MediaPreview] renders, and nothing else. Eligibility and the catalog badge both call this; it is
+ * filename-based because a Task nobody is looking at must still be answerable, and because
+ * `MediaPreview` classifies mime-first at render time, which a stored fact would not.
  *
  * Written in terms of [assetKindOf] rather than of `mediaKindOf` directly, which is what makes this
  * and the asset-control lookup the *same* opinion rather than two that agree. A file that has a tag
@@ -55,7 +54,7 @@ fun directChildOf(groupPath: String, scope: String): Boolean =
  * appears, and the user would find it before a test did.
  */
 fun assetViewerAvailable(name: String): Boolean = when (assetKindOf(name)) {
-    AssetKind.IMAGE, AssetKind.VIDEO -> true
+    AssetKind.IMAGE, AssetKind.VIDEO, AssetKind.PDF -> true
     AssetKind.OTHER -> false
 }
 

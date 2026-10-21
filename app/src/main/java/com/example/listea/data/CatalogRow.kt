@@ -85,7 +85,7 @@ data class CatalogRow(
      */
     val assetControls: String = "",
 
-    /** True when at least one required Asset has no viewer in this build — e.g. a PDF. */
+    /** True when at least one required Asset has no viewer in this build — e.g. a text file. */
     val hasUnviewableAsset: Boolean,
 
     /** The Assets themselves, resolved for the viewer boundary rather than re-read per card. */

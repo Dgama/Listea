@@ -271,7 +271,8 @@ abstract class ListsDao {
         """
         SELECT a.taskId AS taskId, a.id AS assetId, a.publicId AS publicId,
                a.relativePath AS relativePath, a.sourceMissing AS sourceMissing,
-               a.sortOrder AS sortOrder, tas.selections AS selections
+               a.sortOrder AS sortOrder, tas.selections AS selections,
+               a.sourceUri AS sourceUri
         FROM assets a
         LEFT JOIN task_asset_state tas ON tas.assetId = a.id
         WHERE a.taskId IN (:taskIds)
@@ -279,6 +280,30 @@ abstract class ListsDao {
         """
     )
     abstract suspend fun getPayloadAssets(taskIds: List<String>): List<PayloadAssetRow>
+
+    /**
+     * The stored passages of the given Assets, in the order they were made.
+     *
+     * Everything the export needs is on the row: the tool and kind decide whether the current
+     * template still offers the mark at all, the anchor fingerprint decides whether it still
+     * describes the file, and the quote is what the receiver is shown. The authored template is
+     * deliberately not read — visibility is a question about the template in force now.
+     */
+    suspend fun getPayloadMarks(assetIds: List<String>): List<PayloadMarkRow> =
+        assetIds.chunked(PathBindChunk).flatMap { chunk -> getPayloadMarksChunk(chunk) }
+
+    @Query(
+        """
+        SELECT id, assetId, toolId, kind, value, pageIndex, exactText,
+               documentFingerprint, createdAt
+        FROM task_asset_marks
+        WHERE assetId IN (:assetIds)
+        ORDER BY assetId, createdAt, id
+        """
+    )
+    protected abstract suspend fun getPayloadMarksChunk(
+        assetIds: List<String>
+    ): List<PayloadMarkRow>
 
     @Insert
     abstract suspend fun insertList(list: ListEntity): Long
@@ -3279,4 +3304,80 @@ abstract class ListsDao {
         }
         return NewTaskDelta(assetsCreated = task.assets.size)
     }
+
+    // --- passage marks (v0.7.0) ---------------------------------------------------------------
+
+    /**
+     * The marks on one Asset, in the order they were made.
+     *
+     * Ordered in SQL rather than in the UI because the order is part of what a reader sees: an
+     * overlap sheet lists the older mark first, and the payload repeats that order so a receiver can
+     * diff two deliveries. [id] is the tie-break, because two marks created in the same millisecond
+     * are still two marks and their order must not depend on how SQLite happened to return them.
+     */
+    @Query(
+        "SELECT * FROM task_asset_marks WHERE assetId = :assetId ORDER BY createdAt, id"
+    )
+    abstract fun observeMarksForAsset(assetId: String): Flow<List<AssetMarkEntity>>
+
+    /**
+     * Every mark under [assetIds], for a payload being assembled.
+     *
+     * Chunked for the reason [PathBindChunk] gives: a payload can name a whole folder's Assets, and
+     * older APIs cap a statement at 999 bound variables.
+     */
+    suspend fun getMarksForAssets(assetIds: List<String>): List<AssetMarkEntity> =
+        assetIds.chunked(PathBindChunk).flatMap { chunk -> getMarksForAssetsChunk(chunk) }
+
+    @Query(
+        "SELECT * FROM task_asset_marks WHERE assetId IN (:assetIds) " +
+            "ORDER BY assetId, createdAt, id"
+    )
+    protected abstract suspend fun getMarksForAssetsChunk(
+        assetIds: List<String>
+    ): List<AssetMarkEntity>
+
+    @Query("SELECT * FROM task_asset_marks WHERE id = :id")
+    abstract suspend fun getMark(id: String): AssetMarkEntity?
+
+    @Insert
+    abstract suspend fun insertMark(mark: AssetMarkEntity)
+
+    /** A comment's text was edited. Only ever called for a comment; a tag's value is its tool's. */
+    @Query("UPDATE task_asset_marks SET value = :value, updatedAt = :updatedAt WHERE id = :id")
+    abstract suspend fun updateMarkValue(id: String, value: String, updatedAt: Long)
+
+    /**
+     * A later reading found the passage somewhere else, so the stored anchor moves to where it was
+     * found.
+     *
+     * The quote and its neighbours are rewritten along with the coordinates: the whole point of a
+     * relocation is that the new document's text is what a future reader has to match, and leaving
+     * the old values beside the new fingerprint would make the row disagree with itself.
+     */
+    @Query(
+        """
+        UPDATE task_asset_marks
+        SET documentFingerprint = :documentFingerprint, pageIndex = :pageIndex,
+            charStart = :charStart, charEnd = :charEnd, exactText = :exactText,
+            prefix = :prefix, suffix = :suffix, charParser = :charParser,
+            updatedAt = :updatedAt
+        WHERE id = :id
+        """
+    )
+    abstract suspend fun updateMarkAnchor(
+        id: String,
+        documentFingerprint: String,
+        pageIndex: Int,
+        charStart: Int,
+        charEnd: Int,
+        exactText: String,
+        prefix: String,
+        suffix: String,
+        charParser: String,
+        updatedAt: Long
+    )
+
+    @Query("DELETE FROM task_asset_marks WHERE id = :id")
+    abstract suspend fun deleteMark(id: String)
 }

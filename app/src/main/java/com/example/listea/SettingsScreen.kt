@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -35,6 +36,7 @@ import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -109,6 +111,7 @@ object SettingsRoute {
     const val Exports = "exports"
     const val File = "file"
     const val History = "history"
+    const val About = "about"
 
     private const val TemplatePrefix = "template/"
     private const val ExportPrefix = "export/"
@@ -206,6 +209,11 @@ fun SettingsScreen(
         route == SettingsRoute.File -> SettingsFilePage(
             modifier = modifier,
             viewModel = viewModel,
+            onBack = toIndex
+        )
+
+        route == SettingsRoute.About -> SettingsAboutPage(
+            modifier = modifier,
             onBack = toIndex
         )
 
@@ -333,6 +341,14 @@ private fun SettingsIndexScreen(
                 tone = if (pendingCount == 0) StatusTone.Neutral else StatusTone.Warning,
                 onOpen = { onRoute(SettingsRoute.History) }
             )
+            IndexDivider()
+
+            SettingsIndexRow(
+                icon = Icons.Outlined.Info,
+                title = "About Listea",
+                state = "Version ${BuildConfig.VERSION_NAME} · third-party notices",
+                onOpen = { onRoute(SettingsRoute.About) }
+            )
         }
 
         Spacer(Modifier.height(ListeaDimens.SectionGap))
@@ -400,6 +416,41 @@ private fun SettingsPage(
             Spacer(Modifier.height(ListeaDimens.CompactGap))
             content()
             Spacer(Modifier.height(ListeaDimens.SectionGap))
+        }
+    }
+}
+
+/**
+ * The build's identity and the licence notices for what is inside it.
+ *
+ * The notices are read from the raw resource rather than rebuilt from strings, so the page shows
+ * exactly the bytes the APK carries — the file a licence obliges the distribution to include. The
+ * text is selectable because a notice a reader cannot copy is one they cannot pass on.
+ */
+@Composable
+private fun SettingsAboutPage(modifier: Modifier, onBack: () -> Unit) {
+    val context = LocalContext.current
+    val notices = remember(context) {
+        context.resources.openRawResource(R.raw.third_party_notices)
+            .bufferedReader()
+            .use { it.readText() }
+    }
+    SettingsPage("About Listea", modifier, onBack) {
+        SectionCard {
+            Column(verticalArrangement = Arrangement.spacedBy(ListeaDimens.CompactGap)) {
+                Text(
+                    "Listea ${BuildConfig.VERSION_NAME}",
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Text(
+                    "A folder review app. The PDF viewer is Nucleus PDFium; the notices below " +
+                        "name it and every other third-party component this build carries.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+        }
+        SelectionContainer {
+            Text(notices, style = MaterialTheme.typography.bodySmall)
         }
     }
 }
@@ -1205,8 +1256,12 @@ internal fun CustomActionFields(
         }
     }
 
+    // A comment records the reviewer's text, not a configured word, so it has no webhook value to
+    // edit. The field is absent rather than disabled: an empty input the app would ignore is a
+    // promise the format cannot keep.
+    val recordsValue = buttonType != ButtonType.COMMENT
     BoxWithConstraints(Modifier.fillMaxWidth()) {
-        if (maxWidth >= CustomActionSideBySideMinWidth) {
+        if (recordsValue && maxWidth >= CustomActionSideBySideMinWidth) {
             Row(horizontalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)) {
                 SettingsTextField(
                     label = "Display name",
@@ -1231,12 +1286,14 @@ internal fun CustomActionFields(
                     onCommit = onDisplayNameCommit,
                     commitAsYouType = commitAsYouType
                 )
-                SettingsTextField(
-                    label = "Webhook value",
-                    value = action.webhookValue,
-                    onCommit = onWebhookValueCommit,
-                    commitAsYouType = commitAsYouType
-                )
+                if (recordsValue) {
+                    SettingsTextField(
+                        label = "Webhook value",
+                        value = action.webhookValue,
+                        onCommit = onWebhookValueCommit,
+                        commitAsYouType = commitAsYouType
+                    )
+                }
             }
         }
     }
@@ -1273,6 +1330,7 @@ internal fun CustomActionFields(
 private fun buttonTypeLabel(type: ButtonType): String = when (type) {
     ButtonType.BOOLEAN -> "On / off"
     ButtonType.TAG -> "Tag"
+    ButtonType.COMMENT -> "Comment"
 }
 
 private fun buttonTypeHelp(type: ButtonType): String = when (type) {
@@ -1281,6 +1339,9 @@ private fun buttonTypeHelp(type: ButtonType): String = when (type) {
     ButtonType.TAG ->
         "A button whose meaning is decided by whatever reads the export — the app records that " +
             "it is on and sends the record value above, and does not decide what that means."
+    ButtonType.COMMENT ->
+        "Free text attached to the passage the reviewer selected. It has no record value: the " +
+            "reviewer's words are what leaves. On an image or video it has nothing to attach to."
 }
 
 /** Two 150dp fields and the gap between them: below this a field stops showing enough to edit. */

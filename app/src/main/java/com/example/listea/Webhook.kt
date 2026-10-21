@@ -470,20 +470,32 @@ fun webhookItems(items: List<ListItemEntity>, settings: AppSettings): List<ListI
     if (settings.webhookCompletedItemsOnly) items.filter { it.isCompleted } else items
 
 /**
- * The webhook body, version 2. Timestamps are epoch milliseconds.
+ * The webhook body, version 2 — or version 3 when the round carries a PDF mark. Timestamps are
+ * epoch milliseconds.
  *
  * The hierarchy is **event → list → task → asset**, and each level says only what belongs to it:
- * completion and template identity on the Task, the file's path and its decisions on the Asset.
- * This is a deliberately fixed shape; a receiver built on it may reconstruct a round without
- * consulting any other source.
+ * completion and template identity on the Task, the file's path, its decisions and its passages on
+ * the Asset. This is a deliberately fixed shape; a receiver built on it may reconstruct a round
+ * without consulting any other source.
+ *
+ * **The version is a claim about this body, not about this build.** A round with no marks writes
+ * neither a `marks` key nor the version that introduces one, so every image and video payload is
+ * byte-for-byte the one v0.6.2 sent and a receiver needs no new branch for it. Only the rounds that
+ * actually carry a passage say 3.
  *
  * The facts are assembled once, by [exportTaskViews], and this function only decides how they are
  * spelled. Key order is part of the contract and is pinned by `WebhookBodyTest`. Null is a value,
  * never an omission: `completedAt`, an Asset with no path, and a template version this build cannot
  * read all appear as `null`.
  */
-fun buildWebhookPayload(payload: ExportPayload): String = JSONObject()
-    .put("version", EXPORT_VERSION)
+fun buildWebhookPayload(payload: ExportPayload): String {
+    val carriesMarks = payload.tasks.any { task -> task.assets.any { it.marks.isNotEmpty() } }
+    return describePayload(payload, carriesMarks).toString()
+}
+
+/** The body itself, with the version chosen by whether [carriesMarks] is true. */
+private fun describePayload(payload: ExportPayload, carriesMarks: Boolean): JSONObject = JSONObject()
+    .put("version", if (carriesMarks) EXPORT_VERSION_MARKS else EXPORT_VERSION)
     .put("event", payload.event)
     .put(
         "list",
@@ -493,7 +505,6 @@ fun buildWebhookPayload(payload: ExportPayload): String = JSONObject()
             .put("completedAt", payload.completedAt ?: JSONObject.NULL)
     )
     .put("tasks", JSONArray().apply { payload.tasks.forEach { put(taskJson(it)) } })
-    .toString()
 
 /**
  * One Task as the receiver sees it. `isCompleted` is here rather than on an Asset because checking
@@ -534,10 +545,43 @@ private fun taskJson(task: ExportTaskView): JSONObject = JSONObject()
                             "actions",
                             JSONArray().apply { asset.actions.forEach { put(it) } }
                         )
+                        .apply {
+                            // The key is present only where the array is. An empty `marks` on an
+                            // image would be a shape v2 receivers have never seen, and the version
+                            // line is allowed to say 2 precisely because nothing new is here.
+                            if (asset.marks.isNotEmpty()) {
+                                put(
+                                    "marks",
+                                    JSONArray().apply {
+                                        asset.marks.forEach { put(markJson(it)) }
+                                    }
+                                )
+                            }
+                        }
                 )
             }
         }
     )
+
+/**
+ * One passage as the receiver sees it.
+ *
+ * `quote` is a pair rather than the anchor's flat fields because a receiver reads it as *this page,
+ * this text*; the local character range and parser hint would be noise it could not verify. `kind`
+ * is the stored `comment`/`tag` key, matched to `toolId` so a receiver can group by the tool the
+ * reviewer used without knowing this build's button ids in advance.
+ */
+private fun markJson(mark: ExportMarkView): JSONObject = JSONObject()
+    .put("id", mark.id)
+    .put("kind", mark.kind.key)
+    .put("toolId", mark.toolId)
+    .put(
+        "quote",
+        JSONObject()
+            .put("page", mark.pageIndex)
+            .put("text", mark.text)
+    )
+    .put("value", mark.value)
 
 /**
  * POSTs [jsonBody] to [url]. Blocking: call on an IO dispatcher.
