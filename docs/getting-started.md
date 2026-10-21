@@ -124,7 +124,10 @@ anywhere — see [Optional: wire up an export](#optional-wire-up-an-export).
 **The template step is the one gate in the dialog.** **Create** stays disabled until at least one
 template is attached, because a run with none produces a Todo whose every file draws an empty chip
 row and whose Tasks can carry no mark at all. Attaching a template decides which action chips the
-run's files will offer — see [Templates](templates.md).
+run's files will offer — see [Templates](templates.md). If the run holds documents, attach one
+scoped to **PDFs** as well: its Tag and Comment buttons become the passage tools in the reader. A
+PDF no template governs is still readable and Copy still works; it simply offers no review tools,
+draws no marks and exports none.
 
 <!-- screenshot: history-recovery — the "Decisions left behind" block in the Create tasks? dialog,
      with a Start fresh row and one kept history under it -->
@@ -247,6 +250,15 @@ An item holds one file most of the time, so most swipes are exactly what they lo
 imported as a Task is one item holding several files, and a swipe walks those files before it moves
 on.
 
+**A PDF opens in a reader rather than the media viewer** (v0.7.0). Pages scroll vertically, pinch
+zooms, and a horizontal swipe at the page edge still steps the queue. Long-press the text to start a
+selection and drag to extend it; the menu offers **Copy**, and when a PDF template governs the file,
+its **Tag** and **Comment** buttons join it — choosing one attaches a single mark to that passage.
+A mark is Listea's own record, drawn over the page while the document is open; the PDF is never
+modified. The file bar's **Info** icon lists what the file carries, including a mark whose passage
+this copy of the document can no longer place. See
+[Review and actions → PDFs](review-and-actions.md#pdfs).
+
 The name along the top is the item; the filename beside it and the `3(2/3)/7` position say which of
 its files you are on and where that sits in the queue. The pair of double arrows there steps the
 queue, skipping files entirely, and the single arrows step the files. An item holding one file has
@@ -271,6 +283,10 @@ these are the two **methods** a round can leave by:
 | **Webhook** | POSTs a JSON body describing the round to a URL you configure | Yes |
 | **Txt** | Writes the same JSON body the webhook would post to one file per round under `Download/Listea/txt/` | No |
 
+**PDF passages travel in the same body.** A round that carries marks says `version: 3` and gives
+each marked file a `marks` array beside its `actions`; a round with none stays version 2, byte for
+byte as before. See [Exports → PDF passages](exports.md#pdf-passages).
+
 **Nothing exports by default, and a new Todo exports nothing.** Three steps turn it on:
 
 1. **Set a default address.** **Settings → Exports → Webhook** holds *Preselect the default address*
@@ -283,8 +299,10 @@ these are the two **methods** a round can leave by:
    A new Todo starts at *Don't export*. Its address can be changed later from the Todo card's ⋮ menu.
 3. **Leave a List on *Same as the Todos*, or override it.** A List's detail page carries an **Export**
    card whose **Method** row offers *Same as the Todos*, *Export nothing*, *Webhook* or *Txt*, plus a
-   switch for exporting when the List completes. An optional **Webhook address** field overrides the
-   Todos' addresses for that List; empty follows each Todo.
+   switch for exporting when the List completes. Choosing **Webhook** also draws an optional
+   **Webhook address** field: empty follows each Todo, and a non-empty value overrides them for that
+   List. Under *Same as the Todos* or a txt method the field is not shown, because the List has no
+   destination of its own to override.
 
 A round then exports when you leave a review, when a Quick Review queue runs out, or when a List goes
 complete. The webhook method asks before it posts; the txt method writes and then reports. Three

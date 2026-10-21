@@ -14,28 +14,31 @@
 
 ## The current system
 
-Listea today is a **media triage app**. It reviews images and videos that exist as files under
-folders the user has granted, on one Android device — as many folders as they care to add, each on
-its own grant.
+Listea today is a **file review app with a media bent**. It reviews images, videos and PDFs that
+exist as files under folders the user has granted, on one Android device — as many folders as they
+care to add, each on its own grant.
 
 Concretely, and as a baseline for everything below:
 
 - A reviewable item **is a Task**, and a Task is files: one file, or a folder's worth of them. Its
   files have a path under the Upstream they came from, a size, a modified time, and a media type
   inferred from the extension.
-- Review **is a media screen**. One renderer, one swipe gesture, one action bar, one zoom
-  implementation, one video transport.
+- Review **is one frame with a per-kind renderer**. One swipe gesture, one navigator, one checkbox
+  and one file bar; inside it an image's action bar and zoom, a video transport, or — since v0.7.0
+  — a PDF's page list, selection layer and marks.
 - State **is checked plus actions** — the tick keyed by the Task's own id, the chips by the
-  Task–Asset pair they were given on.
+  Task–Asset pair they were given on, and a PDF's passage marks keyed by that same pair.
 - A queue **comes from a Todo** — the Tasks one Create Tasks run produced — or from a List built
   out of Tasks picked from one.
 - The output **is an export**, describing a List and its items. Since v0.5.6 that is one of two
   methods — a webhook or a file — and a Quick Review round uses the same shape with no List behind
-  it, standing the folder in as the subject.
+  it, standing the folder in as the subject. Since v0.7.0 a PDF Asset may also carry `marks`, and
+  the body says version 3 when it does.
 
 That is a coherent product and it works. The limitation is not quality; it is that every one of
-those five sentences still ends at *file*, *media* or *folder*. A Task has an identity of its own
-now, and nothing yet to hold but files.
+those five sentences still ends at *file* or *folder*. v0.7.0 loosened the grip of *media* — a PDF
+is read sentence by sentence rather than glanced at — but its content is still bytes on disk. A
+Task has an identity of its own now, and nothing yet to hold but files.
 
 ## Architectural direction
 
@@ -72,11 +75,15 @@ position and resume, progress, and the path out to an export.
 [v0.5.4](iterations/v0.5.4.md) built a template abstraction for a different band — the **asset
 control**, the chip row a Task's files offer — so the sentence "there is no template abstraction in
 the code today" stopped being true of the whole app: a template is now a stored row with an id, a
-name, a version, a scope and buttons, and an edit appends a version. None of that reaches the three
-things listed above. **Presentation**, **Controls** and **Actions** are still code-defined, and
-`lists.taskReviewTemplateId` still points at the single `builtin.media.rapid-review@1`. What §1 asks
-for is a template that decides how the *page* behaves, and this release deliberately does not touch
-it.
+name, a version, a scope and buttons, and an edit appends a version. [v0.7.0](iterations/v0.7.0.md)
+then added a second content-specific viewer and drew the boundary explicitly: the **frame**
+(navigator, checkbox, dismissible file bar and Info) is Listea's on every file and every template,
+while the **dynamic components** — a media chip row, a PDF's passage tools — come from the
+template's scope and version. That is the shape a page-level template would build on. None of it
+yet reaches the three things listed above: task-level **Presentation**, **Controls** and
+**Actions** are still code-defined, and `lists.taskReviewTemplateId` still points at the single
+`builtin.media.rapid-review@1`. What §1 asks for is a template that decides how the *page*
+behaves, and the releases so far deliberately do not touch it.
 
 ### 2. Cross-platform-ready structure
 

@@ -1,7 +1,9 @@
 # Templates
 
 A **template** is a named, scoped list of action buttons. It is what decides which chips a file
-offers under its name in Review, and what each of those chips sends.
+offers under its name in Review, and what each of those chips sends. Since v0.7.0 a template can
+also govern a PDF, where its buttons become **passage tools** chosen from a text selection rather
+than chips applied to the whole file.
 
 Before v0.5.4 the chips were a single app-wide set: two configurable tags in Settings, plus a
 favourite built in. That set could not say *this folder of invoices gets these three buttons and
@@ -13,6 +15,7 @@ constant — something with a name you can change and a history you cannot.
 - [Name](#name)
 - [Scope](#scope)
 - [Buttons](#buttons)
+- [PDFs and passage tools](#pdfs-and-passage-tools)
 - [Editing appends a version](#editing-appends-a-version)
 - [Attaching one to a Todo](#attaching-one-to-a-todo)
 - [Which template governs a file](#which-template-governs-a-file)
@@ -25,16 +28,16 @@ Three things: a **name**, a **scope**, and a list of **buttons**.
 They live at **Settings → Templates**, which lists every template and, on each row, which version of
 it is current. Opening one shows its page. Editing is finished with **Update**.
 
-**Nothing in this release starts a template from a blank page.** A template comes into being when
-something has something to name: the upgrade that brought an existing install's own tag sets across
-gives each such Todo a template named after it. Settings lists what exists and edits it, and offers
-no way to add one.
+**A template can be started from a blank page.** Since v0.6.0, **New** on Settings → Templates asks
+for a name and creates a lineage at version 1 with no scope and no buttons. A template also still
+comes into being in the other way: the upgrade that brought an existing install's own tag sets
+across gives each such Todo a template named after it. Both paths are ordinary — a new template is
+edited, scoped and attached exactly like a seeded one.
 
-The Create Tasks dialog does draw a **New template** button, and it is inert on purpose. Tapping it
-says so, and points at **Settings → Templates**, which is where a template is started today. It is
-drawn rather than left out so the shape of the choice — *add one that exists*, or *start one* — is
-visible from the start, and so that a control which cannot do anything yet says as much instead of
-reading as broken.
+The Create Tasks dialog's **New template** button is still inert on purpose. Tapping it says so and
+points at **Settings → Templates**, which is where a template is started. It is drawn rather than
+left out so the shape of the choice — *add one that exists*, or *start one* — is visible while
+attaching, and so that a control which does not act there says as much instead of reading as broken.
 
 ## Name
 
@@ -50,7 +53,9 @@ template.
 ## Scope
 
 **Applies to** — which files the template governs. The chips are the file kinds Listea can classify:
-**Images**, **Videos**, **Other files**.
+**Images**, **Videos**, **PDFs**, **Other files**. PDFs are a kind of their own rather than part of
+*Other files*, because a PDF template's tools are offered per passage: scoping one to *Other files*
+would also hand those tools to every text file and archive, which this build cannot render.
 
 Nothing chosen means **Applies to nothing**, and the page says so in those words rather than leaving
 the line blank. That is not a trap but a rule: *a template that says nothing about what it is for
@@ -76,18 +81,83 @@ A template's buttons are the chips. Each has three parts:
 |---|---|
 | **Display name** | What the chip says — `★`, `C1`, whatever you like. |
 | **Webhook value** | The string a payload sends for it when the button is on. |
-| **Records** | **On / off** or **Tag**. |
+| **Records** | **On / off**, **Tag**, or **Comment**. |
 
 **On / off** is a button that means itself, like ★: what it records is that it was pressed. **Tag**
-is a button that carries a value — the shape the two original chips had.
+is a button that carries a value — the shape the two original chips had. **Comment** (added in
+v0.7.0) carries the reviewer's own text, written when the button is applied to a passage.
+
+A button's meaning on a PDF follows its type. **On / off** has no passage form and is inert there;
+**Tag** and **Comment** become the two passage tools, and the webhook value of a Comment is unused
+because the text is the reviewer's.
 
 **Add button** appends one; the bin beside a button removes it. A button's **id** — the thing every
 stored mark is actually keyed by — is minted rather than typed, and it never changes. That is what
 makes renaming a button or changing what it sends safe: every Task that used it goes on saying
 exactly what it said.
 
+**The button encoding gains version 2.** Version 1 can describe only `boolean` and `tag` buttons;
+version 2 adds `comment`. The version is written as **2 only when the list actually contains a
+comment**, so a template edited in this build but holding no comment stays readable by a build that
+has never heard of version 2. A decoder meeting a version it cannot read fails closed, as every
+payload in this codebase does.
+
 The **value** is resolved when a round is exported, not when a mark is made. Renaming a button
 changes future payloads without touching a single stored item.
+
+## The frame, and the components a template supplies
+
+A review surface is built from two kinds of component, and only one of them belongs to a template.
+
+**The frame is Listea's.** The navigator (back, title, queue position), the completion checkbox,
+and the file's own dismissible bar with its trailing **Info** icon are present for every template —
+including no template at all. They are not buttons, versions or configuration: a template cannot
+add, remove or rename them. The Info icon is the frame's answer to *what is this file, and what does
+Listea hold about it*, so it stays available even when the template has nothing to offer. That is
+what keeps a file reviewable after its template is removed, and what lets a stored comment, a tag
+or a mark the document can no longer place still be found when the reviewer asks.
+
+**The dynamic components are the template's.** A media template supplies the chip row over the
+file; a PDF template supplies the passage tools in the selection menu. Those change with scope,
+version and attachment, and they are the only parts a template editor can alter. A template version
+therefore records the dynamic components and never the frame.
+
+For a **PDF** the frame's file bar holds only Info; its dynamic components are not a chip row but
+the passage tools in the selection menu. See the next section.
+
+## PDFs and passage tools
+
+A template scoped to **PDFs** is the same template model, not a second one: it has a name, a
+version history and buttons, and it is attached to a Todo exactly as a media template is.
+
+What differs is **where its buttons appear**. A PDF is reviewed sentence by sentence, so:
+
+- the selection menu offers **Copy** and then the governing template's **Tag** and **Comment**
+  buttons, in template order;
+- choosing one creates **one mark on that passage** and closes the selection. Applying a second
+  tool means making a second selection;
+- the **file-level chip row carries no tools** on a PDF, because a passage tool applied to the
+  whole file would not describe anything. The frame's file bar stays (it is the frame's, not the
+  template's) and holds only **Info**; it comes and goes with a tap on the page, as on a picture.
+  An **On / off** button is therefore inert on a PDF; the editor still offers the type because a
+  template can be re-scoped, and hiding it there would change what an existing button means when
+  the scope moves;
+- a PDF with **no PDF template** is still readable and Copy still works. It draws no marks, offers
+  no review tools and exports no passages.
+
+**Visibility is decided by the template that governs the file now**, using the same first-match
+rule as chips: the first attached version whose scope admits PDF, and the tool with the mark's id
+in that version. Removing that tool — or the template — hides its marks on screen and from exports
+without deleting a row; restoring the same id brings them back. This is the template rule already
+used for chips, applied to passages.
+
+A PDF's **`actions` array stays empty** in an export. Its tools are passage-scoped, and putting a
+passage into a file-level array would say the file was tagged rather than the sentence. The marks
+travel in their own `marks` array, described in [Exports](exports.md).
+
+Marks belong to the Asset, never to the template: the template version a mark was authored under is
+recorded as history, and it is never consulted to decide whether the mark is shown. That is what
+lets a template edit hide a mark and a later restore bring it back with the same identity.
 
 ## Editing appends a version
 
@@ -156,7 +226,7 @@ because a template that vanishes from a list is a template the user thinks was d
 
 The question is asked of **scopes**, and answered by trying every kind rather than by comparing
 rules: a scope's rules are a conjunction whose members may mean anything, so there is no general way
-to intersect two of them, and the set of kinds is three. A scope that admits nothing overlaps
+to intersect two of them, and the set of kinds is four. A scope that admits nothing overlaps
 nothing, which falls out of the definition rather than being special-cased — a template that governs
 no file cannot be the second answer to anything.
 
@@ -170,8 +240,10 @@ it is why an empty scope is worth warning about.
 
 **The two Task-level surfaces speak about the Task, not about the file on screen.** The badge row
 under a filename, and the payload's `actions` array, are the union of **every attached template's
-buttons** — not of the kinds the Task happens to hold, and not filtered by whether a file of that
-kind is present. That is the point: a button set on a video has to stay nameable while a photograph
+file-level buttons** — not of the kinds the Task happens to hold, and not filtered by whether a file
+of that kind is present. A **Comment** is the one exclusion: it carries a passage, so it never
+becomes a chip, a badge or an entry in `actions`; the PDF selection menu reads it from the same
+buttons. That is the point: a button set on a video has to stay nameable while a photograph
 is on screen, or the badge would report an unknown id for a button the user can see. The order is by
 attachment, then by each version's own button order, first occurrence winning — stable, because it
 decides the order of a webhook's `actions` array and an array that reshuffles itself is one a

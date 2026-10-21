@@ -15,9 +15,9 @@ Building, testing and finding your way around the code.
 
 | | |
 |---|---|
-| Language | Kotlin 2.2.10 |
+| Language | Kotlin 2.3.20 |
 | UI | Jetpack Compose (BOM 2026.02.01), Material 3 |
-| Build | Android Gradle Plugin 9.3.0, Gradle wrapper, KSP |
+| Build | Android Gradle Plugin 9.3.0, Gradle wrapper, KSP 2.3.12 |
 | Min SDK | 24 (Android 7.0) |
 | Compile / target SDK | 37 |
 | Java | 11 |
@@ -26,10 +26,10 @@ You need Android Studio, or a standalone Android SDK, with **API level 37** inst
 from the wrapper in the repository.
 
 **The release names in these docs are the packaged version.** Prose here, in the release notes and in
-`docs/iterations/` refers to rounds as v0.5.6 and back, and since 2026-10-11 `app/build.gradle.kts`
-declares the same name: `versionName = "0.5.6"`, with `versionCode` derived from that one literal so
-it cannot fall behind it. Nothing in the app reads either value, so they never disagree on a screen
-— but a build handed to someone now says which round produced it.
+`docs/iterations/` refers to rounds as v0.7.0 and back, and `app/build.gradle.kts` declares the same
+name: `versionName = "0.7.0"`, with `versionCode` derived from that one literal so it cannot fall
+behind it. Since v0.7.0 **Settings → About** reads `BuildConfig.VERSION_NAME`, so the build a person
+is holding says which round produced it; there is still only one literal to edit.
 
 Two project-level settings worth knowing, both in `gradle.properties`:
 
@@ -49,6 +49,7 @@ Versions are centralised in [`gradle/libs.versions.toml`](../gradle/libs.version
 | `androidx.documentfile` 1.1.0 | Storage Access Framework folder access |
 | Media3 (ExoPlayer) 1.8.0 | Video playback |
 | Coil 3.4.0 (+ `coil-gif`) | Images, and animated GIF/WebP |
+| Nucleus PDFium 158.0.8111.0 | PDF rendering and the text layer behind selection (v0.7.0) |
 | Lifecycle ViewModel / runtime-compose | The single ViewModel and its state collection |
 
 `org.json` is used for webhook payload construction — part of the Android platform, which is why
@@ -56,7 +57,7 @@ payload-shape tests are written against the pure helpers rather than the builder
 
 ### Build size, and where it comes from
 
-Measured on the current tree:
+Measured on the v0.6.2 tree, before the PDF viewer:
 
 | | |
 |---|---|
@@ -79,6 +80,29 @@ because the reference is a field read on a class that also holds the other four 
 **Nothing shrinks it.** Debug builds never run R8, and the release build type sets
 `optimization { enable = false }` in `app/build.gradle.kts`, so even a release APK keeps the whole
 set. The builds on the releases page are debug.
+
+**The PDF viewer adds a different kind of weight, and it is not shrinkable.** Measured on the
+v0.7.0 tree:
+
+| | |
+|---|---|
+| `app-debug.apk` on disk | **50.5 MB** — 48.2 MiB, 50,518,600 bytes |
+| What is inside it, uncompressed | **97.3 MiB** — 102,056,925 bytes |
+| …of which native libraries | **25.47 MB** — 25,469,676 bytes, and stored uncompressed |
+| …of which DEX | **72.0 MiB** — 75,491,976 bytes |
+
+Nucleus PDFium is four ABI sets of `libpdfium.so` plus its JNI bridge: `arm64-v8a` 6,598,792 B,
+`armeabi-v7a` 4,324,224 B, `x86` 6,301,160 B, `x86_64` 6,887,744 B, with the bridge another
+~1.3 MB in total. `.so` files are already compressed, so APK compression stores them as-is — which
+is why the APK's growth (25.7 MB → 50.5 MB) is almost exactly the native payload and not something
+R8 could have removed. R8 cannot touch native code, and in a release APK all four ABIs are still
+packaged — a release **AAB** is what delivers one ABI per device, roughly halving the installed
+native cost on a phone that needs only one of them. The v0.7.0 `bundleDebug` measures **34.8 MB**
+(34,793,006 bytes) and keeps the four sets in separate ABI directories under `base/lib/`; Play
+splits them into per-device APKs at install, so an `arm64-v8a` phone receives the 6.99 MB set and
+none of the other three. The notice travels in the bundle as `base/res/raw/third_party_notices.txt`
+(16,546 bytes), and in the APK at the same resource path. See
+[v0.7.0-plan.md](iterations/v0.7.0-plan.md#3-rights-and-packaging).
 
 **Why a reported size can read much higher than 25 MB.** Any tool that measures the *contents*
 rather than the download — an analyzer showing "raw size", a file manager that unpacks the archive,
@@ -119,8 +143,27 @@ The debug APK lands in `app/build/outputs/apk/debug/`.
 
 ## Tests
 
-**815 JVM unit tests**, in 88 test classes, run with `./gradlew testDebugUnitTest`. No device or
+**985 JVM unit tests**, in 111 test classes, run with `./gradlew testDebugUnitTest`. No device or
 emulator needed.
+
+The Compose instrumentation tests in `app/src/androidTest` are separate: they drive a real screen
+against the attached phone. There is no emulator in this environment, so they are always run on the
+device rather than in CI.
+
+**Do not run them through `connectedDebugAndroidTest` on the phone you care about.** Gradle's
+Android test plugin wants to uninstall the app before installing it; on the OnePlus that step is
+refused (`DELETE_FAILED_INTERNAL_ERROR`) and the plugin can leave the package half-removed, which
+takes the app's database with it. On 2026-10-21 that destroyed the acceptance environment's
+Upstreams, Lists and Todos. Install over the existing app and invoke the runner directly:
+
+```
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb shell am instrument -w -r com.example.listea.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+Add `-e class com.example.listea.PdfMarksTest` to run one class. `adb install -r` keeps the
+database; the runner leaves the app package alone.
 
 They deliberately target the pure logic rather than the UI, which is why so much of that logic lives
 in files with no Android imports. The table is a selection by subject rather than the whole list;
@@ -149,7 +192,7 @@ in files with no Android imports. The table is a selection by subject rather tha
 | `CreateListFromTasksTest` | Making a List out of Tasks picked from a catalog |
 | `SharedTaskTest` | Two Todos over one folder: two Tasks, two decisions, the reads that had assumed one of each, and the claims that say which Todo holds a path as its own Task and which only covers it |
 | `ConsentGateViewModelTest`, `FolderListGateTest`, `ConsentTest` | The consent questions asked before an import or a List, driven through the ViewModel and through the DAO |
-| `MigrationChainTest`, `MigrationSmokeTest`, `MigrationV12ToV13Test`, `MigrationV13ToV14Test`, `MigrationV15ToV16Test`, `MigrationV16ToV17Test`, `MigrationV17ToV18Test`, `MigrationV18ToV19Test`, `MigrationV19ToV20Test`, `MigrationV20ToV21Test`, `MigrationV21ToV22Test`, `MigrationV22ToV23Test`, `MigrationV23ToV24Test`, `MigrationV24ToV25Test`, `MigrationV25ToV26Test` | Every migration, applied in order against a real database |
+| `MigrationChainTest`, `MigrationSmokeTest`, `MigrationV12ToV13Test`, `MigrationV13ToV14Test`, `MigrationV15ToV16Test`, `MigrationV16ToV17Test`, `MigrationV17ToV18Test`, `MigrationV18ToV19Test`, `MigrationV19ToV20Test`, `MigrationV20ToV21Test`, `MigrationV21ToV22Test`, `MigrationV22ToV23Test`, `MigrationV23ToV24Test`, `MigrationV24ToV25Test`, `MigrationV25ToV26Test`, `MigrationV26ToV27Test`, `MigrationV27ToV28Test` | Every migration, applied in order against a real database |
 | `TodoDissolutionTest`, `ListAfterDissolutionTest`, `HistoryRecoveryTest` | Deleting a Todo: what it takes, what it leaves, what a List says afterwards, and what a later Todo can load from what was left |
 | `ContentPolicyTest` | What a changed Task means: the three tiers, the "unchanged means no policy" rule, and every rule by which an Asset counts as changed, missing, or not news |
 | `ContentPolicyRunTest` | The same tiers as *shapes of outcome* through real SQL: which of a Task's id, its judgments and its List memberships survive each one |
@@ -162,10 +205,18 @@ in files with no Android imports. The table is a selection by subject rather tha
 | `ExportDispatchTest`, `ExportRoutingTest`, `ExporterDeliveryTest`, `ExportQuietRoundTest`, `TxtExportTest` | The export split: which kind a surface resolves to, how a round is cut into per-Todo payloads, where delivery runs, the round that is deliberately quiet, and the text file's own shape |
 | `TemplateStoreTest`, `TemplateSeedTest`, `TemplateAttachmentTest`, `TemplateMatchAfterRecoveryTest` | Templates as rows: the built-in every install is seeded with, that an edit appends a version and nothing can revise one, and what a Task is attached to when the template has moved on |
 | `AssetPairResolutionTest`, `PerAssetRecordTest`, `AssetControlRunTest`, `DissolvedRecordsTest`, `HistoryRecordsTest`, `FolderRoundRowTest`, `ListCompletionTest` | The per-file record: which control governs which file of a multi-file Task, that a mark belongs to one file, what a dissolution writes down and a recovery reads back, and a List's completion flag against its own rows |
+| `PdfReadingOrderTest`, `PdfQuoteTest` | Reading order for single-column, two-column, table, CJK and RTL pages, and how a quote is constructed with the prefix/suffix that chooses between repeated quotations |
+| `AssetMarkAnchorTest`, `PdfMarkGeometryTest`, `PdfSizePolicyTest` | Anchor resolution's fast path, text search and detach; the rectangles a mark is drawn at; the 64 MiB bound that refuses an oversized document before reading it |
+| `AssetMarkVisibilityTest`, `AssetMarkDaoTest` | Which marks the current template and tool show, and that removing a tool hides a mark without deleting its row |
+| `ExportMarksTest` | The `marks` array: its shape, a tag sending the current tool value, and every reason a mark is omitted |
 | `AndroidFactoryTest` | That `ListsViewModel` can still be built through Android's real `ViewModelProvider` factory — the one test that runs under Robolectric, which is what lets it use the framework's own factory rather than a stand-in |
 
-There is one instrumented test (`ExampleInstrumentedTest`), which is the template's and is not load
-bearing.
+The instrumented suite is `PdfViewerTest`, `PdfSelectionTest` and `PdfMarksTest` — the viewer's
+gestures and placeholder states, selection and the selection menu, and the mark sheet — plus the
+template's `ExampleInstrumentedTest`. Three spike probes (`PdfPreviewSpikeTest`,
+`PdfTextProbeTest`, `PdfRealDocumentSpikeTest`) also live there: the first runs against a bundled
+fixture, and the other two skip when the maintainer's `pdftest` Upstream is not present, because
+they diagnose real documents rather than assert product behaviour.
 
 ## Project layout
 
@@ -191,8 +242,16 @@ app/src/main/java/com/example/listea/
   ListItemViewerScreen.kt  the same, reached from a List
 
   MediaUi.kt               shared media frame, the item and file control bands, Info sheet
-  MediaPreview.kt          the one renderer: images, GIF, video
+  MediaPreview.kt          the one renderer: images, GIF, video, PDF
   VideoControls.kt         the video transport: play, seek, speed, mute
+  PdfLoader.kt             reading a PDF bounded and hashing the same bytes
+  PdfSession.kt            the renderer-neutral seam, and the only Nucleus adapter
+  PdfReadingOrder.kt       the page's reading order: y-bands, columns, RTL
+  PdfPreview.kt            the page list, its marks, and the selection layer per page
+  PdfSelection.kt          long-press selection, handles, word snapping, Copy and tools
+  PdfMarks.kt              anchors, resolution, geometry, and the visible tool rule
+  PdfMarkLayer.kt          the highlight drawing
+  PdfMarkSheet.kt          the marks under a tap: edit, delete, quote and page
   SwipeCard.kt             the one swipe gesture, and where paging and zoom are arbitrated
   MediaZoom.kt             the pinch, the pan, and how far either may go
   MediaSave.kt             copying a viewed file into the DCIM/Listea gallery album
@@ -233,6 +292,8 @@ app/src/main/java/com/example/listea/
   data/ListeaDatabase.kt   the database and its migrations
   data/ReviewAsset.kt      one Asset as the review surface reads it, and why it is missing
   data/TaskEntities.kt     Room entities: tasks, assets, task_state, task_asset_state, review_events
+  data/AssetMarkEntity.kt  Room entity: task_asset_marks, one passage mark on one Asset
+  data/SchemaBackfillEntity.kt  Room entity: schema_backfills, the one-time bootstrap marker
   data/TemplateEntities.kt Room entities: templates, template_versions
   data/TemplateStore.kt    the templates as rows, and the one write that appends a version
   data/UpstreamEntities.kt Room entity: upstreams
@@ -254,6 +315,7 @@ app/src/main/java/com/example/listea/
 | `Templates.kt` | Asset Viewer against Task Review, the built-in asset control, and what one version of one says |
 | `TemplateScope.kt` | `ScopeRule` and `TemplateScope` — what a template governs, and the rules that decide it |
 | `TemplateButtons.kt` | `ButtonType` and `TemplateButton` — what a button records, which is what decides how its mark is read |
+| `AssetMarks.kt` | `MarkKind`, `QuoteAnchor` and `AssetMark` — a passage, what it says, and how to find it again |
 | `Exports.kt` | `ExportKind` and `ExportChoice` — how decisions leave the app, and who said so |
 
 Nothing in it imports Room, Compose, SAF, `org.json` or any HTTP shape. That is not purity for its
@@ -279,9 +341,15 @@ is a known cost, and it is the first thing the [roadmap](roadmap.md) work will h
 **Pure logic is kept separable.** `FileArrange.kt`, `ReviewArrange.kt`, `QuickReview.kt`,
 `FolderListStatus.kt`, `ItemId.kt`, `Catalog.kt`, `CatalogSelection.kt`, `ContentPolicy.kt`,
 `FolderListGate.kt`, `Importer.kt`, `TemplateResolver.kt`, `DissolvedRecords.kt`, the payload
-helpers in `Webhook.kt`, and the whole of `domain/` have no Compose and little or no Android
-dependency. That is what makes 815 JVM tests possible, and it is the seam the cross-platform roadmap
-item would widen.
+helpers in `Webhook.kt`, `PdfReadingOrder.kt`, the anchor and visibility helpers in `PdfMarks.kt`,
+and the whole of `domain/` have no Compose and little or no Android dependency. That is what makes
+985 JVM tests possible, and it is the seam the cross-platform roadmap item would widen.
+
+The PDF code takes the rule one step further: only `PdfSession.kt` and the page composable in
+`PdfPreview.kt` name the renderer at all. Reading order, anchor construction, anchor resolution and
+mark visibility are ordinary Kotlin over `PdfPageText`/`PdfChar`, so the parts most worth testing —
+*what order a two-column page reads in*, *whether a quote still resolves*, *which marks the current
+template shows* — are tested without a document, a device or PDFium.
 
 The rule the newest of these follow: **the decision is a pure function, and the DAO acts on its
 answer.** `Importer.kt` plans Tasks from a `FolderSnapshot` and writes nothing;
@@ -324,22 +392,59 @@ so an ExoPlayer instance and a decoded image survive a rotate. It deliberately d
 `uiMode`: a light/dark switch should still recreate, because `enableEdgeToEdge()` picks its
 system-bar scrims in `onCreate`.
 
+**The PDF viewer is behind a renderer seam.** `PdfSession.kt` defines `PdfDocumentSession`,
+`PdfPageText` and `PdfChar`; only that file and the page composable `PdfPreview` name
+`dev.nucleusframework`. Reading order, selection, anchors, storage and export speak the neutral
+types, which is what lets the AndroidX-gate in
+[v0.7.0](iterations/v0.7.0.md#renderer-decision-and-the-androidx-gate) be walkable and what lets
+`PdfReadingOrderTest` be ordinary JVM code. The `PdfReaderState` is created by
+`rememberPdfReaderState`, which closes it when the preview leaves composition; the session
+deliberately exposes no `dispose()`, so two closers cannot race.
+
+**A PDF is read whole, bounded, and hashed in the same pass.** Nucleus opens from a `ByteArray`, so
+`PdfLoader.kt` reads at most **64 MiB** — the viewer's product limit, stated once — and refuses
+larger files before allocating. A provider's declared length is a pre-check, never trusted as the
+size: a stream without one is read at most one byte past the cap. The same read feeds SHA-256, the
+**fingerprint** stored in every anchor and compared again at export; hashing separately would read
+the file twice and give the two places a way to disagree. A password-protected, damaged, unreadable
+or oversized file becomes a placeholder sentence, never a crash or a blank page.
+
+**Selection is Listea's.** Nucleus's own selection layer is mouse-only on touch, so the viewer is
+created with `selectableText = false` and `PdfSelection.kt` owns the gesture: long-press to select,
+drag to extend, handles snapped to words, Copy always, review tools only when a template is in
+force. `PdfReadingOrder.kt` is a port of Nucleus's MIT algorithm (y-bands, column split, RTL), kept
+separate because the order is a fact about the page rather than a renderer implementation detail.
+**Cross-page selection is deferred**: a drag stops at the page edge, and the anchor is versioned so
+a later page range is an extension rather than a rewrite.
+
+**A mark's anchor is text first.** `documentFingerprint`, `pageIndex`, `exactText` and the prefix
+and suffix are authoritative; the PDFium character range and parser name are a **hint** that only
+lets the common case skip a search. On reopen the hinted range's text is verified; otherwise the
+page reading order is searched (across pages, because a passage may move), with prefix and suffix
+breaking ties. No unique match means **detached**: kept, listed in the file's Info sheet, not drawn,
+not exported, and not announced over the page. A
+relocation onto changed bytes rewrites the anchor's authoritative fields and fingerprint, so a
+mark that is still findable stays true and sendable. `resolveMarks` lives in `PdfMarks.kt`; its
+geometry and hit-testing are pure and pinned by `PdfMarkGeometryTest`.
+
 **Webhook diagnostics.** `Webhook.kt` has a `DIAGNOSTICS` flag that logs delivery timing and
 failures to logcat under the tag `ListeaWebhook`. It is currently on, changes nothing about what is
 sent or stored, and is marked in the source as temporary.
 
 ## Database and migrations
 
-Room, schema **version 25**, database file `listea.db`, and `exportSchema` is on. Nineteen entities
-across five files:
+Room, schema **version 28**, database file `listea.db`, and `exportSchema` is on. Twenty-one
+entities across seven files:
 
 | File | Entities |
 |---|---|
 | `ListEntities.kt` | `ListEntity`, `ListItemEntity`, `FileReviewStateEntity`, `ExportRecordEntity` |
 | `TaskEntities.kt` | `TaskEntity`, `AssetEntity`, `TaskStateEntity`, `AssetStateEntity`, `ReviewEventEntity`, `LegacyItemIdEntity`, `LegacyManualTaskEntity` |
+| `AssetMarkEntity.kt` | `AssetMarkEntity` — one passage mark on one Asset |
 | `ImportEntities.kt` | `SourceEntity`, `TaskImportEntity`, `DissolvedTaskStateEntity`, `LegacySourceTaskEntity`, `LegacyTaskIdEntity` |
 | `TemplateEntities.kt` | `TemplateEntity`, `TemplateVersionEntity` |
 | `UpstreamEntities.kt` | `UpstreamEntity` |
+| `SchemaBackfillEntity.kt` | `SchemaBackfillEntity` — the marker for the one-time webhook-address bootstrap |
 
 The list is the `@Database(entities = […])` list at `ListeaDatabase.kt:24`, and the file column is
 where each class is declared. One name has since drifted from its table: a kept export is an
@@ -449,6 +554,29 @@ one that was off keeps `inherit`. The column default for a Todo is `webhook`, so
 before the upgrade posts after it, while a Todo created now is offered `none` first — that asymmetry
 is deliberate and lives in the Kotlin default, not here. `lists.webhookUrl` is not dropped and not
 cleared. See [v0.5.6](iterations/v0.5.6.md#the-change-in-one-paragraph).
+
+**25 → 26** is the two-id step. It adds `tasks.publicId` and `assets.publicId` and backfills them
+in Kotlin rather than SQL, because an id is minted from the row's own facts: a Task keeps the id its
+folder round already used, a one-Asset Task inherits the List item id that named it, and everything
+else is stamped at the row's `createdAt`. The final queries refuse to leave a row nameless, because
+an empty id on the wire is worse than a failed upgrade. See
+[v0.6.0](iterations/v0.6.0.md#schema-25--26).
+
+**26 → 27** gives a Todo its own webhook address and a round its id. Four additive columns —
+`sources.webhookUrl`, `sources.webhookFromDefault`, `webhook_history.webhookUrl`,
+`webhook_history.roundId` — plus one deliberate clear: `lists.webhookUrl` has been dead since
+v0.5.6 and becomes the List's override here, so its stale copies are emptied. The step **cannot**
+fill the Todo addresses: the value to copy is Settings' DataStore default, and whether to copy at
+all depends on the old global gate. It records the work in `schema_backfills`, and
+`applyWebhookAddressBootstrap` performs it once, after both stores are readable, deleting the marker
+in the same transaction as the write. See [v0.6.2](iterations/v0.6.2.md).
+
+**27 → 28** adds `task_asset_marks` and its `assetId` index, and touches nothing existing. The only
+foreign key is to `assets`, with `ON DELETE CASCADE`: an Asset an import stops finding takes its
+marks with it, because a passage with no file under it is not a statement about anything. A template
+or tool is deliberately **not** referenced — removing one must hide marks, never delete them — so
+`authoredTemplateId` and `authoredTemplateVersion` are plain history columns. See the anchor section
+above and [v0.7.0](iterations/v0.7.0.md#storage).
 
 The schema is **not settled** — see [Project status](../README.md#project-status). Adding a
 migration is expected of any change to an entity.

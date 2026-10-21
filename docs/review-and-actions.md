@@ -6,6 +6,7 @@ The Review screen: every gesture, control and behaviour, and the actions that go
 - [Gestures](#gestures)
 - [The frame: what belongs to the item](#the-frame-what-belongs-to-the-item)
 - [The file's controls](#the-files-controls)
+- [PDFs](#pdfs)
 - [Buttons](#buttons)
 - [The Info sheet](#the-info-sheet)
 - [Zoom](#zoom)
@@ -28,9 +29,9 @@ video's transport, the tag chips, Info — is drawn *over* the media and comes a
   <img src="assets/screenshots/review-media.jpg" width="300" alt="The Review screen: a video inside the frame, with the item name, filename and queue position along the top and the completion checkbox below it, and the favourite, custom action chips and Info button laid over the bottom of the video">
 </p>
 
-Images (JPEG/PNG/WebP), animated GIFs and video all render in place. The frame takes its own room
-rather than floating over the picture, which is what makes a control that is drawn over the media
-mean something different from one that is not.
+Images (JPEG/PNG/WebP), animated GIFs and video all render in place, and since v0.7.0 a PDF does
+too — see [PDFs](#pdfs). The frame takes its own room rather than floating over the picture, which
+is what makes a control that is drawn over the media mean something different from one that is not.
 
 Full Review and Quick Review are the **same screen**. They differ in where the queue came from and
 in a handful of strings, not in what any control does.
@@ -41,8 +42,10 @@ in a handful of strings, not in what any control does.
 |---|---|
 | **Swipe left** | Go forward one file; off the last file, mark the item checked and advance |
 | **Swipe right** | Go back one file; off the first, go back one item. Changes nothing |
-| **Pinch** | Zoom, up to 5× |
+| **Pinch** | Zoom, up to 5× — a picture, or a PDF at the point between the fingers |
 | **Drag while zoomed** | Pan inside the picture |
+| **Drag a PDF** | Scroll its pages vertically; with a selection, drag a handle to extend it |
+| **Long-press a PDF** | Start selecting text, then drag |
 | **Tap the media** | Show or hide the file's own controls |
 | **Back** | Leave the review |
 
@@ -135,6 +138,39 @@ that finishes it.
 Checking and tagging are independent. Tapping ★ does not check an item; checking an item does not
 tag it. Nothing on this layer implies anything about the checkbox.
 
+## PDFs
+
+A PDF is **read** rather than glanced at, so its viewer differs from a picture's in two ways — and
+neither changes what the item means.
+
+**Reading is browsing.** Pages scroll vertically, pinch zooms in on a passage, and a horizontal swipe
+at the page edge still means previous / next file. Scrolling, zooming and selecting produce no
+record and check nothing.
+
+**Reviewing a passage is a mark.** Long-press starts a selection and dragging extends it; handles
+at each end can be nudged afterwards, and the selection snaps to word boundaries. The menu always
+offers **Copy**. When the template governing this PDF is scoped to PDFs, its **Tag** and **Comment**
+buttons join that menu in template order — choosing one creates one mark on that passage. Applying a
+second tool to the same passage is a second selection, not a second line in one menu.
+
+**The file-level chip row is hidden on a PDF**, because a passage tool applied to the whole document
+would not describe anything. For the same reason an **On / off** button is inert there: it has no
+passage form. The template editor still offers the type, so re-scoping a template never changes what
+an existing button means.
+
+**A PDF with no PDF template is still fully readable.** Copy works; nothing else is offered — no
+marks are drawn, no tools appear and no passages reach an export.
+
+Stored marks are drawn over their text as highlights. Tapping one opens its sheet, where a comment
+can be read and edited and a mark deleted; tapping a spot with several marks lists **every** mark
+under that point rather than guessing which was meant. A mark whose passage can no longer be found
+reads *Not in this document*: it is kept with its stored quotation, not drawn, and not exported.
+None of this writes to the PDF — see
+[File management → What Listea does not do](file-management.md#what-listea-does-not-do).
+
+Full model: [Templates → PDFs and passage tools](templates.md#pdfs-and-passage-tools); what a mark
+sends: [Exports → PDF passages](exports.md#pdf-passages).
+
 ## Buttons
 
 The action chips are the answer to "review is not a yes/no decision". Checking something off says
@@ -153,10 +189,12 @@ Templates → <template>**, in its *Buttons* section. Each button has three fiel
 |---|---|
 | **Display name** | What you see on the chip. Keep it short — the bar is narrow. |
 | **Webhook value** | The string an export sends for this button. A txt export carries it exactly as the payload does. |
-| **Records** | *On / off* or *Tag*. An on/off button means itself, like ★; a tag's meaning is decided by whatever reads the export. |
+| **Records** | *On / off*, *Tag* or *Comment*. An on/off button means itself, like ★; a tag's meaning is decided by whatever reads the export; a comment carries text the reviewer writes when applying it to a PDF passage. |
 
-The two types store identically — a tag is a boolean whose meaning is downstream — so the field
-describes what a button *means* rather than what it holds.
+The first two types store identically — a tag is a boolean whose meaning is downstream — so the field
+describes what a button *means* rather than what it holds. **Comment** (v0.7.0) is the one that
+stores the reviewer's own words, and it exists only as a passage tool: on a picture or a video there
+is no passage to write against, so it is not offered there.
 
 Nothing here decides what a chip means. Whether one means *archive*, *upload*, *delete later* or
 *ask me again tomorrow* is decided entirely by whatever receives the [export](exports.md).
@@ -337,9 +375,13 @@ icon. The header says when either is on.
 
 | Group | Options |
 |---|---|
-| **Media type** | Pictures, Videos, Text |
+| **Media type** | Pictures, Videos, Text, PDFs |
 | **Checked status** | Checked, Unchecked |
 | **Freshness** | Today, 1d – 3d, 3d – 7d, 7d – 2w, 2w – 1m |
+
+**PDFs** became a kind of its own in v0.7.0 rather than staying in *Text*, because the viewer, the
+catalog's viewable badge and this filter now classify a `.pdf` through one function: a file that can
+be opened should be nameable where files are narrowed.
 
 **Sort** — Default order, Name (A–Z), Name (Z–A), Newest first, Oldest first, Largest first,
 Smallest first, File type, Unchecked first.

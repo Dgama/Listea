@@ -17,10 +17,10 @@ where the other pages link to rather than repeat.
 
 | Page | What it covers |
 |---|---|
-| [Review and actions](review-and-actions.md) | The Review screen in full: the frame and what belongs to which level, gestures, zoom, video transport, the Info sheet, rounds, resuming, and how filtering and sorting shape a queue. |
-| [Templates](templates.md) | What a template is: its name, its scope, its buttons, why editing appends a version, and how a Todo attaches one. |
+| [Review and actions](review-and-actions.md) | The Review screen in full: the frame and what belongs to which level, gestures, zoom, video transport, the PDF reader and its passage marks, the Info sheet, rounds, resuming, and how filtering and sorting shape a queue. |
+| [Templates](templates.md) | What a template is: its name, its scope, its buttons, the frame-versus-components boundary, PDF passage tools, why editing appends a version, and how a Todo attaches one. |
 | [Exports](exports.md) | What an export is, the two methods (Webhook and Txt), where a Todo's and a List's choices live, how a round resolves into one payload or several, and the export history. |
-| [Webhooks](webhooks.md) | The webhook method in full: the destination, the four events, the exact JSON payload, the txt body, item ids, resending and failures. |
+| [Webhooks](webhooks.md) | The webhook method in full: the destination, the four events, the exact JSON payload including version 3's `marks`, the txt body, item ids, resending and failures. |
 | [File management](file-management.md) | Everything that touches storage: deleting checked files, the post-webhook delete offer, saving to a gallery album, sharing, permissions, and what an Upstream's grant bounds. |
 | [Settings](settings.md) | Every switch and field on the Settings screen, with links to the page that explains what each one does. |
 
@@ -91,4 +91,8 @@ Two more are worth knowing about because they are recent. [Templates](ARCHITECTU
 records v0.5.4 turning the Asset Control band into stored rows, and
 [Exporter / Action](ARCHITECTURE.md#exporter--action) records v0.5.6 splitting the *export* from its
 *mechanism* — including the one question that split raised against this document's own boundaries,
-which is now stated there as permitted rather than implied.
+which is now stated there as permitted rather than implied. And v0.7.0's record is spread across
+[Asset](ARCHITECTURE.md#asset), [Asset Viewer Template](ARCHITECTURE.md#asset-viewer-template) and
+[Gestures and semantic actions](ARCHITECTURE.md#gestures-and-semantic-actions): a read-only PDF
+viewer, a mark that belongs to the Asset, and the renderer seam that keeps PDFium a choice rather
+than an architectural fact.

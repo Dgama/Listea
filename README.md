@@ -7,8 +7,9 @@
 Listea takes work that would otherwise be a long list of small judgement calls and presents it one
 item at a time, full screen, in a queue you move through with your thumb. Decide, swipe, next.
 
-The first workload it does well is **media triage**: working through a folder of images and video
-and saying what should happen to each file.
+The first workload it does well is **media triage**: working through a folder of images, video and
+documents and saying what should happen to each file. Since v0.7.0 a PDF is not only looked at but
+**read**: a passage can be selected and a comment or a tag attached to it.
 
 <p align="center">
   <img src="docs/assets/screenshots/review-media.jpg" width="300" alt="Listea's Review screen: one video filling the screen, with a position counter, a completion checkbox and custom action chips along the bottom">
@@ -36,8 +37,8 @@ Your place, what you have finished, and what you decided are all remembered, so 
 down and picked up. When a queue is done, Listea can hand the decisions to whatever acts on them
 next — over a webhook, or by writing them to a file.
 
-The idea generalises past files — see the [Roadmap](#roadmap) — but **today Listea reviews images
-and videos on your device, and that is all it reviews.**
+The idea generalises past files — see the [Roadmap](#roadmap) — but **today Listea reviews images,
+videos and PDFs on your device, and that is all it reviews.**
 
 ## How it works
 
@@ -108,6 +109,14 @@ Two chips and a favourite (★) come configured on the built-in template; add, r
 them freely. ★ is a button rather than a fixture — a template that does not carry it gives you no
 star on the files it governs.
 
+**On a PDF the same buttons become passage tools.** A PDF is read sentence by sentence, so it gets
+no file-level chip row: select a passage and the governing template's **Tag** and **Comment**
+buttons join **Copy** in the selection menu, making one mark on that passage. Marks are Listea's
+records, drawn over the document while it is open; the file itself is never changed. The Review
+frame — the navigator, the checkbox and the file bar with its **Info** icon — is Listea's on every
+file and every template, including no template at all. See
+[Review and actions → PDFs](docs/review-and-actions.md#pdfs).
+
 ## Example workflow
 
 You have a folder that syncs from somewhere — a few hundred images and videos you have not looked
@@ -141,18 +150,18 @@ Everything in this table works today.
 | **Task lifetime** | A Task's content can change or disappear outside Listea. The Todo's content policy decides what that means: **Keep it** flags what has gone and changes nothing else, **Start it over** keeps the Task and clears its ticks so moved content is judged again, **Replace the Task** deletes the Task and mints a new one, taking it out of every List that held it. |
 | **Dissolution** | Deleting a Todo takes its Tasks and their decisions with it, leaves the files' own identity alone, and tells every List what it lost. A per-Todo switch can write the decisions down first, so a Todo created at the same folder later can load one history from them. |
 | **Catalog** | Every Task a Todo holds, browsable at its own scope, with the ones you have judged marked. Where **Select** and **Create List** are reached from. |
-| **Review** | Full-screen images, animated GIFs and video. Swipe to check and advance, swipe back to reconsider, pinch to 5×, per-item Info sheet. |
+| **Review** | Full-screen images, animated GIFs, video and PDFs. Swipe to check and advance, swipe back to reconsider, pinch to 5×, per-item Info sheet. A PDF scrolls pages, selects text with word snapping, and draws stored marks over their passages. |
 | **Video** | Its own transport strip: play/pause, scrubber, 0.5×–2× speed, mute. Autoplay and start-muted are settings. |
 | **Quick Review** | Any folder holding Tasks, instantly, without creating anything. |
 | **Lists** | Persistent queues, either over a folder and its subfolders — with progress, source-change detection and manual re-sync — or over Tasks you picked out of a Todo, which have no folder behind them. |
 | **Checked state** | Belongs to the Task, not to the queue. Shared by every List and Quick Review that reaches the same Task. |
-| **Templates** | Named, scoped, versioned definitions of the action chips a Todo offers: a scope saying which files it governs, and buttons each with a name and a wire value. Editing one appends a version, so completed work goes on meaning what it meant. |
+| **Templates** | Named, scoped, versioned definitions of the controls a Todo offers: a scope saying which files it governs, and buttons each with a name and a wire value. On images and video those are action chips; on a PDF they become passage tools (Tag, Comment). Editing one appends a version, so completed work goes on meaning what it meant. |
 | **Custom actions** | The buttons a template carries, with their own display names and wire values, plus a favourite (★) on the built-in one. |
-| **Filter and sort** | By media type, checked status and freshness; sort by name, time, size, type or unchecked-first. Applies to browsing *and* to the review queue. Shared globally or kept per folder. |
+| **Filter and sort** | By media type — pictures, videos, text and now PDFs as a kind of its own — checked status and freshness; sort by name, time, size, type or unchecked-first. Applies to browsing *and* to the review queue. Shared globally or kept per folder. |
 | **Review rounds** | Optionally queue only unchecked items, so each pass through a folder is its own round. |
 | **Resume** | Full Review remembers where it got to. |
-| **Exports** | Two methods — **Webhook** and **Txt** — one chosen per Todo, overridable per List. A List that has not chosen follows its Todos, so a round can split and export more than once. |
-| **Webhooks** | One app-wide URL, four events, a fixed JSON payload, stable public item ids, a test button, and a confirmation before anything leaves the device. |
+| **Exports** | Two methods — **Webhook** and **Txt** — one chosen per Todo, overridable per List. A List that has not chosen follows its Todos, so a round can split and export more than once. PDF passages travel as `marks` in the same body; a round with none is byte-for-byte the version 2 it always was. |
+| **Webhooks** | One app-wide URL, four events, a fixed JSON payload (version 2, or 3 when it carries PDF marks), stable public item ids, a test button, and a confirmation before anything leaves the device. |
 | **Export history** | Every export Listea performs is kept with its method and its outcome, and can be inspected, resent (a webhook) or deleted. |
 | **File management** | Opt-in deletion of checked files, always behind a full named listing and an explicit confirmation. Save a viewed file to a gallery album, or share it out. |
 
@@ -166,6 +175,9 @@ there:
 
 1. **Review templates** — abstract the Review screen so different task types can present
    themselves differently. Today's image/video experience becomes one template among several.
+   v0.7.0 moved the Asset side: a PDF-scoped template supplies passage tools, while the frame —
+   navigator, checkbox, file bar and Info — is Listea's on every template. Page-level presentation
+   and controls are still code-defined.
 2. **Cross-platform-ready structure** — organise domain logic, models and boundaries so an iOS
    implementation is possible later. No framework has been chosen, and iOS is not being built yet.
 3. **A general task model** — let a reviewable item be something other than a local file.
@@ -176,9 +188,12 @@ to stop being welded to image and video files.
 
 **Almost none of this is implemented.** v0.2.5 gave a reviewable item an identity of its own — a
 Task, whose state hangs off that id rather than off a file path — and v0.3.0 and v0.4.0 separated
-the Upstream from the Todo and gave a Task a lifetime. That is the start of the third piece and no
-more: every Task still holds files. The rest describes where the project is going, not what it
-does. The full version is in [docs/roadmap.md](docs/roadmap.md).
+the Upstream from the Todo and gave a Task a lifetime. v0.7.0 added the first content kind that is
+*read* rather than glanced at, a PDF with passage marks, and showed the Asset side can grow a
+viewer and a template without touching Task, List or the core of the payload. That is progress on
+the first and third pieces; the rest of the third still waits, because every Task still holds
+files. The rest describes where the project is going, not what it does. The full version is in
+[docs/roadmap.md](docs/roadmap.md).
 
 ## Documentation
 
@@ -224,5 +239,7 @@ copyright and licence notices and state what you changed. The licence also grant
 patent licence from contributors, and the code comes with no warranty of any kind.
 
 The same licence covers Listea's main dependencies — AndroidX, Compose, Media3, Kotlin and Coil are
-all Apache-2.0 — so a build that redistributes them has one set of notices to carry rather than
-several.
+all Apache-2.0. The PDF viewer adds a native renderer under other terms: the **Nucleus** wrapper
+and **pdfium-binaries** are MIT, and **PDFium** itself is BSD-3-Clause. The app carries the full
+texts of all of them in **Settings → About**, so a build redistributes one set of notices rather
+than several.

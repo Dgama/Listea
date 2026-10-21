@@ -15,6 +15,7 @@ says and what this page says.
 Everything here is optional. Listea is fully usable with nothing set to export at all.
 
 - [The two methods](#the-two-methods)
+- [PDF passages](#pdf-passages)
 - [Where the choice lives](#where-the-choice-lives)
 - [How a round resolves](#how-a-round-resolves)
 - [Settings → Exports](#settings--exports)
@@ -43,6 +44,34 @@ would post**, so the two outputs of one round can be diffed; the destination is 
 missing, because a body never carried one. See
 [Webhooks → The txt body](webhooks.md#the-txt-body).
 
+## PDF passages
+
+Since v0.7.0 a PDF can carry **marks**: a selected passage with a comment or a tag. They travel in
+an Asset's `marks` array, beside the `actions` array an image or video carries. A PDF's `actions`
+stays `[]` — a passage is not a file-level selection.
+
+**The body's `version` becomes 3 only when it actually carries a mark.** A round with no surviving
+passage says `2`, so every image and video payload is byte for byte what v0.6.2 sent and a receiver
+needs no new branch for it. The `marks` key itself is written only on Assets that have one.
+
+A mark leaves only when Listea can still stand behind it:
+
+- its tool is still offered, as the same kind, by the version that governs the file now — a hidden
+  mark is omitted, not sent with a stale value;
+- the file's SHA-256 still matches the fingerprint stored with the quote, so *same path, different
+  bytes* omits the mark rather than claiming a sentence is still there;
+- the anchor still resolves. A detached mark is listed in the file's **Info** sheet, with the
+  quotation it was made from, and is **not exported**. Nothing on the page announces it: a mark
+  whose passage this version of the document cannot place is silent until the reviewer asks what
+  the file carries.
+
+A **comment** sends the reviewer's stored text. A **tag** sends the tool's current configured value,
+resolved at delivery time like every other tag.
+
+The exact shape, the example body and the per-field contract are in
+[Webhooks → Passages, and why they are version 3](webhooks.md#passages-and-why-they-are-version-3).
+The txt method writes the same body, so a marked round is a version 3 file.
+
 ## Where the choice lives
 
 **A Todo picks one method when it is created. A List can override it for everything it holds.** Both
@@ -60,12 +89,15 @@ are single values, never a set — *"todo创建（import的时候）和list里�
   **Export when this list is completed** off: no List begins posting because it was created after an
   upgrade, and the switch is turned on per List.
 
-**The destination is per Todo, and a List may override it.** Since v0.6.2 a Todo stores the webhook
-address it posts to, copied from the default when it is configured (a snapshot, not a subscription)
-and editable from the Todo card's ⋮ menu. A List's Export card carries an optional **Webhook
-address**: empty means *follow each Todo*, and a non-empty value replaces every webhook group that
-List would otherwise post. There is still no Test button on a List — the test belongs on the Webhook
-method's page, where the default it posts to lives. See
+**The destination is per Todo, and a List that chose Webhook may override it.** Since v0.6.2 a Todo
+stores the webhook address it posts to, copied from the default when it is configured (a snapshot,
+not a subscription) and editable from the Todo card's ⋮ menu. A List's Export card carries the
+optional **Webhook address** field **only while its Method is Webhook**: there it is empty to follow
+each Todo, and a non-empty value replaces the address of every webhook group that List would
+otherwise post. Under *Same as the Todos* or a txt method the field is not drawn and any stored
+value is ignored — the List is saying it has no destination of its own, and a hidden setting must
+not change what a round does. There is still no Test button on a List — the test belongs on the
+Webhook method's page, where the default it posts to lives. See
 [Webhooks → The destination](webhooks.md#the-destination).
 
 ### A method this build cannot read exports nothing
@@ -88,7 +120,8 @@ come from a Todo.
 | **Same as the Todos** | **One payload per source Todo**, each by that Todo's own method and address |
 | A Todo set to *Don't export* | Its group is **absent**, not empty |
 | An item no Todo owns | Its own group, by **Webhook** to the live default address |
-| A non-empty List address | Overrides the address of **every webhook group** of that List |
+| **Webhook**, with a non-empty List address | Overrides the address of **every webhook group** of that List |
+| **Same as the Todos**, with a stored List address | The address is **ignored**; each Todo posts to its own |
 
 *Same as the Todos* is the interesting row, and it is why a List's choice is a choice rather than a
 switch. A List may hold Tasks from several Todos with several different methods, and a round over
@@ -96,15 +129,18 @@ such a List exports more than once — one POST for the items that came from a w
 for the items that came from a Txt Todo. The split is a **sum computed when the round ends**, never
 a list stored on a row, which is why nothing has to be kept in sync: nothing is held.
 
-**Webhook groups that resolve to the same address merge.** Under *Same as the Todos* over items from
-two webhook Todos, the round produces one POST if both Todos hold that address and two if they do
-not; *Webhook* chosen for the whole List is one POST regardless of how many Todos the Tasks came
-from. A blank address is its own group and is recorded as a delivery with no destination rather than
+**Under *Same as the Todos*, one Todo is one payload — even when two Todos share an address.** The
+group is keyed by the Todo because the Todo is the thing being inherited from, so two Todos that
+happen to hold the same URL still produce two POSTs. *Webhook* chosen for the whole List is the case
+that keys by address: one POST per distinct destination regardless of how many Todos the Tasks came
+from, and a blank address is its own group, recorded as a delivery with no destination rather than
 silently disappearing — the failure is the answer to *why did nothing arrive*.
 
-**A List never reads the Settings default on its own.** Its webhook groups resolve through the
-Todos; only an item with no owning Todo falls back to the live default. The List's own address is
-the one value typed for it, and it is an override rather than a copy.
+**A List never reads the Settings default on its own.** Under *Same as the Todos* its webhook groups
+resolve through the Todos, and only an item with no owning Todo falls back to the live default. A
+List that chose **Webhook** has one destination to name: its own address when it has one, and
+otherwise the address of the Todo each item came from, with unowned items on the live default. The
+List's address is an override for that one method, never a copy that follows the Todos.
 
 Groups come out in the order their items arrived, and each is delivered by its own method, so a
 round that becomes two payloads announces two results.

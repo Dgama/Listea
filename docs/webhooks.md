@@ -30,11 +30,14 @@ address held, offers *Use default* or a custom URL, and saves it on the Todo. Th
 governs the Todo's own rounds, Quick Review rounds involving its Tasks, and the webhook exports of
 Lists holding them.
 
-**A List may override it with an address of its own.** The optional *Webhook address* field on a
-List's Export card is empty by default, which means *follow each Todo*. A non-empty value replaces
-every webhook group that List would otherwise post, and is the one case where an address is typed
-for a List rather than copied from a Todo. A List never reads the Settings default on its own; a
-Task with no owning Todo does fall back to the live default.
+**A List that chose Webhook may override it with an address of its own.** The optional *Webhook
+address* field on a List's Export card is drawn **only while the List's Method is Webhook**; it is
+empty by default, which means *follow each Todo*. A non-empty value replaces the address of every
+webhook group that List would otherwise post, and is the one case where an address is typed for a
+List rather than copied from a Todo. Under *Same as the Todos* or a txt method the field is not
+drawn and any stored value is ignored: inheritance means the List has no destination of its own.
+A List never reads the Settings default on its own; a Task with no owning Todo does fall back to
+the live default.
 
 **Settings → Exports → Webhook** holds the app-wide starting point:
 
@@ -117,15 +120,17 @@ Posted as `Content-Type: application/json; charset=utf-8`. Timestamps are epoch 
 2xx counts as success; every other status code and every network failure is a failure. The timeout
 is 10 seconds on both connect and read.
 
-**`version` is `2`, and the cut from the old body is hard.** The v0.1 body had no version and no
-Tasks: it was one flat `items` array in which each entry was a file and the thing judged at the same
-time. A receiver built on it must be pointed at the new shape deliberately; a body never says `2`
-while meaning the old layout. Stored history is not rewritten — [Resend](#results-and-notices)
-replays an old record's bytes exactly as they were.
+**`version` is `2` or `3`, and the cut from the old body is hard.** The v0.1 body had no version and
+no Tasks: it was one flat `items` array in which each entry was a file and the thing judged at the
+same time. A receiver built on it must be pointed at the new shape deliberately; a body never says
+`2` while meaning the old layout. **Version 3 adds only the `marks` array** — an Asset writes it
+only when it has passages to send, and a body with no such Asset says `2`. Every image and video
+body is therefore byte for byte the one v0.6.2 sent. Stored history is not rewritten —
+[Resend](#results-and-notices) replays an old record's bytes exactly as they were.
 
 | Field | Meaning |
 |---|---|
-| `version` | `2`. |
+| `version` | `2`, or `3` when the body carries at least one `marks` array. |
 | `event` | One of the four above. |
 | `list.id` | The List's id, or **`0`** for a round with no List — Quick Review, which stands the folder in as the subject. |
 | `list.title` | The List's title, or the **folder's name** for a Quick Review round. |
@@ -140,6 +145,7 @@ replays an old record's bytes exactly as they were.
 | `assets[].relativePath` | The file's **folder**, relative to the Upstream's linked folder, without the file name. |
 | `assets[].sourceMissing` | Whether Listea can no longer reach the file. |
 | `assets[].actions` | The wire values recorded on **this file**, in the order its governing template lists them. |
+| `assets[].marks` | A PDF's passages: `id`, `kind`, `toolId`, `quote` (`page`, `text`) and `value`. Present **only when non-empty**. |
 
 **`isCompleted` and `actions` mean different things and neither implies the other.** `isCompleted`
 is one judgment about one Task however many files it presents. `actions` says what downstream
@@ -170,9 +176,70 @@ does not carry ★ sends no `favorite`. Everything else is whatever you set on t
 version 4 goes on meaning version 4 after an edit appends version 5. `name` is `null` only when this
 build cannot read that version at all; the reference is still worth sending, so the entry remains.
 
-**Keys are always present.** `completedAt`, `relativePath` and a template's `name` may be `null`,
-and `assets` or `templates` may be `[]`; none of them is omitted. A receiver can read every field
-without asking whether it exists.
+### Passages, and why they are version 3
+
+A PDF Asset may carry **marks**: passages the reviewer selected and attached a comment or tag to.
+They sit beside `actions`, not inside it, because a passage is a statement about a sentence and an
+action is a statement about a file. A PDF's `actions` stays `[]`; its passage tools never write
+there.
+
+```json
+{
+  "id": "asset-public-id",
+  "title": "Paper.pdf",
+  "relativePath": "papers",
+  "sourceMissing": false,
+  "actions": [],
+  "marks": [
+    {
+      "id": "mark-id",
+      "kind": "comment",
+      "toolId": "comment-1",
+      "quote": { "page": 3, "text": "the sentence the reviewer selected" },
+      "value": "I think this overstates the result"
+    },
+    {
+      "id": "mark-id-2",
+      "kind": "tag",
+      "toolId": "funny-1",
+      "quote": { "page": 4, "text": "another passage" },
+      "value": "funny_sentence"
+    }
+  ]
+}
+```
+
+`quote.page` is the stored page index, counting from **zero** — the renderer's own numbering, and
+the number the anchor was verified with. (The viewer's sheet says *Page N* by adding one; the wire
+carries the stored fact.) `quote.text` is the stored quotation, not a fresh selection. `kind` is
+`comment` or `tag`; `toolId` is the id of the tool that made it, so receivers can group passages by
+the reviewer's tool without knowing this build's names.
+
+**A mark is sent only when three facts still hold**, and each is asked of the thing that knows it:
+
+- **The tool is in the version that governs the file now**, as the same kind. Removing the tool or
+  the template hides a mark rather than deleting it; a hidden mark is omitted, never sent with a
+  stale value. Restoring the same id brings it back on the next export.
+- **The document is the one the quote was verified against.** The anchor stores a SHA-256 of the
+  file's bytes. If the bytes at the path differ, or cannot be read at all, the mark is omitted: the
+  old sentence may no longer be there, and sending it would be a false statement about the file. A
+  mark that no longer resolves is listed as **detached** in the file's Info sheet and is not
+  exported while it is.
+- **The kind is one this build can read.** A row written by a later build is skipped rather than
+  sent under a guess.
+
+A **comment** sends the reviewer's stored text. A **tag** sends the tool's **current configured
+value**, resolved at delivery time like every other tag, because the tag means *this passage is
+funny* and what "funny" sends is current configuration. Marks are ordered by creation, then id.
+
+**No mark is ever invented and no mark is ever sent empty.** An Asset with no surviving passage
+writes no `marks` key at all, which is what lets the body keep saying `2`.
+
+**Keys are always present — except `marks`.** `completedAt`, `relativePath` and a template's `name`
+may be `null`, and `assets` or `templates` may be `[]`; none of them is omitted. `marks` is the one
+exception, present only where it has content, because an empty one on an image would be a shape v2
+receivers have never seen. A receiver that needs to branch can read `version`; one that only reads
+`actions` sees no change at all.
 
 A round finished in Quick Review sends this same shape with the Upstream's folder standing in for
 the List, which keeps one payload format on the wire rather than inventing a second one. The
@@ -195,7 +262,8 @@ the name is taken.
 
 (One line in the file; wrapped here for reading.) It is [the payload](#the-payload) above in a
 file, so every field, every `null` and the key order are the same thing, and a receiver parses it
-exactly as it parses a POST.
+exactly as it parses a POST. A round carrying PDF passages writes the same version 3 body with
+`marks`; a round without one stays version 2.
 
 **The one thing the file does not carry is the destination.** That is not an omission: there was
 never an address in a body, because where an export went is a fact for

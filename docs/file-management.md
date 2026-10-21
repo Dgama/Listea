@@ -20,7 +20,18 @@ Listea **never moves, renames or overwrites** anything in the folder you granted
 folder, creating a List, reviewing files, checking them, tagging them and exporting a round are all
 read-only as far as the material you granted is concerned.
 
-Four things write to storage:
+**A mark on a PDF is part of that read-only promise**, and it is worth naming because it looks like
+an exception. Since v0.7.0 a PDF can be read, a passage selected, and a comment or a tag attached
+to it — but the mark is a row in Listea's own database, drawn over the page while the document is
+open. The PDF's bytes are never rewritten, no annotation is embedded in it, and opening it in
+another reader shows exactly what was there before. Deleting the mark deletes Listea's record and
+nothing else.
+
+A PDF is also now a kind the [media filter](review-and-actions.md#filtering-and-sorting) can name,
+so a folder of papers can be narrowed to them — and narrowing a listing changes nothing about the
+material either.
+
+Four things write to storage — none of them is a mark:
 
 | | What it writes | Touches the original? |
 |---|---|---|

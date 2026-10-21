@@ -17,6 +17,7 @@ see [Exports → Where the choice lives](exports.md#where-the-choice-lives).
 - [Exports](#exports)
 - [File management](#file-management)
 - [History](#history)
+- [About](#about)
 - [Todo deletion](#todo-deletion)
 - [A Todo's own two policies](#a-todos-own-two-policies)
 
@@ -26,9 +27,9 @@ on, which export methods exist and where the default points, how the history sta
 page holding that category's controls. No switch, add button or cleanup tool sits on the main
 screen: a page is where a category is edited, and the index is where it is found.
 
-The sections below are in the order the index draws them, with **History last**. The final two are
-**not on that screen** — both describe per-Todo controls, recorded here because this is where
-defaults are written down.
+The sections below are in the order the index draws them, ending with **History** and, below the
+same divider, **About**. The final two sections are **not on that screen** — both describe per-Todo
+controls, recorded here because this is where defaults are written down.
 
 ## Upstreams
 
@@ -207,6 +208,26 @@ resend moves its round to the top, because the round's time is its newest row.
 
 *Resend* is described under [Webhooks → The destination](webhooks.md#the-destination): it prefills
 the address that attempt used, and an edit there is temporary.
+
+## About
+
+**The last row on the index, under a divider**: *Version 0.7.0 · third-party notices*. It was added
+in v0.7.0, when the build first embedded someone else's native renderer; before that the app had no
+About or licences surface anywhere, so this page is new rather than an old screen being reused.
+
+It names the running build — the same `BuildConfig.VERSION_NAME` the APK is stamped with — and
+prints the full text of every licence that applies to what ships inside it:
+
+| Component | Licence |
+|---|---|
+| **Nucleus PDFium** `dev.nucleusframework:pdfium:158.0.8111.0` | MIT |
+| **PDFium** | BSD-3-Clause |
+| **pdfium-binaries** (the native build packaged by the wrapper) | MIT |
+| **Listea itself** | Apache-2.0 |
+
+The text is carried in the APK as a raw resource and read on the device, so the page works with no
+network and cannot point at a licence document that has since moved. It is inside a selection
+container, so any part of it can be selected and copied.
 
 ## Todo deletion
 

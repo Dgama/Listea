@@ -2,8 +2,11 @@
 
 > **Status:** Normative architectural direction  
 > **Scope:** Long-lived product and domain boundaries  
-> **Last updated:** 2026-10-20 (revised: v0.6.0's re-specification of the export body as a versioned
-> `event → list → task → asset` contract, and of the wire ids it carries, is recorded in
+> **Last updated:** 2026-10-21 (revised: v0.7.0's PDF viewer, passage mark and renderer-neutral
+> seam are recorded in [Asset](#asset), [Asset Viewer Template](#asset-viewer-template) and
+> [Gestures and semantic actions](#gestures-and-semantic-actions), and the "PDF viewer later"
+> test at the end of this document now has its answer; v0.6.0's re-specification of the export body
+> as a versioned `event → list → task → asset` contract, and of the wire ids it carries, is recorded in
 > [Exporter / Action](#exporter--action) and [Identity](#identity); v0.5.4's move of the Asset Control
 > band into stored templates is recorded in [Templates](#templates); v0.5.6's split of the *export*
 > from its *mechanism* is recorded in [Exporter / Action](#exporter--action); and v0.5.1's move of
@@ -165,6 +168,27 @@ An Asset:
 
 An Asset's location, filename, URI, or List position is mutable metadata and must not be its durable domain identity. Source-specific locators may still be required to resolve local content and to preserve legacy behavior.
 
+**v0.7.0 makes *read-only* a boundary with a stored counterpart, and this is where the decision is
+recorded.** A PDF Asset can now be read and marked — a selected passage carries a comment or a tag —
+but the mark is a **Listea record filed under the Asset**, not a change to the file. The PDF's bytes
+are never written: the viewer reads the document and draws its marks over it, and the checksum of
+the original is the acceptance test for that sentence. A mark therefore belongs to the same family
+as the pair state described in [TaskState](#taskstate): it is the Task's current state *about* one of
+its Assets, keyed by the Asset, and deleting the Asset takes it along. What a mark is attached to
+inside the file is a **quote anchor** — the authoritative quotation plus a non-authoritative
+character hint — so that *the sentence that was marked* survives a reopen, a renderer upgrade, or a
+document whose bytes have changed. A mark that can no longer be located is kept and shown as
+detached rather than erased; the invariant *current state describes what is true now* still holds,
+and a detached mark is what *true now* looks like when the document moved.
+
+The viewer itself is **not a template**, exactly as the video player is not: it renders content and
+produces nothing of its own. A PDF template is the existing Asset Control, scoped to PDF, whose
+Tag and Comment buttons become passage tools. Whether a mark is **shown and sent** is decided by
+the template that governs the file *now* — the same first-match rule as the chip row — never by the
+version recorded on the mark, which is authored-under history. A template or tool that leaves
+therefore hides its marks and stops their export without deleting a row, and restoring the same id
+brings them back. See [Templates](templates.md#pdfs-and-passage-tools) and [v0.7.0](iterations/v0.7.0.md).
+
 ### List and ListEntry
 
 A **List** is an ordered review context over Tasks. A **ListEntry** is membership of a Task in a List.
@@ -283,7 +307,7 @@ Template kinds are explicit. At minimum, the architecture distinguishes:
 
 #### Asset Viewer Template
 
-Defines how one compatible Asset is presented and which interactions belong to that content surface. Examples include the existing image/video presentation and a future PDF viewer.
+Defines how one compatible Asset is presented and which interactions belong to that content surface. Examples include the existing image/video presentation and the PDF viewer added in v0.7.0.
 
 It may define:
 
@@ -293,6 +317,15 @@ It may define:
 - viewer-owned gestures such as zoom, pan, scroll, playback, or scrub.
 
 It does not define Task-level judgment, List progress, Task completion, or Task navigation.
+
+**The PDF viewer is built behind a renderer-neutral seam.** PDFium is reached only through a small
+session interface — open a document, read a page's characters and text, and paint a page — and the
+anchor's stored character hint names the parser that produced it
+(`nucleus-pdfium/<version>`). The renderer is therefore a **capability choice, not an architectural
+one**: replacing PDFium changes the adapter and invalidates the character hints (the quotation is
+re-found by text), but it changes no Room column, no template, and no exported field. The
+[AndroidX PDF gate](iterations/v0.7.0.md#renderer-decision-and-the-androidx-gate) is written down
+because a swap is expected to be possible, not because one is planned.
 
 #### Task Review Template
 
@@ -366,7 +399,14 @@ The same semantic action may be invoked by a swipe, button, keyboard shortcut, o
 
 Asset Viewer gestures belong to the viewer unless a Task Review Template explicitly binds a non-conflicting semantic action to one. A template may bind either a review action or a navigation action this way — what makes the binding legitimate is that a named template owns it deliberately, not which dimension the action belongs to.
 
-What may *not* happen is generic Task navigation helping itself to a gesture. Scroll, pan, zoom, playback, selection and anything else needed to inspect an Asset stay with the viewer, and the Task Navigator's own entry point is always an explicit control. A rapid-media template binding a horizontal swipe is that template's choice; it does not become the way Listea navigates Tasks, and a future PDF viewer must still be free to claim the gestures its content needs.
+What may *not* happen is generic Task navigation helping itself to a gesture. Scroll, pan, zoom, playback, selection and anything else needed to inspect an Asset stay with the viewer, and the Task Navigator's own entry point is always an explicit control. A rapid-media template binding a horizontal swipe is that template's choice; it does not become the way Listea navigates Tasks, and the PDF viewer must still be free to claim the gestures its content needs.
+
+**The PDF viewer is where that freedom was exercised**, and the result is a useful boundary case.
+Vertical scrolling and pinch zoom belong to the page — reading is not navigating — and text
+selection belongs to the reader whether or not a template exists. Only a **horizontal swipe at the
+page edge** remains the Asset Navigator's, so the queue still advances exactly as it does over a
+picture. The rule survives in both directions: the viewer took the gestures its content needed, and
+navigation kept one gesture that no reading gesture needed.
 
 The current rapid-media interaction may keep a left swipe bound to the semantic `checked/complete` action and advance after that action. The state transition is the meaning; advancing is review-flow behavior, not proof that swipe is the universal Task Navigator.
 
@@ -442,9 +482,10 @@ reason to change these. See [v0.6.0](iterations/v0.6.0.md) and [Webhooks](webhoo
 
 **v0.6.2 moves the destination onto the row that decides the export, and links a round's records.**
 A Todo's address is a column on `sources`, written as a copy at Create/Refresh and never read live
-from Settings; `lists.webhookUrl` is read again as a List's deliberate override, and an empty value
-means *follow the Todos*. The Settings default survives as the value a new Todo copies and as the
-fallback for Tasks with no owning Todo — a source of values, not a global gate. This keeps the
+from Settings; `lists.webhookUrl` is read again as a List's deliberate override — applied only when
+that List's method is Webhook, since v0.7.0 — and an empty value means *follow the Todos*. The
+Settings default survives as the value a new Todo copies and as the fallback for Tasks with no
+owning Todo — a source of values, not a global gate. This keeps the
 boundary paragraph above intact: the address is part of the export configuration the Todo already
 owns, not a new fact about a Task. Delivery history gains the attempted address and a **round id**
 on `webhook_history`; the id groups rows produced by one `deliverPayload` without changing the
@@ -721,3 +762,13 @@ A change requires explicit architecture review when it:
 - makes a legacy transport contract the canonical internal model.
 
 The practical architecture test is simple: adding a PDF Asset Viewer later should be an extension of the Asset side, not a rewrite of Task, List, Review, identity, or result semantics.
+
+**v0.7.0 is that test taken, and it passed.** The PDF viewer, the PDF-scoped template and the
+passage mark arrived as Asset-side extensions: Task, List, ListEntry, TaskState's completion half,
+ReviewEvent, and both id systems were untouched. The costs were the ones this document already
+permits — a new Asset kind with a compatible viewer, a new button type inside an existing template
+[a version bump](templates.md#buttons) pays for, a new side table keyed to the Asset, and an
+additive `marks` array behind export version 3. The one boundary the round had to state rather than
+inherit is the read-only one in [Asset](#asset): Listea records judgment **about** external
+material and still does not edit it, so *document annotation* did not turn Core into a document
+editor.

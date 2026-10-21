@@ -370,7 +370,7 @@ because a name is not part of identity.
 
 A **scope** says which files a version governs, and it is a conjunction of rules: every rule has to
 admit a file, so adding a rule narrows rather than widens. The only rule shipping is the file's kind
-— image or video, read off the name without opening the file — and an **empty scope admits
+— image, video or PDF, read off the name without opening the file — and an **empty scope admits
 nothing**, so a template saved before its scope was filled in governs no file rather than every
 file. A rule this build cannot read admits nothing too, for the same reason: a rule silently
 skipped would make the template match *more* than it was written for.
@@ -390,7 +390,10 @@ attached templates governs a file, where a template is edited, and what the buil
 **A decision belongs to the Task, not to the file — and a mark belongs to one of its files.**
 Checked is stored against the Task's own id in `task_state`, a table keyed by `taskId` and cascading
 from `tasks`. ★ and every configured action are stored in `task_asset_state.selections`, keyed by the
-**Asset**: one row per Task–Asset pair, holding the set of button ids that pair carries. A surface
+**Asset**: one row per Task–Asset pair, holding the set of button ids that pair carries. Since
+v0.7.0 a PDF passage is a **mark** in its own table, keyed by the same pair: a quote anchor plus the
+comment or tag the reviewer attached. It is a Listea record, never a change to the PDF, and a mark
+whose passage cannot be found is kept and reported as detached rather than deleted. A surface
 that speaks about the whole Task — a List's row, a catalog card, one entry in an export — reads the
 union of its pairs, which is what lets a button set on a video be nameable while a photograph is on
 screen.
