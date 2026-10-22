@@ -120,17 +120,20 @@ Posted as `Content-Type: application/json; charset=utf-8`. Timestamps are epoch 
 2xx counts as success; every other status code and every network failure is a failure. The timeout
 is 10 seconds on both connect and read.
 
-**`version` is `2` or `3`, and the cut from the old body is hard.** The v0.1 body had no version and
-no Tasks: it was one flat `items` array in which each entry was a file and the thing judged at the
-same time. A receiver built on it must be pointed at the new shape deliberately; a body never says
-`2` while meaning the old layout. **Version 3 adds only the `marks` array** — an Asset writes it
-only when it has passages to send, and a body with no such Asset says `2`. Every image and video
-body is therefore byte for byte the one v0.6.2 sent. Stored history is not rewritten —
+**`version` is `2`, `3` or `4`, and the cut from the old body is hard.** The v0.1 body had no
+version and no Tasks: it was one flat `items` array in which each entry was a file and the thing
+judged at the same time. A receiver built on it must be pointed at the new shape deliberately; a
+body never says `2` while meaning the old layout. **Version 3 adds only the `marks` array** — an
+Asset writes it only when it has passages to send, and a body with no such Asset says `2`. **Version
+4 adds only the Task's `addOn` object**, written only when at least one visible answer exists.
+Version 4 is a superset, not a combination code: a round carrying both marks and an add-on says `4`,
+and marks are still written under their own rule. Every image and video body with nothing to add is
+therefore byte for byte the one v0.6.2 sent. Stored history is not rewritten —
 [Resend](#results-and-notices) replays an old record's bytes exactly as they were.
 
 | Field | Meaning |
 |---|---|
-| `version` | `2`, or `3` when the body carries at least one `marks` array. |
+| `version` | `2`; `3` when the body carries at least one `marks` array; `4` when it carries at least one `addOn` object. |
 | `event` | One of the four above. |
 | `list.id` | The List's id, or **`0`** for a round with no List — Quick Review, which stands the folder in as the subject. |
 | `list.title` | The List's title, or the **folder's name** for a Quick Review round. |
@@ -140,6 +143,7 @@ body is therefore byte for byte the one v0.6.2 sent. Stored history is not rewri
 | `tasks[].isCompleted` | Whether the Task was processed in Listea. |
 | `tasks[].templates[]` | The template versions the Task was imported under: `id`, `name`, `version`. |
 | `tasks[].assets[]` | Every file the Task presents, ordered as the Task holds them. `[]` for a Task with no file. |
+| `tasks[].addOn` | The Task's questionnaire: `id`, `name`, `version` and `answers[]`, written **after `assets`** and **only when at least one answer is visible**. See [the add-on](#the-tasks-add-on-and-why-it-is-version-4). |
 | `assets[].id` | The Asset's [public id](#task-and-asset-ids). Stable, never the database row number. |
 | `assets[].title` | The file name. |
 | `assets[].relativePath` | The file's **folder**, relative to the Upstream's linked folder, without the file name. |
@@ -170,7 +174,7 @@ delivery time; renaming a button changes future payloads without touching a stor
 Duplicates are collapsed: two buttons configured with the same wire value emit it once. ★ is a
 button of the built-in template with the fixed value `favorite`, so an Asset whose governing control
 does not carry ★ sends no `favorite`. Everything else is whatever you set on the template, at
-[Settings → Templates](settings.md#templates).
+[Settings → Templates & Add-ons](settings.md#templates--add-ons).
 
 **`templates` names the attached version, never the template's current one.** A Task reviewed under
 version 4 goes on meaning version 4 after an edit appends version 5. `name` is `null` only when this
@@ -235,11 +239,53 @@ funny* and what "funny" sends is current configuration. Marks are ordered by cre
 **No mark is ever invented and no mark is ever sent empty.** An Asset with no surviving passage
 writes no `marks` key at all, which is what lets the body keep saying `2`.
 
-**Keys are always present — except `marks`.** `completedAt`, `relativePath` and a template's `name`
-may be `null`, and `assets` or `templates` may be `[]`; none of them is omitted. `marks` is the one
-exception, present only where it has content, because an empty one on an image would be a shape v2
-receivers have never seen. A receiver that needs to branch can read `version`; one that only reads
-`actions` sees no change at all.
+### The Task's add-on, and why it is version 4
+
+Since v0.7.1 a Task can carry an **add-on**: a questionnaire about the Task as a whole, answered on
+one page after its last file. The answers are a sibling of `assets`, never inside it, because they
+are not about any one file.
+
+```json
+{
+  "id": "task-public-id",
+  "title": "Six drawings",
+  "isCompleted": true,
+  "templates": [],
+  "assets": [ … ],
+  "addOn": {
+    "id": "add-on-lineage",
+    "name": "Task review",
+    "version": 2,
+    "answers": [
+      { "questionId": "q-rating", "type": "rating", "prompt": "How good are these?", "value": 3 },
+      { "questionId": "q-yes-no", "type": "yes-no", "prompt": "Is there green?", "value": false },
+      { "questionId": "q-text", "type": "text", "prompt": "Anything to say?", "value": "Felt good." }
+    ]
+  }
+}
+```
+
+- **The object is written only when at least one answer is visible.** A Task whose add-on nobody
+  answered writes no `addOn`, and the body keeps the version it would otherwise have.
+- **Answers follow the questionnaire, not the order they were written in**, so the array reads as
+  the page does and is stable across deliveries.
+- **Only visible answers are sent.** An answer is visible while the Task is attached to the same
+  add-on lineage and the version that governs it now still offers that question id as the same type.
+  A removed question, a changed type, a different add-on or no attachment hides the answer; it is
+  omitted, never sent with a stale prompt. Restoring the question brings it back.
+- **`prompt` and `type` are the current version's**; `value` is typed as the question asks —
+  number `1`–`5` for `rating`, boolean for `yes-no`, string for `text`. An answer this build cannot
+  parse is omitted rather than guessed at.
+- **`templates[]` is untouched.** The add-on is not a template entry; that array remains the file
+  templates the Task was imported under.
+- **The txt method writes the same body**, so an answered round is a version 4 file and appears in
+  History exactly like a webhook round.
+
+**Keys are always present — except `marks` and `addOn`.** `completedAt`, `relativePath` and a
+template's `name` may be `null`, and `assets` or `templates` may be `[]`; none of them is omitted.
+`marks` and `addOn` are the exceptions, present only where they have content, because an empty one
+on a file or a Task would be a shape older receivers have never seen. A receiver that needs to branch
+can read `version`; one that only reads `actions` sees no change at all.
 
 A round finished in Quick Review sends this same shape with the Upstream's folder standing in for
 the List, which keeps one payload format on the wire rather than inventing a second one. The

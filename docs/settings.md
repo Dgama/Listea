@@ -13,7 +13,7 @@ see [Exports → Where the choice lives](exports.md#where-the-choice-lives).
 - [Review](#review)
 - [Media and review behaviour](#media-and-review-behaviour)
 - [Todos](#todos)
-- [Templates](#templates)
+- [Templates & Add-ons](#templates--add-ons)
 - [Exports](#exports)
 - [File management](#file-management)
 - [History](#history)
@@ -60,20 +60,21 @@ See [Core concepts → Folders you grant](core-concepts.md#folders-you-grant).
 **That is the whole section, and it is the whole section deliberately.** The custom actions that used
 to be configured here are not a property of the app. Since v0.5.4 they are **buttons on a template**,
 and a template is a thing with a name, a scope and a version — so they are edited on the template's
-own page, at **Settings → Templates → <template>**, rather than in a card every run shared.
+own page, at **Settings → Templates & Add-ons → <template>**, rather than in a card every run shared.
 
 Full behaviour: [Review and actions → Buttons](review-and-actions.md#buttons). What
 the values do on the wire: [Webhooks](webhooks.md).
 
-## Templates
+## Templates & Add-ons
 
 **One row, and a screen behind it.** A template is what a Todo records with: which files it applies
-to, and the buttons it offers. None of that fits on a card in a scrolling page, so what this screen
-says about them is how many there are and where they are edited.
+to, and the buttons it offers. An add-on is the questionnaire a Todo can attach to ask about each
+Task as a whole. None of that fits on a card in a scrolling page, so what this screen says about
+them is how many there are and where they are edited.
 
 | Control | Default | What it does |
 |---|---|---|
-| **All templates** | — | How many templates the app holds. Opens the **Templates** screen, and from there a template's own page. |
+| **All templates and add-ons** | — | How many of each the app holds. Opens the **Templates & Add-ons** screen, and from there a template's or an add-on's own page. |
 
 A template's page holds its **name**, its **scope** — which files it applies to — and its **buttons**,
 each with a **display name** (the chip) and a **webhook value** (the string an export sends).
@@ -85,8 +86,20 @@ Every install starts with one built-in template, and the upgrade that brought an
 buttons across gave each of those one of its own. A template is also what a new **Todo** starts with,
 which is what leaves one place to edit a button rather than two.
 
+**An add-on is edited here too, since v0.7.1, but it is not a template.** The screen lists both
+kinds by name; an add-on's row reads *Add-on · N questions* where a template's names its scope.
+**New** asks which kind to start, then for a name. An add-on's page holds its name and its
+questions — each a prompt and one of **Rating** (1–5), **Yes / No** or **Text** — with add and
+remove. A question cut from a version is not gone for good: **Removed questions** lists what earlier
+versions asked, and restoring one keeps its identity, so the answers already given to it come back
+rather than being asked again. **Update** appends a version when the questions changed, renames in
+place when only the name changed, and writes nothing when nothing changed. There is no delete, for the same reason there is
+none for a template: Tasks reference it. A new add-on starts with one Rating question so it can be
+attached immediately.
+
 Where a button's value goes: [Webhooks](webhooks.md). What a button *records*, and what removing one
-leaves behind: [Review and actions → Buttons](review-and-actions.md#buttons).
+leaves behind: [Review and actions → Buttons](review-and-actions.md#buttons). What an add-on asks
+and where the answers go: [Templates → Add-ons](templates.md#add-ons).
 
 ## Media and review behaviour
 

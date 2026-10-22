@@ -107,6 +107,7 @@ The dialog asks six things, in this order:
 | **When a Task's content changes** | What later happens to a Task whose files changed or disappeared outside Listea — see [What a changed Task means](core-concepts.md#what-a-changed-task-means) |
 | **When a round over this Todo finishes** | Where this Todo's decisions go when a round ends: **Don't export**, **Webhook** or **Txt**. A new Todo starts at *Don't export* |
 | **Templates** | Which templates govern the files this run creates. **At least one is required** — see below |
+| **Add an add-on** | Optional (v0.7.1): one questionnaire to ask about each Task as a whole, on a page after its last file. *None* unless chosen — see [Templates → Add-ons](templates.md#add-ons) |
 
 **One Task per folder** forces the tree off: a folder-as-Task run builds Tasks from the folders
 themselves and they are flat by construction, so the control is hidden rather than offered and then
@@ -241,8 +242,8 @@ Open a List and tap **Review**, or use **Quick Review** inside a Todo. Either wa
 
 | Gesture | What it does |
 |---|---|
-| **Swipe left** | Go forward one file; off the last one, mark the item checked and advance |
-| **Swipe right** | Go back one file; off the first, go back one item, changing nothing |
+| **Swipe left** | Go forward one file; off the last one, show the Task's add-on page if it has one, otherwise mark the item checked and advance; off the add-on page, mark checked and advance |
+| **Swipe right** | Go back one file; off the add-on page, return to the last file; off the first file, go back one item, changing nothing |
 | **Pinch** | Zoom, up to 5×; drag to pan inside the picture |
 | **Tap the media** | Show or hide the file's own controls |
 
@@ -258,6 +259,13 @@ A mark is Listea's own record, drawn over the page while the document is open; t
 modified. The file bar's **Info** icon lists what the file carries, including a mark whose passage
 this copy of the document can no longer place. See
 [Review and actions → PDFs](review-and-actions.md#pdfs).
+
+**A Task whose import carried an add-on has one extra page after its last file** (v0.7.1). It asks
+the Todo's questions — a rating, a Yes / No, or words — and answers are kept as you give them, with
+no Save button and nothing required. The position counts it as a page, so a three-file Task with an
+add-on reads `3(1/4)/7` … `3(4/4)/7`, and the file slot says **Add-on**. Swiping left again leaves
+the Task exactly as the last file does, and the completion checkbox still completes without an
+answer. See [Templates → Add-ons](templates.md#add-ons).
 
 The name along the top is the item; the filename beside it and the `3(2/3)/7` position say which of
 its files you are on and where that sits in the queue. The pair of double arrows there steps the

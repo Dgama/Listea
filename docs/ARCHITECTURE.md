@@ -121,6 +121,8 @@ List 1 -------- N ListEntry N -------- 1 Task
                                              +---- 0..1 current TaskState
                                              |
                                              +---- 0..N ReviewEvent
+                                             |
+                                             +---- 0..N add-on answer (task_review_answers)
 
 Task Review Template Version ---- defines the judgment over a Task
 Asset Viewer Template Version --- renders one compatible Asset
@@ -348,6 +350,41 @@ Core templates describe reusable capability: asset viewing, metadata presentatio
 Template abstraction does not imply a component table, drag-and-drop builder, marketplace, plugin runtime, or universal schema language. Those are separate product decisions. A small number of code-defined, versioned built-ins is a valid first implementation.
 
 **v0.5.4 moves the Asset Control band past that first implementation**, and the move is recorded here because this paragraph is what a reader would check it against. A template in that band is now a **stored row** rather than a code-defined constant: it has a `templates` lineage with a name a person may change, immutable `template_versions` rows an edit appends to, a **scope** deciding which files it governs, and **buttons** rather than a fixed tag set. The built-in is still seeded from code and still carries its original id, so nothing above changes for the two kinds this section names. What the release does *not* take is any of the separations the paragraph above lists: there is no component table, no builder, no plugin runtime, and the button vocabulary is a small closed set of two types. One thing about the attachment is a rule rather than an implementation detail and is stated here for that reason: **a Todo holds one version of a lineage, not several.** The version records how the template stood when a run happened, which is what lets a completed Task go on meaning what it meant after an edit; it is not a choice being held, so *use the media control* is a thing a Todo has or does not have, and updating it is a move rather than an addition. See [v0.5.4](iterations/v0.5.4.md) and [ARCHITECTURE → Identity](#identity) for the id rule the minting had to obey.
+
+## Add-ons
+
+An **Add-on** is a stable lineage of **questionnaires about a Task as a whole**. It is the Task layer
+of judgment, beside the Template layer that judges a Task's files. `addons` holds the lineage and a
+name; `addon_versions` holds immutable versions whose payload is an ordered list of questions —
+**Rating** (1–5), **Yes / No**, or **Text** — exactly as `template_versions` holds buttons.
+
+An add-on is **not an Asset and not a row in `templates`**. `assets` means files a Task presents:
+they are paged, counted, checked for missing sources, given a chip row and a file Info sheet, and
+exported as `assets[]`. A questionnaire is not a file. A `templates` row would have to carry a
+nullable scope, nullable buttons and nullable questions at once, and every reader would decide which
+half of the row is real. The two share the editing model and the Settings screen; they share no
+storage.
+
+**An add-on's answers belong to the Task.** `task_review_answers` is keyed `(taskId, questionId)` and
+cascades from `tasks`; it has **no foreign key to `addons`**, because the add-on a row was authored
+under is a plain id-and-version pair. That is what makes **hidden, not deleted** possible: an answer
+is visible while the Task is still attached to the same lineage and the version governing it now
+still offers the same question id as the same type. Removing a question, changing its type or
+detaching the add-on hides the answer; restoring them brings it back. The rule is the one PDF marks
+already follow on the pair layer.
+
+**The page is the Task's, not a file's.** A Task whose import carried an add-on has one extra page
+after its last Asset, counted in the navigator. The position is fixed; there are no start/end
+attributes, no required flag and no completion precondition in this round. The completion checkbox
+remains a direct path.
+
+**One add-on per Todo.** The Todo holds one reference (`sources.addOn`, `addOnId \t version`);
+every Task it imports is stamped with the version that run used (`task_imports.addOn`). A refresh
+adopts the offered version, as with templates, and unticking removes the reference without deleting
+answers. The export writes the Task's answers as an `addOn` object **after `assets`**, and raises the
+body to version 4 only when at least one visible answer exists; rounds with nothing to say are
+unchanged at 3 or 2. See [v0.7.1](iterations/v0.7.1.md) and
+[Templates → Add-ons](templates.md#add-ons).
 
 ## Review surface and navigation
 

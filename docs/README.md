@@ -11,16 +11,16 @@ where the other pages link to rather than repeat.
 | Page | What it covers |
 |---|---|
 | [Getting started](getting-started.md) | Prerequisites, building, installing, adding an Upstream, and running a first review end to end. |
-| [Core concepts](core-concepts.md) | The vocabulary: Upstream, Todo, Task, Asset, folder, List, catalog, Quick Review, round, checked state, action, content policy, dissolution, and where a decision is stored. |
+| [Core concepts](core-concepts.md) | The vocabulary: Upstream, Todo, Task, Asset, add-on, folder, List, catalog, Quick Review, round, checked state, action, content policy, dissolution, and where a decision is stored. |
 
 ## Using it
 
 | Page | What it covers |
 |---|---|
 | [Review and actions](review-and-actions.md) | The Review screen in full: the frame and what belongs to which level, gestures, zoom, video transport, the PDF reader and its passage marks, the Info sheet, rounds, resuming, and how filtering and sorting shape a queue. |
-| [Templates](templates.md) | What a template is: its name, its scope, its buttons, the frame-versus-components boundary, PDF passage tools, why editing appends a version, and how a Todo attaches one. |
+| [Templates](templates.md) | What a template is: its name, its scope, its buttons, the frame-versus-components boundary, PDF passage tools, why editing appends a version, how a Todo attaches one — and **add-ons**, the Task-level questionnaire that is neither a template nor an Asset. |
 | [Exports](exports.md) | What an export is, the two methods (Webhook and Txt), where a Todo's and a List's choices live, how a round resolves into one payload or several, and the export history. |
-| [Webhooks](webhooks.md) | The webhook method in full: the destination, the four events, the exact JSON payload including version 3's `marks`, the txt body, item ids, resending and failures. |
+| [Webhooks](webhooks.md) | The webhook method in full: the destination, the four events, the exact JSON payload including version 3's `marks` and version 4's `addOn`, the txt body, item ids, resending and failures. |
 | [File management](file-management.md) | Everything that touches storage: deleting checked files, the post-webhook delete offer, saving to a gallery album, sharing, permissions, and what an Upstream's grant bounds. |
 | [Settings](settings.md) | Every switch and field on the Settings screen, with links to the page that explains what each one does. |
 

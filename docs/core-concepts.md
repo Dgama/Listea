@@ -385,6 +385,18 @@ What follows from that — the buttons a version carries, the four rules that de
 attached templates governs a file, where a template is edited, and what the built-in one starts with
 — is [Templates](templates.md).
 
+**An add-on is the Task-level counterpart.** Since v0.7.1 a Todo may also carry one **add-on**: a
+questionnaire about the Task as a whole, answered on one page after the Task's last file. It has the
+same editing model as a template — a lineage with immutable versions, an edit appends — but no
+scope, no buttons and no storage in common: its answers live in `task_review_answers`, keyed by the
+Task. It is **not an Asset**: an Asset is a file a Task presents, and a questionnaire is not a file.
+A Task imported without an add-on has no extra page and behaves exactly as before.
+
+The three layers are deliberately separate: the **Task** (checked, and the add-on's answers), the
+**Task–Asset pair** (selections and PDF marks), and the **Asset** (the file itself). See
+[Templates → Add-ons](templates.md#add-ons) and
+[Templates → Three layers, three vocabularies](templates.md#three-layers-three-vocabularies).
+
 ## Where state lives
 
 **A decision belongs to the Task, not to the file — and a mark belongs to one of its files.**
@@ -396,7 +408,11 @@ comment or tag the reviewer attached. It is a Listea record, never a change to t
 whose passage cannot be found is kept and reported as detached rather than deleted. A surface
 that speaks about the whole Task — a List's row, a catalog card, one entry in an export — reads the
 union of its pairs, which is what lets a button set on a video be nameable while a photograph is on
-screen.
+screen. Since v0.7.1 an add-on's answers are stored the same Task-level way, in
+`task_review_answers`, keyed by `(taskId, questionId)` and cascading from `tasks`. Each row carries
+the question's type and the add-on id and version that asked it, which is what lets an answer
+survive an edit and be explained later — or be hidden rather than deleted when the question stops
+being asked.
 
 The two levels are not a complication for its own sake. A Task holding three files is one thing to
 judge and three things to mark, and a mark made on the second of them has to be read back on the

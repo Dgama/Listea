@@ -20,22 +20,24 @@ constant — something with a name you can change and a history you cannot.
 - [Attaching one to a Todo](#attaching-one-to-a-todo)
 - [Which template governs a file](#which-template-governs-a-file)
 - [The built-in](#the-built-in)
+- [Add-ons](#add-ons)
+- [Three layers, three vocabularies](#three-layers-three-vocabularies)
 
 ## What a template holds
 
 Three things: a **name**, a **scope**, and a list of **buttons**.
 
-They live at **Settings → Templates**, which lists every template and, on each row, which version of
-it is current. Opening one shows its page. Editing is finished with **Update**.
+They live at **Settings → Templates & Add-ons**, which lists every template — and, since
+v0.7.1, every add-on beside it — and, on each row, which version of it is current. Opening one shows its page. Editing is finished with **Update**.
 
-**A template can be started from a blank page.** Since v0.6.0, **New** on Settings → Templates asks
+**A template can be started from a blank page.** Since v0.6.0, **New** on Settings → Templates & Add-ons asks
 for a name and creates a lineage at version 1 with no scope and no buttons. A template also still
 comes into being in the other way: the upgrade that brought an existing install's own tag sets
 across gives each such Todo a template named after it. Both paths are ordinary — a new template is
 edited, scoped and attached exactly like a seeded one.
 
 The Create Tasks dialog's **New template** button is still inert on purpose. Tapping it says so and
-points at **Settings → Templates**, which is where a template is started. It is drawn rather than
+points at **Settings → Templates & Add-ons**, which is where a template is started. It is drawn rather than
 left out so the shape of the choice — *add one that exists*, or *start one* — is visible while
 attaching, and so that a control which does not act there says as much instead of reading as broken.
 
@@ -273,6 +275,63 @@ An install that had configured its own tags before v0.5.4 gets more than one tem
 carries each Todo's own tag set across as a template named after that Todo, so nothing a user set up
 is lost — and so the templates they see were made by *their* configuration rather than by the app
 inventing a default.
+
+## Add-ons
+
+Since v0.7.1, **an add-on** is a small questionnaire about a **Task as a whole** — the third thing in
+the app that can be attached to a Todo, beside its templates. It is not a template and not an Asset:
+
+| | Template | Add-on |
+|---|---|---|
+| What it governs | buttons on files of some kinds | questions about the whole Task |
+| Has a scope | yes, a conjunction of kind rules | **no** |
+| Produces | per-file actions, per-passage marks | Task-level answers |
+| Position | wherever its buttons apply | **fixed after the Task's last file** |
+
+**A Task whose import carried an add-on has one extra page after its last Asset.** Swiping left off
+the last file shows the questionnaire; swiping left again completes the Task as leaving the last
+file does today; swiping right returns. The navigator counts it, so a three-file Task with an add-on
+reads `1(1/4)` … `1(4/4)`. The page is **never required**: the completion checkbox still completes
+without an answer, and no question has a required flag.
+
+**Three question types**: **Rating** (1–5), **Yes / No**, and **Text**. The prompts are yours. An
+answer is written as it is given — tapping a rating or Yes / No writes it, tapping it again clears
+it, text saves on Done or leaving the field, and a blank field clears. The answers are kept on the
+Task, not on any file, and the Task's **Info** sheet lists them, including answers a later version
+of the add-on no longer asks.
+
+**One add-on per Todo.** Create Tasks and Refresh Import gain an **Add an add-on** section drawn like
+*Add a template*: at most one choice, *None* by default, never part of the dialog's gate. The Todo
+records its choice; every Task the run creates or touches is stamped with the version it was built
+under. A Task imported before this round has no add-on and no extra page, and a List may mix Tasks
+with and without one.
+
+**An add-on is stored as a lineage with immutable versions**, exactly like a template: editing the
+questions appends a version; renaming edits in place; nothing is deleted. A refresh adopts the
+add-on's offered current version, and says what that does to answers already given: a removed
+question's answer is kept but hidden — not shown and not sent — and an added question starts
+unanswered. The editor lists questions earlier versions asked under **Removed questions**, and
+restoring one keeps its id, so the answer it already has comes back instead of being asked again.
+Answers are **hidden, not deleted**, the same rule a detached PDF mark follows.
+
+The editor lives beside the templates at **Settings → Templates & Add-ons**. Full behaviour:
+[Settings → Templates & Add-ons](settings.md#templates--add-ons). On the wire:
+[Webhooks → The Task's add-on](webhooks.md#the-tasks-add-on-and-why-it-is-version-4).
+
+## Three layers, three vocabularies
+
+A Task now has three levels of recorded judgment, and each lives in its own place:
+
+| Layer | What is judged | Where a decision is stored |
+|---|---|---|
+| Task | the Task as a whole | `task_review_answers` — the add-on's answers |
+| Task–Asset pair | one file in the Task | `task_asset_state` and `task_asset_marks` — selections and passages |
+| Asset | the file itself | `assets` — what the Task presents, its name, path and presence |
+
+Templates draw the middle layer: their buttons write a file's selections and their passage tools
+write a mark. An add-on draws the top layer: its questions write answers about the Task. Nothing
+below the top layer changes meaning because an add-on exists — `assets` still means files the Task
+presents, and the export still calls them `assets[]`.
 
 ---
 

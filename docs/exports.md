@@ -72,6 +72,23 @@ The exact shape, the example body and the per-field contract are in
 [Webhooks → Passages, and why they are version 3](webhooks.md#passages-and-why-they-are-version-3).
 The txt method writes the same body, so a marked round is a version 3 file.
 
+## Task add-ons
+
+Since v0.7.1 a Task can carry an **add-on**: a small questionnaire about the Task as a whole. Its
+answers travel in an `addOn` object **after `assets`**, not inside any Asset, and **the body's
+`version` becomes 4 only when at least one visible answer exists**. A Task with an add-on nobody
+answered sends nothing for it and keeps the version it otherwise would have.
+
+Only answers the version governing the Task still asks are sent; a removed question, a changed type
+or a different add-on hides the answer rather than rewriting or sending it. Values are typed —
+number, boolean or string — and answers are in questionnaire order. A round carrying both marks and
+an add-on says `4`: version 4 is a superset of 2 and 3, never a combination code. A round with
+neither is byte for byte what v0.7.0 sent.
+
+The full contract and an example body: [Webhooks → The Task's add-on, and why it is version
+4](webhooks.md#the-tasks-add-on-and-why-it-is-version-4). What an add-on is:
+[Templates → Add-ons](templates.md#add-ons).
+
 ## Where the choice lives
 
 **A Todo picks one method when it is created. A List can override it for everything it holds.** Both
