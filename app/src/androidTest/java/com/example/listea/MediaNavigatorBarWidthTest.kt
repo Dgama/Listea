@@ -20,10 +20,12 @@ import org.junit.runner.RunWith
 /**
  * The navigator's width budget on the phone's own bar, with the counter now a control.
  *
- * The queue position carries a 12dp chevron, and the bar it sits in is already the tightest row in
- * the app: five controls, the counter, and two names sharing what is left. This is a width fact, not
- * a gesture, so it is pinned here rather than in a device walk — and it is measured on a real
- * composition because Compose's text measurement is the part a Dp sum cannot predict.
+ * The queue position is a control, and the bar it sits in is already the tightest row in the app:
+ * five controls, the counter, and two names sharing what is left. The counter is the text alone —
+ * the position is the affordance, with no chevron spending width to say so — but its box is
+ * tappable at the arrows' height, and text measurement is still the part a Dp sum cannot predict.
+ * This is a width fact, not a gesture, so it is pinned here rather than in a device walk — and it is
+ * measured on a real composition.
  *
  * The shape under test is the worst one that fits: a two-level counter (`6(1/6)/7`), both arrow
  * pairs, and a file name in the middle. A `Row` measures its fixed children in order and hands the
@@ -32,8 +34,8 @@ import org.junit.runner.RunWith
  * arrows are the way forward through the Task.
  *
  * Large-font widths are deliberately not asserted: on this bar the fixed 120dp title cap and the
- * four arrows already exceed 360dp at double the font scale, with or without the chevron. That
- * budget is older than the queue control and needs its own answer, not a narrower test.
+ * four arrows already exceed 360dp at double the font scale. That budget is older than the queue
+ * control and needs its own answer, not a narrower test.
  */
 @RunWith(AndroidJUnit4::class)
 class MediaNavigatorBarWidthTest {
@@ -55,7 +57,7 @@ class MediaNavigatorBarWidthTest {
                             queueJump = MediaQueueJump(
                                 entries = listOf(MediaQueueEntry("a"), MediaQueueEntry("b")),
                                 current = 0,
-                                onJump = {}
+                                onJump = { _, _ -> }
                             ),
                             onPrevious = {},
                             onNext = {},
