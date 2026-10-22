@@ -78,7 +78,7 @@ whatsapp                    xxxx.mp4              << ‹ 3(3/3)/3 › >>
 |---|---|
 | **Left** | Back, then the item's name, with the tags it carries under it. |
 | **Middle** | The file on screen. Absent when the item holds only one file. |
-| **Right** | The queue position — tappable, with a small chevron — bracketed by its arrows. |
+| **Right** | The queue position — itself the control that opens the queue guide — bracketed by its arrows. |
 
 The item's name carries a second line when the item has tags: one badge per action set on it — ★,
 and each tag by its display name. It is the same row a List's item shows under its title, drawn by
@@ -107,17 +107,29 @@ A level with nothing to move between is not a level. That is why the inner pair 
 only appear once an item holds more than one file, and why the outside pair is drawn greyed at the
 ends of a queue rather than removed — a control that vanishes re-measures the bar under your finger.
 
-**The position is also the queue's own picker.** Tapping it opens a list under the control,
-right-aligned to it, naming what the position counts: every item in the queue — the Task's name
-with its path underneath, or a file's name in the folder viewer — or, when the queue holds a single
-item, that item's pages. The row you are on is tinted and marked with a check. Tapping another row
-jumps straight to it, landing on that item's first file or page exactly as the arrows do; tapping
-the current row, tapping outside the list, or pressing Back only closes the list and moves nothing.
+**The position is also the way through the queue.** The label itself is the control: no chevron,
+because the one number on the bar that already means *where you are in a sequence* does not need a
+marker to say it can be touched. Tapping it opens a guide under the control, right-aligned to it,
+which is two levels deep when the queue is a queue of items.
 
-A page list is the list the inner arrows already walk. In a review its last row is the add-on page,
-labelled `add-on <name>`: an add-on is a page of the Task rather than a file the source holds, and
-a row reading only its name would be taken for one. A Task with nothing to move between at either
-level — one item, one file — keeps the plain label and draws no chevron.
+The first level names what the position's outer number counts: every item in the queue — the Task's
+name with its path underneath, or a file's name in the folder viewer. The row you are on is tinted
+and marked with a check. Tapping a row goes to that item's first file or page, exactly as the outer
+arrows do. A row that holds more than one page carries a right arrow of its own; tapping that arrow
+opens the second level, that item's pages, under a header naming the item. Tapping a page jumps to
+it and closes the guide, exactly as the inner arrows would walk there; tapping the header steps back
+out to the item list without closing the guide. Tapping outside the guide or pressing Back closes
+it and moves nothing.
+
+The second level is the list the inner arrows already walk. In a review its last row is the add-on
+page, labelled `add-on <name>`: an add-on is a page of the Task rather than a file the source holds,
+and a row reading only its name would be taken for one. A Task holding one page is a leaf — its row
+still goes to that page, but it draws no arrow, because a list of one would be a level that is not a
+level.
+
+When the queue holds a single item, the guide starts at that item's page level, because that is what
+the position counts and there is no item level to open. A surface with nothing to move between at
+either level — one item, one page — keeps the plain label, which is not a control.
 
 The bar has a floor under it, because "the arrows keep their full size" and "the item's name stays
 readable" cannot both hold on every screen. The controls, the item's name when both names are
@@ -342,13 +354,14 @@ near-identical to each other is the point — none is a place where decisions ge
 a control that suggests otherwise. Save and Share are offered on the first four; the Info sheet on
 all but the Todo preview, which is the one that drops even that.
 
-**Every row in the table has the queue picker**, including the Todo preview: the tappable position
-and its list are part of the navigator, which is the one band every surface keeps. Where the queue
-holds a single item, the list names that item's pages instead, so the position is never a label
-that does nothing. Jumping is a look at another item or page, never a judgment about it — on the
-readers it changes nothing but which file is on screen, and in a round it takes the same route as
-the arrows, so List Review records the position it would have recorded. Jumping between *pages* is
-not a queue move: it writes no position, exactly as the inner arrows do not.
+**Every row in the table has the queue guide**, including the Todo preview: the tappable position
+and its two levels are part of the navigator, which is the one band every surface keeps. Where the
+queue holds a single item, the guide starts at that item's pages instead, so the position is never
+a label that does nothing; where an item has an add-on page, that page is in its directory beside
+its files. Jumping is a look at another item or page, never a judgment about it — on the readers it
+changes nothing but which file is on screen, and in a round it takes the same route as the arrows,
+so List Review records the position it would have recorded. Jumping between *pages* is not a queue
+move: it writes no position, exactly as the inner arrows do not.
 
 ### The Todo preview
 
