@@ -25,6 +25,10 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.example.listea.data.AddOnEntity
+import com.example.listea.data.AddOnStore
+import com.example.listea.data.AddOnVersionEntity
+import com.example.listea.data.toAddOnAnswer
 import com.example.listea.data.AssetDecisions
 import com.example.listea.data.CatalogRow
 import com.example.listea.data.toAssetMark
@@ -45,6 +49,7 @@ import com.example.listea.data.ListSummary
 import com.example.listea.data.ListeaDatabase
 import com.example.listea.data.ListsDao
 import com.example.listea.data.newItemPublicId
+import com.example.listea.data.PayloadAnswerRow
 import com.example.listea.data.PayloadAssetRow
 import com.example.listea.data.PayloadMarkRow
 import com.example.listea.data.PayloadTaskRow
@@ -68,6 +73,11 @@ import com.example.listea.data.TemplateVersionEntity
 import com.example.listea.data.toReviewItem
 import com.example.listea.data.ExportRecordEntity
 import com.example.listea.data.ExportRecordSummary
+import com.example.listea.domain.AddOnAnswer
+import com.example.listea.domain.AddOnAnswerValue
+import com.example.listea.domain.AddOnQuestion
+import com.example.listea.domain.AddOnVersionRef
+import com.example.listea.domain.addOnAnswerFits
 import com.example.listea.domain.AssetKind
 import com.example.listea.domain.AssetMark
 import com.example.listea.domain.ExportChoice
@@ -78,6 +88,7 @@ import com.example.listea.domain.ReviewContext
 import com.example.listea.domain.decodeExportChoice
 import com.example.listea.domain.encodeExportChoice
 import com.example.listea.domain.ReviewResponse
+import com.example.listea.domain.StoredAddOnVersion
 import com.example.listea.domain.StoredTemplateVersion
 import com.example.listea.domain.TemplateButton
 import com.example.listea.domain.TemplateScope
@@ -208,7 +219,16 @@ sealed interface ImportFolderRequest {
          * this list does not hold is a real state — a deleted template, a version a later build
          * wrote — and a dialog that read its own answer back off its own choices could not show it.
          */
-        val templates: List<StoredTemplateVersion> = emptyList()
+        val templates: List<StoredTemplateVersion> = emptyList(),
+
+        /**
+         * Every add-on that can be attached, one row per lineage at its current version.
+         *
+         * Carried on the request for the same two reasons [templates] is, and it is *not* what the
+         * dialog chose: [ImportOptions.addOn] is the choice, and a reference the offered list does
+         * not know is a state worth showing rather than reading back off the choices.
+         */
+        val addOns: List<StoredAddOnVersion> = emptyList()
     ) : ImportFolderRequest
 
     /** The run is writing. */
@@ -515,7 +535,10 @@ class ListsViewModel @JvmOverloads constructor(
      * the picker offers what this reads, while the run writes through [dao], and two databases would
      * quietly disagree about what the offered version is.
      */
-    private val injectedTemplateStore: TemplateStore? = null
+    private val injectedTemplateStore: TemplateStore? = null,
+
+    /** The add-on tables for the same reason, and for the test that drives both halves. */
+    private val injectedAddOnStore: AddOnStore? = null
 ) : AndroidViewModel(application) {
 
     private val settingsStore = SettingsStore(application)
@@ -761,6 +784,48 @@ class ListsViewModel @JvmOverloads constructor(
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), TemplateResolver.Empty)
     }
 
+    /**
+     * The add-ons, for the shared Templates & Add-ons page.
+     *
+     * [AddOnStore] is built on first use for the same two reasons as [templateStore]: a test that
+     * injects a fake DAO must not be made to open the app's real database, and no test that is not
+     * about an add-on should pay for one. [injectedAddOnStore] is for the test that is.
+     */
+    private val addOnStore: AddOnStore by lazy {
+        injectedAddOnStore ?: AddOnStore(ListeaDatabase.get(getApplication()))
+    }
+
+    /**
+     * Every add-on lineage, by name. Null until the table has been read, with the null rule
+     * [templates] states: an empty list would say *there are none*, which is a claim this app has no
+     * way to retract for the frame before the read.
+     */
+    val addOns: StateFlow<List<AddOnEntity>?> by lazy {
+        addOnStore.addOns
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+    }
+
+    /** Every version of every add-on, oldest first within each. See [addOns]. */
+    val addOnVersions: StateFlow<List<AddOnVersionEntity>?> by lazy {
+        addOnStore.versions
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+    }
+
+    /**
+     * The two tables as one lookup: what a Task attached to an add-on actually asks.
+     *
+     * Both flows are observed together for the reason [templateResolver] gives — a resolver built
+     * from one of them would offer a questionnaire before it knew whether the payload is readable —
+     * and the seed is [AddOnResolver.Empty], which is *no add-on asks anything*, not *not read yet*.
+     * A Task that is not attached to one has no page either way, so the seed is the honest answer
+     * for the frame before the tables land.
+     */
+    val addOnResolver: StateFlow<AddOnResolver> by lazy {
+        combine(addOns, addOnVersions) { lineages, versions ->
+            AddOnResolver.of(lineages.orEmpty(), versions.orEmpty())
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AddOnResolver.Empty)
+    }
+
     private val _sourceFreshness = MutableStateFlow<ListFreshness?>(null)
     val sourceFreshness: StateFlow<ListFreshness?> = _sourceFreshness.asStateFlow()
 
@@ -946,6 +1011,9 @@ class ListsViewModel @JvmOverloads constructor(
                 // A Task with no import row is absent, and the item's default `""` is the right
                 // answer for it: a manual entry has no run behind it to have been configured by.
                 val controlByTask = controls.associate { it.taskId to it.assetControls }
+                // The same rule for the questionnaire: a Task with no import row has no add-on, and
+                // the item's default `""` is the right answer for it.
+                val addOnByTask = controls.associate { it.taskId to it.addOn }
                 ListDetail(
                     owner,
                     items.map { item ->
@@ -954,7 +1022,8 @@ class ListsViewModel @JvmOverloads constructor(
                         }
                         item.toReviewItem(
                             rootUri = owner.sourceRootUri,
-                            assetControls = controlByTask[item.taskId].orEmpty()
+                            assetControls = controlByTask[item.taskId].orEmpty(),
+                            addOn = addOnByTask[item.taskId].orEmpty()
                         ).copy(
                             assets = resolved,
                             reviewBlocked = reviewBlockFor(resolved)
@@ -1718,6 +1787,7 @@ class ListsViewModel @JvmOverloads constructor(
         // Read before the options are built rather than after, because the options are seeded from
         // it: what a new Todo starts on is the built-in *as it stands now*, and that is a row.
         val attachable = attachableTemplates()
+        val attachableAddOns = addOnResolverNow().attachable
         val options = ImportOptions(
             importer = ImporterKind.FILE_AS_TASK,
             displayName = label,
@@ -1747,7 +1817,8 @@ class ListsViewModel @JvmOverloads constructor(
             // words in the same dialog rather than as a path and a name.
             existingTodos = dao.sourcesAt(rootUri, folderPath).map { it.displayName },
             histories = dao.dissolvedHistoriesAt(rootUri, folderPath),
-            templates = attachable
+            templates = attachable,
+            addOns = attachableAddOns
         )
     }
 
@@ -1797,6 +1868,11 @@ class ListsViewModel @JvmOverloads constructor(
             // untouched row adopt an edited template instead of re-stamping the old version — see
             // [upgradeAttachments] and the notice the dialog draws from [refreshVersionNotice].
             upgradeTemplates = true,
+            // The Todo's own questionnaire, opened on what the row names. A refresh carries it
+            // forward to the current version exactly as it carries templates, and the dialog says
+            // so before confirming — see [refreshAddOnNotice].
+            addOn = decodeAddOnAttachment(source.addOn),
+            upgradeAddOn = true,
             // The Todo's standing answers, offered here so a refresh can change them without a
             // second trip to the Todo's card. The address opens on what the row holds and on
             // whether that value was a default copy; the dialog preselected *Keep this Todo's
@@ -1818,7 +1894,8 @@ class ListsViewModel @JvmOverloads constructor(
             folderCount = tree.directories.size,
             refresh = true,
             options = options,
-            templates = attachableTemplates()
+            templates = attachableTemplates(),
+            addOns = addOnResolverNow().attachable
             // Deliberately no histories: a refresh runs over a Todo that is still here, and a
             // recovery overwrites a Task's judgment. Loading a history into a live Todo would take
             // the decisions made since and quietly replace them with older ones. Recovery is for a
@@ -1954,6 +2031,34 @@ class ListsViewModel @JvmOverloads constructor(
         // how a list of attachments is written down.
         val assetControls = encodeTemplateAttachments(attachments)
 
+        // The add-on, resolved the same way: a refresh moves the held lineage to the offered
+        // version, while Create and a sync submit what they were given. One read of the tables for
+        // both the upgrade and the check, so *what the picker offered* and *what this build can
+        // read* cannot be answered a version apart.
+        val addOnTables = addOnResolverNow()
+        val addOnRef = if (options.upgradeAddOn) {
+            upgradeAddOn(options.addOn, addOnTables.attachable)
+        } else {
+            options.addOn
+        }
+
+        // A reference a **Create** submitted must be readable before anything is written: it would
+        // stamp every Task with a page this build can never draw. A refresh or a sync is permitted
+        // to carry an unreadable held reference forward — it was already on the row, and refusing
+        // the whole run would turn an unreadable questionnaire into an import outage. The picker
+        // never offers such a version, so this check can only bite a caller that bypassed it.
+        if (pending.sourceId == null &&
+            options.addOn != null &&
+            addOnTables.versionOf(options.addOn) == null
+        ) {
+            _importFolderRequest.value = ImportFolderRequest.Error(
+                "This add-on cannot be read by this build, so it cannot be attached. " +
+                    "Nothing was changed."
+            )
+            return
+        }
+        val addOn = encodeAddOnAttachment(addOnRef)
+
         // The address is resolved by the dialog (*Use default* copies the live default at Confirm;
         // *Custom* is what was typed) and arrives here final. A Todo whose method is Webhook must
         // have a usable one **before anything is written**: *Use default* over an empty default is
@@ -1983,6 +2088,7 @@ class ListsViewModel @JvmOverloads constructor(
                 keepTree = options.keepTree,
                 contentPolicy = options.contentPolicy,
                 assetControls = assetControls,
+                addOn = addOn,
                 exportKind = encodeExportChoice(options.exportChoice),
                 followUpstream = options.followUpstream,
                 keepStateOnDelete = options.keepStateOnDelete,
@@ -2013,7 +2119,8 @@ class ListsViewModel @JvmOverloads constructor(
                 contentPolicy = options.contentPolicy,
                 // Same rule, same reason: the Tasks this run produces are stamped from this string,
                 // so it has to be what the user just chose rather than what the Todo holds.
-                assetControls = assetControls
+                assetControls = assetControls,
+                addOn = addOn
             )
         }.getOrNull()
 
@@ -2030,6 +2137,9 @@ class ListsViewModel @JvmOverloads constructor(
             keepTree = options.keepTree,
             contentPolicy = options.contentPolicy,
             assetControls = assetControls,
+            // One questionnaire per Todo, written back with the rest of the configuration. The
+            // Tasks got [addOn] above; this is what the next run opens on.
+            addOn = addOn,
             // The dialog's answer, written back here rather than in `runImport` above, for the
             // same reason `contentPolicy` is: the run is about this folder's Tasks, and the
             // choice is a standing answer about the Todo that outlives it.
@@ -2094,6 +2204,10 @@ class ListsViewModel @JvmOverloads constructor(
             // Todo already names, so following an upstream changes the material and never the
             // buttons.
             templates = decodeTemplateAttachments(source.assetControls),
+            // The add-on the Todo names, re-stamped on every Task below. No upgrade: a sync asked
+            // nobody and must not move a questionnaire on its own, exactly as it must not move a
+            // template.
+            addOn = decodeAddOnAttachment(source.addOn),
             // The same rule for every standing answer the dialog now carries. A sync has no dialog
             // and asked nobody, so it writes back exactly what it read — including the address,
             // which it also may not refuse over: see [ImportOptions.validateWebhookAddress].
@@ -2146,6 +2260,20 @@ class ListsViewModel @JvmOverloads constructor(
     private suspend fun attachableTemplates(): List<StoredTemplateVersion> {
         val (lineages, versions) = templateStore.snapshot()
         return TemplateResolver.of(lineages, versions).attachable
+    }
+
+    /**
+     * The add-ons a dialog may offer, and the resolver that can say whether a reference is readable.
+     *
+     * The same read-once shape as [attachableTemplates] and for the same reason, but it hands back
+     * the whole resolver rather than the offered list alone: the import step has to check the
+     * chosen reference against what exists *before* writing, and a check that only compared current
+     * versions would refuse a Task whose add-on is an older version that is still perfectly
+     * readable.
+     */
+    private suspend fun addOnResolverNow(): AddOnResolver {
+        val (lineages, versions) = addOnStore.snapshot()
+        return AddOnResolver.of(lineages, versions)
     }
 
     /**
@@ -2681,6 +2809,94 @@ class ListsViewModel @JvmOverloads constructor(
      */
     fun createTemplate(name: String) = launchDb {
         templateStore.create(name)
+    }
+
+    /**
+     * Writes an edited add-on: its name, and one more version when its questions changed.
+     *
+     * [addOnStore] decides which of the two writes happens; the page hands over what was edited
+     * into. Attached Tasks follow immediately through [addOnResolver], exactly as they follow a
+     * template edit — a Task holds a reference, and the questions are whatever it points at now.
+     * Answers do not move: they stay keyed by question id and become visible or hidden under the
+     * rule [com.example.listea.domain.resolveAddOnAnswers] states.
+     */
+    fun updateAddOn(
+        addOnId: String,
+        name: String,
+        questions: List<AddOnQuestion>
+    ) = launchDb {
+        addOnStore.update(addOnId, name, questions)
+    }
+
+    /**
+     * Starts an add-on at version 1 with one Rating question, and leaves the screen where it is.
+     *
+     * A blank name is refused by the store; the list flows refresh by themselves, so a successful
+     * create appears without navigation plumbing.
+     */
+    fun createAddOn(name: String) = launchDb {
+        addOnStore.create(name)
+    }
+
+    /**
+     * One Task's answers, as the questionnaire page reads them.
+     *
+     * A row this build cannot interpret — a kind or a value written by a later release — is dropped
+     * rather than guessed at, exactly as [toAddOnAnswer] says; the row stays in the table for a
+     * build that understands it.
+     */
+    fun observeTaskAnswers(taskId: String): Flow<List<AddOnAnswer>> =
+        dao.observeAnswersForTask(taskId).map { rows -> rows.mapNotNull { it.toAddOnAnswer() } }
+
+    /**
+     * Records one answer, as it was given.
+     *
+     * **Re-validated against the version the Task is stamped with**, which is the second gate for a
+     * page that outlived an edit: the surface can only draw what the version currently offers, but
+     * the write is what makes that a rule about the table rather than about a screen. A question
+     * this version no longer asks, or a value that does not fit its type, writes nothing.
+     *
+     * The authored reference is the stamped one, not the answer's own: re-answering a question
+     * carried across an upgrade records the version the reviewer was actually looking at.
+     * `createdAt` is preserved so the row still says when this Task was first answered about it.
+     */
+    fun setAddOnAnswer(
+        taskId: String,
+        questionId: String,
+        value: AddOnAnswerValue
+    ) = launchDb {
+        val stamped = dao.getAssetControls(listOf(taskId)).firstOrNull() ?: return@launchDb
+        val stored = addOnResolverNow().versionFor(stamped.addOn) ?: return@launchDb
+        val question = stored.questions.firstOrNull { it.id == questionId } ?: return@launchDb
+        if (!addOnAnswerFits(question.type, value)) return@launchDb
+
+        val now = now()
+        val existing = dao.answer(taskId, questionId)
+        dao.insertAnswer(
+            AddOnAnswer(
+                questionId = question.id,
+                type = question.type,
+                value = value,
+                authoredAddOnId = stored.ref.addOnId,
+                authoredAddOnVersion = stored.ref.version,
+                createdAt = existing?.createdAt ?: now,
+                updatedAt = now
+            ).toEntity(taskId)
+        )
+    }
+
+    /**
+     * Takes one answer back, which is how an optional question is left unanswered again.
+     *
+     * The question still has to be one the Task's version asks. A hidden answer is not on the page
+     * to be cleared, and a caller that bypassed the page can no more delete a fact under another
+     * questionnaire than it could write one.
+     */
+    fun clearAddOnAnswer(taskId: String, questionId: String) = launchDb {
+        val stamped = dao.getAssetControls(listOf(taskId)).firstOrNull() ?: return@launchDb
+        val stored = addOnResolverNow().versionFor(stamped.addOn) ?: return@launchDb
+        if (stored.questions.none { it.id == questionId }) return@launchDb
+        dao.deleteAnswer(taskId, questionId)
     }
 
     fun setDefaultWebhookEnabled(enabled: Boolean) = launchDb {
@@ -3268,7 +3484,16 @@ class ListsViewModel @JvmOverloads constructor(
          * read within the viewer's own cap, which omits its marks rather than sending them against
          * bytes nobody compared.
          */
-        val fingerprintByAsset: Map<String, String> = emptyMap()
+        val fingerprintByAsset: Map<String, String> = emptyMap(),
+        /**
+         * The add-on tables, resolved once for the round the same way the template table is.
+         *
+         * A Task's stamped reference names a version whose questions are the ones the payload
+         * quotes for each answer, so this resolver and the two tables must be one snapshot.
+         */
+        val addOnResolver: AddOnResolver = AddOnResolver.Empty,
+        /** Stored answers, by Task. Absent for every Task that answered nothing. */
+        val answersByTask: Map<String, List<PayloadAnswerRow>> = emptyMap()
     )
 
     private suspend fun payloadFacts(rows: List<ListItemEntity>): PayloadFacts {
@@ -3277,6 +3502,13 @@ class ListsViewModel @JvmOverloads constructor(
             emptyMap()
         } else {
             dao.getPayloadAssets(taskIds).groupBy { it.taskId }
+        }
+        // One query for the round's answers, whether or not any Task has an add-on. A round with
+        // none pays an empty result, exactly as an add-on-free List pays for its template columns.
+        val answersByTask = if (taskIds.isEmpty()) {
+            emptyMap()
+        } else {
+            dao.getPayloadAnswers(taskIds).groupBy { it.taskId }
         }
         val assets = assetsByTask.values.flatten()
         val marksByAsset = if (assets.isEmpty()) {
@@ -3311,7 +3543,9 @@ class ListsViewModel @JvmOverloads constructor(
             assetsByTask = assetsByTask,
             resolver = resolverNow(),
             marksByAsset = marksByAsset,
-            fingerprintByAsset = fingerprintByAsset
+            fingerprintByAsset = fingerprintByAsset,
+            addOnResolver = addOnResolverNow(),
+            answersByTask = answersByTask
         )
     }
 
@@ -3414,7 +3648,9 @@ class ListsViewModel @JvmOverloads constructor(
                     assetsByTask = facts.assetsByTask,
                     resolver = facts.resolver,
                     marksByAsset = facts.marksByAsset,
-                    fingerprintByAsset = facts.fingerprintByAsset
+                    fingerprintByAsset = facts.fingerprintByAsset,
+                    addOnResolver = facts.addOnResolver,
+                    answersByTask = facts.answersByTask
                 )
             )
 
@@ -4014,9 +4250,14 @@ class ListsViewModel @JvmOverloads constructor(
         launchDb { block(clean) }
     }
 
-    private fun launchDb(block: suspend () -> Unit) {
-        viewModelScope.launch { block() }
-    }
+    /**
+     * Runs [block] on the ViewModel's scope and hands back the job.
+     *
+     * The job is what lets a caller that needs to know when the write has landed wait for it — a
+     * test driving the answer page does — without the write path growing a suspend twin that could
+     * drift from it. Screens ignore the value, exactly as they ignore the one `launch` returns.
+     */
+    private fun launchDb(block: suspend () -> Unit): Job = viewModelScope.launch { block() }
 
     private fun now() = System.currentTimeMillis()
 }

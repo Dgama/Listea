@@ -132,6 +132,20 @@ fun CatalogTaskPreviewScreen(
     // A level with nothing to move between is not a level: a folder holding one Task draws no
     // outer arrows, and a Task holding one file draws no inner pair.
     val hasTaskLevel = tasks.size > 1 && taskIndex >= 0
+    // The level's Tasks in the level's order, as the jump list names them. A folder Task's name is
+    // often its path's last segment already, so the path is only carried when it adds something.
+    val queueEntries = remember(tasks) {
+        tasks.map { task ->
+            MediaQueueEntry(
+                label = task.displayName,
+                detail = task.groupPath.takeIf { it.isNotBlank() && it != task.displayName }
+            )
+        }
+    }
+    // A level holding one Task still has a counter worth opening when the Task holds several
+    // files: the counter then names the files, and this is that list. Nothing here can be marked,
+    // so an entry is only a file's name.
+    val assetEntries = remember(assets) { reviewPageEntries(assets, addOn = null) }
 
     MediaSystemBars(chromeVisible)
     BackHandler { onClose() }
@@ -149,6 +163,26 @@ fun CatalogTaskPreviewScreen(
                     "${taskIndex + 1}(${currentAsset + 1}/${assets.size})/${tasks.size}"
                 hasAssetLevel -> "${currentAsset + 1} / ${assets.size}"
                 hasTaskLevel -> "${taskIndex + 1} / ${tasks.size}"
+                else -> null
+            },
+            // The list follows the level the counter names: Tasks while there is a Task level, and
+            // the Task's files when the counter has fallen back to the file-only form. A Task level
+            // holding one row leaves the outer number with nothing to jump through, but its files
+            // are still a level, and a position that cannot be opened there is the same dead label
+            // this control exists to replace.
+            queueJump = when {
+                hasTaskLevel -> MediaQueueJump(
+                    entries = queueEntries,
+                    current = taskIndex,
+                    onJump = { currentTaskId = tasks[it].taskId }
+                )
+
+                hasAssetLevel -> MediaQueueJump(
+                    entries = assetEntries,
+                    current = currentAsset,
+                    onJump = { assetIndex = it }
+                )
+
                 else -> null
             },
             onPrevious = if (taskIndex > 0) {

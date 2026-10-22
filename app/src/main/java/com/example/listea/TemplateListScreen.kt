@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Text
@@ -25,94 +26,146 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.listea.data.AddOnEntity
+import com.example.listea.data.AddOnVersionEntity
 import com.example.listea.data.TemplateEntity
 import com.example.listea.data.TemplateVersionEntity
+import com.example.listea.domain.decodeAddOnQuestions
 import com.example.listea.domain.decodeTemplateButtons
 import com.example.listea.domain.decodeTemplateScope
 
 /**
- * Every template Listea has, newest name first, and the way into one.
+ * Everything Listea can attach to a Task, templates and add-ons together, by name.
  *
- * The page the release is about: before it, *what to record about a file* was a blob configured in
- * two places and owned by nobody — **Settings → Asset controls** edited an app-wide default, the
- * Create Tasks dialog edited one Todo's answer, and neither was a thing the user could name, find
- * again or point at. A template is a row now, so this is a list, and each row is a page.
+ * **One list rather than two.** The two kinds are authored the same way — name it, fill it in,
+ * confirm, and an edit appends a version — and the shared name is the question a user arrives with:
+ * *what do I have?* A second section would make the answer two screens and the difference between
+ * them a taxonomy the list already says in a subtitle.
  *
- * **It makes one, as of v0.6.0: `New` asks for a name and starts a lineage at version 1.** Until
- * then a lineage could only be minted by an upgrade or an import, and a user who wanted a second
- * template — two Todos governing two folders differently, which is the release's acceptance
- * scenario — had no way to get one. What is created starts from the shipped shape rather than
- * blank, because a template that admits no kind can never be attached; it is edited on its own page
- * like any other. The name prompt is refused while blank by the dialog's own confirm button.
+ * **They are still two kinds, and the row says which.** A template governs files of some kinds and
+ * offers buttons; an add-on asks questions about the whole Task after its last file. The subtitle
+ * carries that, so a row is never opened by someone expecting the other page.
  *
- * The rows show what the template *is*, not what it does. There is no count of Tasks judged with
- * it and no "used by" line, because nothing attaches one yet: a number here would be a claim about
- * a relationship that does not exist.
+ * **New asks which kind first.** The two editors share a shape but not a vocabulary, and a name
+ * prompt that created one or the other without saying so would be a coin toss the user could not see.
+ * A new template starts from the shipped shape; a new add-on starts with one Rating question. Neither
+ * is blank, because a thing with nothing in it can be neither attached nor saved.
  */
 @Composable
 fun TemplateListScreen(
     modifier: Modifier,
     viewModel: ListsViewModel,
     onBack: () -> Unit,
-    onOpen: (String) -> Unit
+    onOpenTemplate: (String) -> Unit,
+    onOpenAddOn: (String) -> Unit
 ) {
     val templates by viewModel.templates.collectAsStateWithLifecycle()
     val versions by viewModel.templateVersions.collectAsStateWithLifecycle()
-    var creating by remember { mutableStateOf(false) }
+    val addOns by viewModel.addOns.collectAsStateWithLifecycle()
+    val addOnVersions by viewModel.addOnVersions.collectAsStateWithLifecycle()
+
+    // Which kind the New flow is creating, and whether the name prompt is up. Two states rather
+    // than one nullable, because *the chooser is open* and *a name is being typed* are different
+    // moments and the chooser must not reappear behind the prompt when the prompt closes.
+    var choosingKind by remember { mutableStateOf(false) }
+    var creating by remember { mutableStateOf<CreateKind?>(null) }
 
     BackHandler { onBack() }
 
-    if (creating) {
+    if (choosingKind) {
+        NewKindDialog(
+            onTemplate = {
+                choosingKind = false
+                creating = CreateKind.TEMPLATE
+            },
+            onAddOn = {
+                choosingKind = false
+                creating = CreateKind.ADD_ON
+            },
+            onDismiss = { choosingKind = false }
+        )
+    }
+
+    creating?.let { kind ->
         TextPromptDialog(
-            title = "New template",
+            title = when (kind) {
+                CreateKind.TEMPLATE -> "New template"
+                CreateKind.ADD_ON -> "New add-on"
+            },
             label = "Name",
             initialText = "",
             confirmLabel = "Create",
             onConfirm = { name ->
-                viewModel.createTemplate(name)
-                creating = false
+                when (kind) {
+                    CreateKind.TEMPLATE -> viewModel.createTemplate(name)
+                    CreateKind.ADD_ON -> viewModel.createAddOn(name)
+                }
+                creating = null
             },
-            onDismiss = { creating = false }
+            onDismiss = { creating = null }
         )
     }
 
     ListeaNestedScaffold(
         modifier = modifier,
-        title = "Templates",
+        title = "Templates & Add-ons",
         backLabel = "Settings",
         onBack = onBack,
         trailing = {
-            // Named only once there is something to name: a count drawn from a table that has not
-            // been read yet would say "0 templates" over an install that has one.
-            templates?.let {
+            // Named only once both tables have been read: a count drawn from one table would report
+            // an install as having half of what it has.
+            if (templates != null && addOns != null) {
                 Text(
-                    countLabel(it.size, "template"),
+                    countLabel(templates!!.size, "template") + " · " +
+                        countLabel(addOns!!.size, "add-on"),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            TextButton(onClick = { creating = true }) { Text("New") }
+            TextButton(onClick = { choosingKind = true }) { Text("New") }
         }
     ) { bodyModifier ->
-        val loaded = templates
+        val loadedTemplates = templates
+        val loadedAddOns = addOns
         // Nothing read yet, and that is a blank body rather than a message: the two are a frame
         // apart and only one of them is worth words.
-        if (loaded == null) return@ListeaNestedScaffold
+        if (loadedTemplates == null || loadedAddOns == null) return@ListeaNestedScaffold
 
-        if (loaded.isEmpty()) {
+        val entries = remember(loadedTemplates, versions, loadedAddOns, addOnVersions) {
+            val templateRows = loadedTemplates.map { template ->
+                Entry.OfTemplate(
+                    template = template,
+                    // The versions arrive ordered by lineage and then by number, so the last one
+                    // carrying this id is the newest — which is the one the page behind this row
+                    // edits, and the one whose number the row offers as "current".
+                    current = versions.orEmpty().lastOrNull { it.templateId == template.id }
+                )
+            }
+            val addOnRows = loadedAddOns.map { addOn ->
+                Entry.OfAddOn(
+                    addOn = addOn,
+                    current = addOnVersions.orEmpty().lastOrNull { it.addOnId == addOn.id }
+                )
+            }
+            (templateRows + addOnRows).sortedWith(
+                compareBy({ it.name.lowercase() }, { it.name })
+            )
+        }
+
+        if (entries.isEmpty()) {
             Box(bodyModifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier.padding(ListeaDimens.PagePadding)
                 ) {
                     Text(
-                        "No templates",
+                        "Nothing to attach",
                         style = MaterialTheme.typography.bodyLarge,
                         textAlign = TextAlign.Center
                     )
                     // Said plainly rather than left as an empty page. An install always has the
-                    // built-in, so nobody should ever read this, and someone who does should come
-                    // away knowing that what they are looking at is wrong rather than new.
+                    // built-in template, so nobody should ever read this, and someone who does
+                    // should come away knowing that what they are looking at is wrong.
                     Text(
                         "Every install starts with the built-in media asset control. This list is " +
                             "empty only if the database this build opened has none.",
@@ -120,7 +173,7 @@ fun TemplateListScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center
                     )
-                    TextButton(onClick = { creating = true }) { Text("New template") }
+                    TextButton(onClick = { choosingKind = true }) { Text("New") }
                 }
             }
             return@ListeaNestedScaffold
@@ -134,18 +187,85 @@ fun TemplateListScreen(
             ),
             verticalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
         ) {
-            items(loaded, key = { it.id }) { template ->
-                TemplateCard(
-                    template = template,
-                    // The versions arrive ordered by lineage and then by number, so the last one
-                    // carrying this id is the newest — which is the one the page behind this row
-                    // edits, and the one whose number the row offers as "current".
-                    current = versions.orEmpty().lastOrNull { it.templateId == template.id },
-                    onOpen = { onOpen(template.id) }
-                )
+            items(entries, key = { it.key }) { entry ->
+                when (entry) {
+                    is Entry.OfTemplate -> TemplateCard(
+                        template = entry.template,
+                        current = entry.current,
+                        onOpen = { onOpenTemplate(entry.template.id) }
+                    )
+
+                    is Entry.OfAddOn -> AddOnCard(
+                        addOn = entry.addOn,
+                        current = entry.current,
+                        onOpen = { onOpenAddOn(entry.addOn.id) }
+                    )
+                }
             }
         }
     }
+}
+
+/** Which kind New is about to create. */
+private enum class CreateKind { TEMPLATE, ADD_ON }
+
+/**
+ * One row of the shared list, in whatever kind it is.
+ *
+ * [name] is lifted out so the list can sort both kinds by the one thing they both have; the key is
+ * prefixed by kind, because two UUIDs colliding is not the risk — a template and an add-on sharing
+ * a *string* is not a collision either, but a prefixed key says which table a key belongs to at the
+ * one place a lazy list's identity is decided.
+ */
+private sealed interface Entry {
+    val name: String
+
+    val key: String
+
+    data class OfTemplate(
+        val template: TemplateEntity,
+        val current: TemplateVersionEntity?
+    ) : Entry {
+        override val name: String get() = template.name
+        override val key: String get() = "template:" + template.id
+    }
+
+    data class OfAddOn(
+        val addOn: AddOnEntity,
+        val current: AddOnVersionEntity?
+    ) : Entry {
+        override val name: String get() = addOn.name
+        override val key: String get() = "addon:" + addOn.id
+    }
+}
+
+/**
+ * The question *what are you making*, before the name prompt.
+ *
+ * The two sentences are the difference the user is being asked about: a template adds buttons to
+ * files, an add-on asks questions about the whole Task. Without them the chooser is two words naming
+ * two kinds the user may not know they are different.
+ */
+@Composable
+private fun NewKindDialog(
+    onTemplate: () -> Unit,
+    onAddOn: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("New") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(ListeaDimens.CompactGap)) {
+                Text(
+                    "A template adds buttons to files of the kinds you choose. An add-on asks " +
+                        "questions about the whole Task, on one page after its last file."
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onTemplate) { Text("Template") } },
+        dismissButton = { TextButton(onClick = onAddOn) { Text("Add-on") } }
+    )
 }
 
 /**
@@ -197,6 +317,44 @@ private fun TemplateCard(
 }
 
 /**
+ * One add-on: what it is called and what it asks.
+ *
+ * The subtitle opens with *Add-on* so the row cannot be mistaken for a template whose scope line
+ * failed to read; the count is the questionnaire's size and the version is how many times it has
+ * been edited. An unreadable version is named as such rather than counted as zero questions.
+ */
+@Composable
+private fun AddOnCard(
+    addOn: AddOnEntity,
+    current: AddOnVersionEntity?,
+    onOpen: () -> Unit
+) {
+    OutlinedCard(
+        onClick = onOpen,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(ListeaDimens.CardCorner)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(ListeaDimens.CardPadding),
+            verticalArrangement = Arrangement.spacedBy(ListeaDimens.CompactGap)
+        ) {
+            Text(
+                addOn.name,
+                style = MaterialTheme.typography.titleSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            StatusLine(addOnQuestionLine(current))
+            StatusLine(
+                if (current == null) "No version yet" else "Version ${current.version}"
+            )
+        }
+    }
+}
+
+/**
  * One template's buttons and version as a single line, or what is wrong with them.
  *
  * A version this build cannot read is named as such rather than counted as zero buttons, because
@@ -210,4 +368,14 @@ private fun templateVersionLine(version: TemplateVersionEntity?): String {
         ?: return "Version ${version.version} · written by a newer build"
 
     return countLabel(buttons.size, "button") + " · version ${version.version}"
+}
+
+/** The same line for an add-on, counted in questions. */
+private fun addOnQuestionLine(version: AddOnVersionEntity?): String {
+    if (version == null) return "Add-on · no version yet"
+
+    val questions = decodeAddOnQuestions(version.questions, version.questionsVersion)
+        ?: return "Add-on · version ${version.version} written by a newer build"
+
+    return "Add-on · " + countLabel(questions.size, "question")
 }

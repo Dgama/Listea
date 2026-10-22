@@ -4,15 +4,21 @@ import android.content.Context
 import com.example.listea.data.AssetDecisions
 import com.example.listea.data.DecisionTarget
 import com.example.listea.data.ListItemEntity
+import com.example.listea.data.PayloadAnswerRow
 import com.example.listea.data.PayloadAssetRow
 import com.example.listea.data.PayloadMarkRow
 import com.example.listea.data.PayloadTaskRow
 import com.example.listea.data.ReviewItem
 import com.example.listea.data.decodeActionIds
+import com.example.listea.data.toAddOnAnswer
+import com.example.listea.domain.AddOnAnswerValue
+import com.example.listea.domain.AddOnQuestionType
 import com.example.listea.domain.ExportChoice
 import com.example.listea.domain.ExportKind
 import com.example.listea.domain.MarkKind
+import com.example.listea.domain.StoredAddOnVersion
 import com.example.listea.domain.markKind
+import com.example.listea.domain.resolveAddOnAnswers
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -68,6 +74,17 @@ const val EXPORT_VERSION = 2
  */
 const val EXPORT_VERSION_MARKS = 3
 
+/**
+ * The version a body carries **only when at least one Task carries add-on answers**.
+ *
+ * Version 4 adds a Task-level `addOn` object after the Task's `assets`: one questionnaire identity
+ * and the answers its attached version still asks. It is a superset of 3 and 2, so a round without
+ * answers stays byte-for-byte the body v0.7.0 sent — the same rule marks follow one layer down.
+ * `EXPORT_VERSION_MARKS` keeps its meaning: a body can be *4* because it carries answers and marks
+ * both, and the marks array is still written only where there are marks.
+ */
+const val EXPORT_VERSION_ADD_ON = 4
+
 /** One template a Task was imported under: identity only, never its controls. */
 data class ExportTemplateView(
     val id: String,
@@ -119,18 +136,49 @@ data class ExportMarkView(
 )
 
 /**
- * One Task, with its completion, its template identity and its files.
+ * One answer as the receiver sees it: which question, what type it was given in, the prompt the
+ * reviewer saw, and the typed value.
+ *
+ * [prompt] is the **current** wording of the attached version, not the one stored on the answer —
+ * an answer names a question id, and the prompt lives in the immutable version that asked it. When
+ * the attached version no longer offers the id, the answer is hidden and never reaches here.
+ */
+data class ExportAnswerView(
+    val questionId: String,
+    val type: AddOnQuestionType,
+    val prompt: String,
+    val value: AddOnAnswerValue
+)
+
+/**
+ * A Task's questionnaire and the answers it still carries, as one object after `assets`.
+ *
+ * A sibling of `assets` rather than a member inside it: the answers are about the whole Task, and
+ * `assets[]` means files. [answers] is in the questionnaire's order and contains only answers the
+ * attached version still asks; a Task with no visible answers sends no `addOn` object at all.
+ */
+data class ExportAddOnView(
+    val id: String,
+    val name: String,
+    val version: Int,
+    val answers: List<ExportAnswerView>
+)
+
+/**
+ * One Task, with its completion, its template identity, its files and its questionnaire.
  *
  * Completion is here and not on an Asset because checking off is one judgment about one Task however
  * many files it presents. [assets] is empty for a Task with no file — a manual item — and the shape
- * says so rather than inventing one.
+ * says so rather than inventing one. [addOn] is null for the ordinary Task: no attachment, an
+ * attachment this build cannot read, or one with nothing answered.
  */
 data class ExportTaskView(
     val publicId: String,
     val title: String,
     val isCompleted: Boolean,
     val templates: List<ExportTemplateView>,
-    val assets: List<ExportAssetView>
+    val assets: List<ExportAssetView>,
+    val addOn: ExportAddOnView? = null
 )
 
 /**
@@ -163,7 +211,9 @@ fun exportTaskViews(
     assetsByTask: Map<String, List<PayloadAssetRow>>,
     resolver: TemplateResolver,
     marksByAsset: Map<String, List<PayloadMarkRow>> = emptyMap(),
-    fingerprintByAsset: Map<String, String> = emptyMap()
+    fingerprintByAsset: Map<String, String> = emptyMap(),
+    addOnResolver: AddOnResolver = AddOnResolver.Empty,
+    answersByTask: Map<String, List<PayloadAnswerRow>> = emptyMap()
 ): List<ExportTaskView> = rows.distinctBy { it.taskId }.map { row ->
     val task = tasks[row.taskId]
     val attachments = task?.assetControls.orEmpty()
@@ -186,6 +236,47 @@ fun exportTaskViews(
                 resolver = resolver,
                 markRows = marksByAsset[asset.assetId].orEmpty(),
                 documentFingerprint = fingerprintByAsset[asset.assetId]
+            )
+        },
+        addOn = exportAddOnView(
+            addOn = addOnResolver.versionFor(task?.addOn.orEmpty()),
+            answerRows = answersByTask[row.taskId].orEmpty()
+        )
+    )
+}
+
+/**
+ * A Task's questionnaire as the payload sees it, or null when there is nothing to send.
+ *
+ * Three conditions, each fail-closed: the attached reference must resolve to a readable version
+ * (otherwise there is no questionnaire to name), the answers must be ones that version still asks
+ * (the same visibility rule the page draws — lineage, question id and type), and at least one must
+ * remain. An unreadable row among them is skipped rather than guessed at, exactly as
+ * [toAddOnAnswer] says.
+ *
+ * No answers means no object, and therefore no version-4 claim: a Task somebody attached a
+ * questionnaire to but never answered sends the shape v0.7.0 sent.
+ */
+private fun exportAddOnView(
+    addOn: StoredAddOnVersion?,
+    answerRows: List<PayloadAnswerRow>
+): ExportAddOnView? {
+    if (addOn == null) return null
+    val visible = resolveAddOnAnswers(
+        addOn = addOn,
+        answers = answerRows.mapNotNull { it.toAddOnAnswer() }
+    ).visible
+    if (visible.isEmpty()) return null
+    return ExportAddOnView(
+        id = addOn.ref.addOnId.value,
+        name = addOn.name,
+        version = addOn.ref.version,
+        answers = visible.map { held ->
+            ExportAnswerView(
+                questionId = held.question.id,
+                type = held.question.type,
+                prompt = held.question.prompt,
+                value = held.answer.value
             )
         }
     )

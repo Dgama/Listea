@@ -182,7 +182,7 @@ abstract class ListsDao {
      */
     @Query(
         """
-        SELECT ti.taskId AS taskId, ti.assetControls AS assetControls
+        SELECT ti.taskId AS taskId, ti.assetControls AS assetControls, ti.addOn AS addOn
         FROM task_imports ti
         JOIN list_items i ON i.taskId = ti.taskId
         WHERE i.listId = :listId
@@ -193,7 +193,7 @@ abstract class ListsDao {
     /** The same, once, for the two paths that build a payload rather than drive a screen. */
     @Query(
         """
-        SELECT ti.taskId AS taskId, ti.assetControls AS assetControls
+        SELECT ti.taskId AS taskId, ti.assetControls AS assetControls, ti.addOn AS addOn
         FROM task_imports ti
         JOIN list_items i ON i.taskId = ti.taskId
         WHERE i.listId = :listId
@@ -236,7 +236,7 @@ abstract class ListsDao {
      */
     @Query(
         """
-        SELECT taskId AS taskId, assetControls AS assetControls
+        SELECT taskId AS taskId, assetControls AS assetControls, addOn AS addOn
         FROM task_imports
         WHERE taskId IN (:taskIds)
         """
@@ -252,7 +252,8 @@ abstract class ListsDao {
     @Query(
         """
         SELECT t.id AS taskId, t.publicId AS publicId,
-               ti.displayName AS displayName, ti.assetControls AS assetControls
+               ti.displayName AS displayName, ti.assetControls AS assetControls,
+               ti.addOn AS addOn
         FROM tasks t
         LEFT JOIN task_imports ti ON ti.taskId = t.id
         WHERE t.id IN (:taskIds)
@@ -2518,6 +2519,7 @@ abstract class ListsDao {
         followUpstream: Boolean = false,
         now: Long,
         assetControls: String = "",
+        addOn: String = "",
         exportKind: String = EXPORT_CHOICE_NONE,
         keepStateOnDelete: Boolean = false,
         webhookUrl: String = "",
@@ -2536,6 +2538,7 @@ abstract class ListsDao {
             followUpstream = followUpstream,
             keepStateOnDelete = keepStateOnDelete,
             assetControls = assetControls,
+            addOn = addOn,
             exportKind = exportKind,
             webhookUrl = webhookUrl,
             webhookFromDefault = webhookFromDefault
@@ -2583,6 +2586,7 @@ abstract class ListsDao {
         keepTree: Boolean,
         contentPolicy: ContentPolicy = ContentPolicy.Default,
         assetControls: String = "",
+        addOn: String = "",
         exportKind: String = EXPORT_CHOICE_NONE,
         followUpstream: Boolean = false,
         keepStateOnDelete: Boolean = false,
@@ -2595,6 +2599,7 @@ abstract class ListsDao {
         normalizeKeepTree(importerKind, keepTree),
         contentPolicy.key,
         assetControls,
+        addOn,
         exportKind,
         followUpstream,
         keepStateOnDelete,
@@ -2723,7 +2728,8 @@ abstract class ListsDao {
         now: Long,
         recoverFrom: String? = null,
         contentPolicy: ContentPolicy? = null,
-        assetControls: String = ""
+        assetControls: String = "",
+        addOn: String = ""
     ): ImportResult = runImportInternal(
         sourceId,
         coverage,
@@ -2731,7 +2737,8 @@ abstract class ListsDao {
         now,
         recoverFrom,
         contentPolicy,
-        assetControls
+        assetControls,
+        addOn
     )
 
     /**
@@ -2758,7 +2765,8 @@ abstract class ListsDao {
         now: Long,
         recoverFrom: String? = null,
         contentPolicy: ContentPolicy? = null,
-        assetControls: String = ""
+        assetControls: String = "",
+        addOn: String = ""
     ): ImportResult {
         val source = getSource(sourceId) ?: return ImportResult(outcome = ImportOutcome.FAILED)
         val importer = ImporterKind.fromKey(source.importerKind)
@@ -2821,11 +2829,11 @@ abstract class ListsDao {
             val existing = owned[task.groupPath]
             if (existing != null) {
                 reconciled++
-                val delta = reconcileTask(source, existing.taskId, task, now, assetControls)
+                val delta = reconcileTask(source, existing.taskId, task, now, assetControls, addOn)
                 assetsCreated += delta.created
                 assetsUpdated += delta.updated
             } else {
-                val delta = resolveNewTask(source, importer, task, now, assetControls)
+                val delta = resolveNewTask(source, importer, task, now, assetControls, addOn)
                 if (delta.conflict != null) {
                     conflicts += delta.conflict
                 } else {
@@ -2952,13 +2960,14 @@ abstract class ListsDao {
      * run the user asked for.
      */
     @Query(
-        "UPDATE task_imports SET lastSeenAt = :lastSeenAt, assetControls = :assetControls " +
-            "WHERE taskId = :taskId"
+        "UPDATE task_imports SET lastSeenAt = :lastSeenAt, assetControls = :assetControls, " +
+            "addOn = :addOn WHERE taskId = :taskId"
     )
     protected abstract suspend fun touchTaskImport(
         taskId: String,
         lastSeenAt: Long,
-        assetControls: String
+        assetControls: String,
+        addOn: String
     )
 
     @Query("DELETE FROM legacy_source_tasks WHERE taskId = :taskId")
@@ -3024,7 +3033,7 @@ abstract class ListsDao {
     @Query(
         "UPDATE sources SET displayName = :displayName, importerKind = :importerKind, " +
             "keepTree = :keepTree, contentPolicy = :contentPolicy, " +
-            "assetControls = :assetControls, exportKind = :exportKind, " +
+            "assetControls = :assetControls, addOn = :addOn, exportKind = :exportKind, " +
             "followUpstream = :followUpstream, keepStateOnDelete = :keepStateOnDelete, " +
             "webhookUrl = :webhookUrl, webhookFromDefault = :webhookFromDefault WHERE id = :id"
     )
@@ -3035,6 +3044,7 @@ abstract class ListsDao {
         keepTree: Boolean,
         contentPolicy: String,
         assetControls: String,
+        addOn: String,
         exportKind: String,
         followUpstream: Boolean,
         keepStateOnDelete: Boolean,
@@ -3059,6 +3069,7 @@ abstract class ListsDao {
                ti.displayName AS displayName,
                ts.isCompleted AS isCompleted,
                ti.assetControls AS assetControls,
+               ti.addOn AS addOn,
                COUNT(a.id) AS assetCount,
                COALESCE(SUM(a.sourceMissing), 0) AS missingAssets,
                SUM(a.sizeBytes) AS sizeBytes,
@@ -3093,6 +3104,7 @@ abstract class ListsDao {
                 displayName = projection.displayName,
                 isCompleted = projection.isCompleted,
                 assetControls = projection.assetControls,
+                addOn = projection.addOn,
                 assetCount = projection.assetCount,
                 missingAssets = projection.missingAssets,
                 sizeBytes = projection.sizeBytes,
@@ -3148,7 +3160,8 @@ abstract class ListsDao {
         taskId: String,
         task: PlannedTask,
         now: Long,
-        assetControls: String
+        assetControls: String,
+        addOn: String
     ): ReconcileDelta {
         val existing = assetsForTask(taskId).associateBy { it.relativePath }
         var created = 0
@@ -3181,7 +3194,7 @@ abstract class ListsDao {
             }
         }
 
-        touchTaskImport(taskId, now, assetControls)
+        touchTaskImport(taskId, now, assetControls, addOn)
         return ReconcileDelta(created, updated)
     }
 
@@ -3212,7 +3225,8 @@ abstract class ListsDao {
         importer: ImporterKind?,
         task: PlannedTask,
         now: Long,
-        assetControls: String
+        assetControls: String,
+        addOn: String
     ): NewTaskDelta {
         var adoptTaskId: String? = null
         for (asset in task.assets) {
@@ -3255,7 +3269,8 @@ abstract class ListsDao {
                     displayName = task.displayName,
                     importedAt = now,
                     lastSeenAt = now,
-                    assetControls = assetControls
+                    assetControls = assetControls,
+                    addOn = addOn
                 )
             )
             deleteLegacyClaim(adoptTaskId)
@@ -3283,7 +3298,8 @@ abstract class ListsDao {
                 displayName = task.displayName,
                 importedAt = now,
                 lastSeenAt = now,
-                assetControls = assetControls
+                assetControls = assetControls,
+                addOn = addOn
             )
         )
         for (asset in task.assets) {
@@ -3380,4 +3396,63 @@ abstract class ListsDao {
 
     @Query("DELETE FROM task_asset_marks WHERE id = :id")
     abstract suspend fun deleteMark(id: String)
+
+    // --- add-on answers (v0.7.1) ---------------------------------------------------------------
+
+    /**
+     * The answers one Task carries, in the order they were first given.
+     *
+     * A Flow because the questionnaire writes as the reviewer taps and the next frame has to show
+     * it; re-reading the Task to notice would be the page asking itself a question it already
+     * answered. The order is `createdAt` and then question id, which is stable without pretending
+     * to be the questionnaire's order — the page and the payload order answers by the add-on
+     * version's questions, and Info has no order of its own to impose.
+     */
+    @Query(
+        "SELECT * FROM task_review_answers WHERE taskId = :taskId ORDER BY createdAt, questionId"
+    )
+    abstract fun observeAnswersForTask(taskId: String): Flow<List<TaskReviewAnswerEntity>>
+
+    @Query(
+        "SELECT * FROM task_review_answers WHERE taskId = :taskId AND questionId = :questionId"
+    )
+    abstract suspend fun answer(taskId: String, questionId: String): TaskReviewAnswerEntity?
+
+    /**
+     * One answer, replacing the row for the same question.
+     *
+     * REPLACE rather than ABORT because a question asked twice has one answer: re-answering is the
+     * ordinary gesture, not a conflict. The caller preserves `createdAt` before this call — the row
+     * is read first — so the timestamp still says when the Task was first answered rather than when
+     * it was last touched.
+     */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    abstract suspend fun insertAnswer(answer: TaskReviewAnswerEntity)
+
+    @Query("DELETE FROM task_review_answers WHERE taskId = :taskId AND questionId = :questionId")
+    abstract suspend fun deleteAnswer(taskId: String, questionId: String)
+
+    /**
+     * Every answer under [taskIds], for a payload being assembled.
+     *
+     * Chunked for the reason [PathBindChunk] gives: a round can name a whole folder's Tasks, and
+     * older APIs cap a statement at 999 bound variables. The authored reference is read because the
+     * payload decides visibility by it: an answer authored by a different add-on is not this
+     * questionnaire's answer even if the question id happens to match.
+     */
+    suspend fun getPayloadAnswers(taskIds: List<String>): List<PayloadAnswerRow> =
+        taskIds.chunked(PathBindChunk).flatMap { chunk -> getPayloadAnswersChunk(chunk) }
+
+    @Query(
+        """
+        SELECT taskId, questionId, kind, value, authoredAddOnId, authoredAddOnVersion,
+               createdAt, updatedAt
+        FROM task_review_answers
+        WHERE taskId IN (:taskIds)
+        ORDER BY taskId, createdAt, questionId
+        """
+    )
+    protected abstract suspend fun getPayloadAnswersChunk(
+        taskIds: List<String>
+    ): List<PayloadAnswerRow>
 }

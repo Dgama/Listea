@@ -186,6 +186,15 @@ data class MediaNavigator(
     val subtitle: String? = null,
     /** The right zone's label, already written: `3(2/3)/7` for a queue with levels under it, `3 / 7` without. */
     val counter: String? = null,
+    /**
+     * The queue the counter's outer number names, and the way to jump through it.
+     *
+     * Present only when there is somewhere to jump: a surface passes null when the counter names
+     * only an asset level, when the queue holds at most one entry, or when the current index is not
+     * known. Null leaves the counter as plain text, which is what every surface drew before there
+     * was a list behind it.
+     */
+    val queueJump: MediaQueueJump? = null,
     /** The queue's own step controls. */
     val onPrevious: (() -> Unit)? = null,
     val onNext: (() -> Unit)? = null,
@@ -472,6 +481,9 @@ private fun MediaTopBar(navigator: MediaNavigator) {
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val stepSize =
             if (maxWidth < NavigatorStepCompactBelow) NavigatorStepCompactSize else 48.dp
+        // Read here and carried down: inside the Row below, the bar's width is reached through
+        // two receivers, and naming it once keeps the counter's popup cap unambiguous.
+        val barWidth = maxWidth
 
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -548,12 +560,11 @@ private fun MediaTopBar(navigator: MediaNavigator) {
                         onClick = navigator.onPrevious
                     )
                 }
-                Text(
-                    counter,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    modifier = Modifier.padding(horizontal = 2.dp)
+                MediaQueueCounter(
+                    counter = counter,
+                    queue = navigator.queueJump,
+                    maxWidth = barWidth,
+                    height = stepSize
                 )
                 if (navigator.hasAssetSteps) {
                     MediaStepButton(
@@ -834,8 +845,9 @@ private val NavigatorTitleMaxWidth = 120.dp
  *
  * The arithmetic behind the number, so that a later change to the bar has something to check
  * against. On a bar wide enough to have both names, the fixed zones are five controls at 48dp
- * (240dp) and a counter of up to six glyphs (about 55dp); the item's name and the file's name
- * share what is left, and the item's name alone needs about 70dp to say "Whatsapp". Add a margin
+ * (240dp) and a counter of up to six glyphs (about 55dp) plus the 12dp chevron that marks it as the
+ * queue's control; the item's name and the file's name share what is left, and the item's name
+ * alone needs about 70dp to say "Whatsapp". Add a margin
  * for the horizontal inset the bar does not own and the total is around 365dp. Read it as "the
  * controls give way first, and only once the name has already been reduced to nothing would
  * shrinking them further buy anything".

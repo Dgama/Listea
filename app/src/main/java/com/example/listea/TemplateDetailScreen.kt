@@ -410,7 +410,7 @@ private fun TemplateUnavailable(modifier: Modifier, title: String, detail: Strin
  * Blank is still refused, and for the same reason: an unnamed template is one nobody can find.
  */
 @Composable
-private fun DraftTextField(
+internal fun DraftTextField(
     label: String,
     value: String,
     onValueChange: (String) -> Unit,

@@ -54,6 +54,9 @@ fun FileViewerScreen(
     // the user, fall back to showing the one they actually tapped, without siblings to page to.
     val index = files.indexOfFirst { it.uri.toString() == currentUri }
     val entry = files.getOrNull(index) ?: initial
+    // The files beside this one as the jump list names them. They share one folder, so a path on
+    // every row would say the same thing twice; the name is the whole of what distinguishes them.
+    val queueEntries = remember(files) { files.map { MediaQueueEntry(it.name) } }
 
     // The system bars come and go with Listea's own, so a hidden chrome means a full-bleed file.
     MediaSystemBars(chromeVisible)
@@ -68,6 +71,16 @@ fun FileViewerScreen(
             title = entry.name,
             onBack = onClose,
             counter = if (index >= 0) "${index + 1} / ${files.size}" else null,
+            // The same move the arrows make: viewing is paging, and paging changes nothing.
+            queueJump = if (files.size > 1 && index >= 0) {
+                MediaQueueJump(
+                    entries = queueEntries,
+                    current = index,
+                    onJump = { currentUri = files[it].uri.toString() }
+                )
+            } else {
+                null
+            },
             // The gallery has no second level: the files beside this one *are* the queue, so the
             // two arrows are the whole of its navigation and a side with no neighbour is drawn
             // disabled rather than offered and refused.

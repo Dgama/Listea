@@ -20,6 +20,7 @@ data class CatalogProjection(
     val displayName: String,
     val isCompleted: Boolean,
     val assetControls: String,
+    val addOn: String,
     val assetCount: Int,
     val missingAssets: Int,
     val sizeBytes: Long?,
@@ -27,12 +28,18 @@ data class CatalogProjection(
 )
 
 /**
- * One Task's recorded asset control, for the queries that need it beside something else rather than
+ * One Task's recorded attachments, for the queries that need them beside something else rather than
  * on a row of its own. Query result, not a table — see `ListsDao.observeAssetControlsForList`.
+ *
+ * [addOn] is the Task's stamped questionnaire reference, raw as `task_imports.addOn` holds it. It
+ * travels with the asset controls because both are facts about the same import and are read by the
+ * same review surface; they are still separate columns, because one is a list of file templates and
+ * the other is a single Task-level add-on.
  */
 data class TaskAssetControls(
     val taskId: String,
-    val assetControls: String
+    val assetControls: String,
+    val addOn: String = ""
 )
 
 /**
@@ -84,6 +91,17 @@ data class CatalogRow(
      * current default.
      */
     val assetControls: String = "",
+
+    /**
+     * The add-on this Task was imported with, as `task_imports.addOn` holds it.
+     *
+     * Here for the same reason [assetControls] is, and it took a device walk to learn it: a queue
+     * built from catalog rows is a review surface, and a review surface that does not carry the
+     * stamp cannot draw the add-on page — swiping off the last Asset went straight to the next Task
+     * while the Task's own row said it had a questionnaire attached. Raw and per Task, resolved by
+     * [AddOnResolver] where the page is drawn. `""` means no add-on and therefore no extra page.
+     */
+    val addOn: String = "",
 
     /** True when at least one required Asset has no viewer in this build — e.g. a text file. */
     val hasUnviewableAsset: Boolean,

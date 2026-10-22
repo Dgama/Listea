@@ -44,9 +44,12 @@ import java.util.UUID
         TemplateEntity::class,
         TemplateVersionEntity::class,
         SchemaBackfillEntity::class,
-        AssetMarkEntity::class
+        AssetMarkEntity::class,
+        AddOnEntity::class,
+        AddOnVersionEntity::class,
+        TaskReviewAnswerEntity::class
     ],
-    version = 28,
+    version = 29,
     exportSchema = true
 )
 abstract class ListeaDatabase : RoomDatabase() {
@@ -61,6 +64,11 @@ abstract class ListeaDatabase : RoomDatabase() {
      * *caller* may do what, and Room's accessors are the only place that is expressed.
      */
     abstract fun templateWriteDao(): TemplateWriteDao
+
+    /** Add-ons: the read side and the append-only write side, the split templates already use. */
+    abstract fun addOnDao(): AddOnDao
+
+    abstract fun addOnWriteDao(): AddOnWriteDao
 
     companion object {
         /** V3 added the optional webhook action and its last-delivery record to each list. */
@@ -1321,6 +1329,70 @@ abstract class ListeaDatabase : RoomDatabase() {
         }
 
         /**
+         * Gives a Task a questionnaire that is nobody's yet.
+         *
+         * Three new tables and two columns, and no existing row changes meaning. `sources.addOn` and
+         * `task_imports.addOn` default to `''`, which reads as *no add-on attached*; a Todo that
+         * predates the round therefore gains no page and keeps exporting exactly what it did, which
+         * is the behaviour-preserving direction every column added after a feature shipped must
+         * take.
+         *
+         * `task_review_answers` cascades from `tasks` and from nothing else. The add-on a row was
+         * authored under is a plain pair of columns, not a foreign key, because removing or editing
+         * an add-on must hide an answer rather than delete it — the same rule `task_asset_marks`
+         * follows one layer down.
+         *
+         * Columns are written one to a line so this block and `29.json` can be diffed by eye.
+         */
+        internal val MIGRATION_28_29 = object : Migration(28, 29) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `addons` (" +
+                        "`id` TEXT NOT NULL, " +
+                        "`name` TEXT NOT NULL, " +
+                        "`createdAt` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`id`))"
+                )
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `addon_versions` (" +
+                        "`addOnId` TEXT NOT NULL, " +
+                        "`version` INTEGER NOT NULL, " +
+                        "`questions` TEXT NOT NULL, " +
+                        "`questionsVersion` INTEGER NOT NULL, " +
+                        "`createdAt` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`addOnId`, `version`), " +
+                        "FOREIGN KEY(`addOnId`) REFERENCES `addons`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE)"
+                )
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `task_review_answers` (" +
+                        "`taskId` TEXT NOT NULL, " +
+                        "`questionId` TEXT NOT NULL, " +
+                        "`kind` TEXT NOT NULL, " +
+                        "`value` TEXT NOT NULL, " +
+                        "`authoredAddOnId` TEXT NOT NULL, " +
+                        "`authoredAddOnVersion` INTEGER NOT NULL, " +
+                        "`createdAt` INTEGER NOT NULL, " +
+                        "`updatedAt` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`taskId`, `questionId`), " +
+                        "FOREIGN KEY(`taskId`) REFERENCES `tasks`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE)"
+                )
+                connection.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_task_review_answers_taskId " +
+                        "ON `task_review_answers` (`taskId`)"
+                )
+                connection.execSQL(
+                    "ALTER TABLE `sources` ADD COLUMN `addOn` TEXT NOT NULL DEFAULT ''"
+                )
+                connection.execSQL(
+                    "ALTER TABLE `task_imports` ADD COLUMN `addOn` TEXT NOT NULL DEFAULT ''"
+                )
+                Log.i("ListeaDatabase", "28 -> 29")
+            }
+        }
+
+        /**
          * Gives every Task and Asset its public id, reading everything before writing anything.
          *
          * The same rule [backfillSelections] records: a cursor stepping over a table while that
@@ -2081,7 +2153,8 @@ abstract class ListeaDatabase : RoomDatabase() {
                     MIGRATION_24_25,
                     MIGRATION_25_26,
                     MIGRATION_26_27,
-                    MIGRATION_27_28
+                    MIGRATION_27_28,
+                    MIGRATION_28_29
                 )
                     .build()
                     .also { instance = it }

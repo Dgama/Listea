@@ -293,5 +293,9 @@ private fun reviewItemFor(
     // Off the catalog row, which is where an import's own answers live — the same place the name,
     // the measurements and the block come from, and frozen for the same reason as those: a round
     // fixes what the *material* is and re-reads only what has been decided about it.
-    assetControls = row.assetControls
+    assetControls = row.assetControls,
+    // And the Task's own add-on beside them, because the page that draws it is built from this item
+    // and not from the catalog: a queue that dropped the stamp reviewed Tasks as if no questionnaire
+    // were attached, while their rows said otherwise.
+    addOn = row.addOn
 )

@@ -707,7 +707,17 @@ data class ReviewItem(
      * Bounded to the Task's own row, like [rootRelativePath] and for the same reason: a Task a
      * payload names must be answerable without walking back to the Todo that imported it.
      */
-    val assetControls: String = ""
+    val assetControls: String = "",
+
+    /**
+     * The add-on this Task was imported with, as `task_imports.addOn` holds it.
+     *
+     * Raw and undecoded, like [assetControls] and for the same reason: the reference is a fact about
+     * the import, and resolving it into questions is [AddOnResolver]'s answer at the moment the
+     * questionnaire is drawn. `""` means no add-on and therefore no extra page. A Task no Todo owns
+     * has no import row and defaults to empty, which is the honest reading.
+     */
+    val addOn: String = ""
 )
 
 /**
@@ -738,7 +748,8 @@ val ReviewItem.taskDecisions: AssetDecisions
  */
 fun ListItemEntity.toReviewItem(
     rootUri: String?,
-    assetControls: String = ""
+    assetControls: String = "",
+    addOn: String = ""
 ): ReviewItem = ReviewItem(
     id = id,
     // The row's own column, not a projection: `list_items.taskId` is where membership records
@@ -764,7 +775,10 @@ fun ListItemEntity.toReviewItem(
     // Task's and reaches this entity only from `task_imports`, which the list query does not join,
     // so the caller reads it beside and hands it in. Defaulted, because a manual item has no
     // import row at all and a Task with no record is the honest answer for it.
-    assetControls = assetControls
+    assetControls = assetControls,
+    // The same parameter contract, for the same reason: the add-on is the Task's and reaches this
+    // entity only from `task_imports`.
+    addOn = addOn
 )
 
 /**

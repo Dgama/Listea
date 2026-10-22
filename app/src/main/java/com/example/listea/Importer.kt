@@ -1,6 +1,7 @@
 package com.example.listea
 
 import com.example.listea.data.ScannedFile
+import com.example.listea.domain.AddOnVersionRef
 import com.example.listea.domain.ExportChoice
 import com.example.listea.domain.ExportKind
 import com.example.listea.domain.TemplateVersionRef
@@ -89,6 +90,29 @@ data class ImportOptions(
      * before confirming is a refusal that is honoured rather than a notice that outvoted it.
      */
     val upgradeTemplates: Boolean = false,
+
+    /**
+     * The add-on this run attaches, or null for none.
+     *
+     * **At most one, and it is a choice rather than a default.** Unlike [templates], a new Todo
+     * does not start with one: an add-on is a questionnaire somebody deliberately decided to ask,
+     * and a Task with no page after its last asset is the ordinary Task. The dialog's *Add an
+     * add-on* section starts at *None*.
+     *
+     * A [AddOnVersionRef] rather than a copy of the questions, for the same reason [templates]
+     * holds references: the questions are whatever the add-on's current version asks, resolved from
+     * the add-on tables when somebody looks.
+     */
+    val addOn: AddOnVersionRef? = null,
+
+    /**
+     * Whether this run adopts the offered current version of the add-on the Todo holds.
+     *
+     * **True for Refresh Import, false everywhere else**, exactly as [upgradeTemplates] is: a
+     * refresh carries the Todo forward to the version the picker offered, while Create submits what
+     * it was given and a sync re-stamps what the Todo already names.
+     */
+    val upgradeAddOn: Boolean = false,
 
     /**
      * Whether this run leaves the Todo following its upstream: scanning it on entry and importing

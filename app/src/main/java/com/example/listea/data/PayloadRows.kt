@@ -1,5 +1,10 @@
 package com.example.listea.data
 
+import com.example.listea.domain.AddOnAnswer
+import com.example.listea.domain.AddOnId
+import com.example.listea.domain.AddOnQuestionType
+import com.example.listea.domain.parseAddOnAnswer
+
 /**
  * The Task-level facts the v0.6.0 payload needs, read in one query.
  *
@@ -7,14 +12,17 @@ package com.example.listea.data
  * catalog. The payload falls back to the title on the row that reached the Task; an empty string
  * here would be a name the user never gave.
  *
- * [assetControls] is null for the same reason: with no import there is no attachment, which the
- * payload renders as an empty `templates` array rather than as an error.
+ * [assetControls] and [addOn] are null for the same reason: with no import there is no attachment,
+ * which the payload renders as an empty `templates` array and no `addOn` object rather than as an
+ * error. They are separate columns because they are separate layers: `assetControls` is a list of
+ * file templates, `addOn` is one Task-level questionnaire reference.
  */
 data class PayloadTaskRow(
     val taskId: String,
     val publicId: String,
     val displayName: String?,
-    val assetControls: String?
+    val assetControls: String?,
+    val addOn: String? = null
 )
 
 /**
@@ -64,3 +72,43 @@ data class PayloadMarkRow(
     val documentFingerprint: String,
     val createdAt: Long
 )
+
+/**
+ * One stored add-on answer as the export sees it.
+ *
+ * [authoredAddOnId] and [authoredAddOnVersion] are read because visibility is a question about them:
+ * an answer belongs to the questionnaire that asked, so a Task whose add-on was replaced does not
+ * inherit the previous one's answers even if a question id collided. [kind] and [value] are the raw
+ * stored pair; the exporter parses them and omits a row it cannot read rather than sending a guess.
+ */
+data class PayloadAnswerRow(
+    val taskId: String,
+    val questionId: String,
+    val kind: String,
+    val value: String,
+    val authoredAddOnId: String,
+    val authoredAddOnVersion: Int,
+    val createdAt: Long,
+    val updatedAt: Long
+)
+
+/**
+ * The domain answer a payload row holds, or null when this build's vocabulary cannot read it.
+ *
+ * The same fail-closed rule the entity conversion applies — a kind or value written by a later
+ * build is skipped rather than sent under a guess — kept beside the row because the payload reads
+ * these columns directly rather than through [TaskReviewAnswerEntity].
+ */
+fun PayloadAnswerRow.toAddOnAnswer(): AddOnAnswer? {
+    val type = AddOnQuestionType.fromKey(kind) ?: return null
+    val parsed = parseAddOnAnswer(type, value) ?: return null
+    return AddOnAnswer(
+        questionId = questionId,
+        type = type,
+        value = parsed,
+        authoredAddOnId = AddOnId(authoredAddOnId),
+        authoredAddOnVersion = authoredAddOnVersion,
+        createdAt = createdAt,
+        updatedAt = updatedAt
+    )
+}

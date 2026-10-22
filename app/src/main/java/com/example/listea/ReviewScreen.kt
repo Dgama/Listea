@@ -485,15 +485,19 @@ fun ReviewSession(
     // what v0.5.4 moved: a chip row is a template's buttons now, and there is no app-wide tag list
     // left to fall back to.
     val resolver by viewModel.templateResolver.collectAsStateWithLifecycle()
+    // The add-on tables, resolved once per emission: what this session asks is a reference on the
+    // Task, and the questions behind it are whatever the attached version holds now.
+    val addOnResolver by viewModel.addOnResolver.collectAsStateWithLifecycle()
     var currentTaskId by rememberSaveable(sessionKey) { mutableStateOf<String?>(null) }
-    // Which file of the Task is on screen. Keyed on the Task rather than reset by an effect, so
-    // arriving at another one shows its *first* file on the very first frame instead of flashing
-    // the page the last Task was left on. Saved with the session, so a rotation keeps the page.
+    // Which *page* of the Task is on screen: one of its Assets, or the add-on page that follows the
+    // last one. Keyed on the Task rather than reset by an effect, so arriving at another one shows
+    // its first page on the very first frame instead of flashing the page the last Task was left
+    // on. Saved with the session, so a rotation keeps the page.
     //
     // Held here, beside the Task the queue is on, because the navigator bar states both at once:
     // the two levels are one control group, and a selection living inside the viewer would have to
     // be reported back up for the bar to draw it and driven back down for the arrows to move it.
-    var assetIndex by rememberSaveable(currentTaskId) { mutableStateOf(0) }
+    var pageIndex by rememberSaveable(currentTaskId) { mutableStateOf(0) }
     var finished by rememberSaveable(sessionKey) { mutableStateOf(false) }
     // Not saved: reopening Info after a rotation would be answering a question nobody asked.
     var infoOpen by remember { mutableStateOf(false) }
@@ -545,6 +549,9 @@ fun ReviewSession(
     }
 
     val item = items[index]
+    // The queue as the jump list names it. Rebuilt only when the round's items change, so stepping
+    // or paging never re-maps the whole queue for a menu that is not open.
+    val queueEntries = remember(items) { reviewQueueEntries(items) }
     // The frame takes real room here, so the system bars are never hidden: there is no full-bleed
     // picture for them to be hiding *from*. They are still forced light, which is the other half
     // of what this does — what sits under them is the navigator's scrim, not the app's surface.
@@ -592,7 +599,20 @@ fun ReviewSession(
     // selection that was already made, and the honest answer is to show what is still there
     // instead of writing state from a composition.
     val assets = assetsOf(item)
-    val currentAsset = assetIndex.coerceIn(0, maxOf(assets.lastIndex, 0))
+    // The questionnaire this Task was stamped with, if this build can read it. A reference this
+    // build cannot resolve draws nothing — the fail-closed rule the resolver states — so the Task
+    // simply has no extra page rather than a page it cannot fill.
+    val storedAddOn = addOnResolver.versionFor(item.addOn)
+        ?.takeIf { it.questions.isNotEmpty() }
+    val hasAddOnPage = storedAddOn != null
+    val pageCount = taskPageCount(assets.size, hasAddOnPage)
+    // The pages as the jump list names them, for when the queue itself has only one Task to move
+    // between. The add-on page is one of them, and its row says so — see [reviewPageEntries].
+    val pageEntries = remember(assets, storedAddOn) { reviewPageEntries(assets, storedAddOn) }
+    val currentPage = pageIndex.coerceIn(0, maxOf(pageCount - 1, 0))
+    // The add-on page is the one index past the last Asset. `page` is then null, which every
+    // file-specific value below already reads as *no file* rather than as an error.
+    val onAddOnPage = hasAddOnPage && currentPage == assets.size
 
     // The bands' two answers, resolved here because this is the only place that knows both which
     // Task is on screen and which of its files. The chip row belongs to the *file* — its kind comes
@@ -603,7 +623,7 @@ fun ReviewSession(
     //
     // `name` and not `relativePath`: a classifier wants the basename, and it is what
     // `reviewBlockFor` already hands `assetViewerAvailable` for the same file.
-    val page = assets.getOrNull(currentAsset)
+    val page = if (onAddOnPage) null else assets.getOrNull(currentPage)
     val kind = assetKindOf(page?.name.orEmpty())
     // Null is a real answer here and is resolved to the empty row rather than to a default: nothing
     // attached admits this file's kind, so nothing offers it a button. See [TemplateResolver].
@@ -613,11 +633,16 @@ fun ReviewSession(
     // Task with no Asset at all — a manual item — where there is no pair to have recorded anything
     // and the middle band is not drawn in any case.
     val pageDecisions = page?.decisions ?: AssetDecisions()
-    // A level with nothing to move between is not a level, so a one-file Task keeps the bar it has
-    // always had: no file name beside the title, no `(1 / 1)`, no inner pair of arrows.
-    val hasAssetLevel = assets.size > 1
-    val assetForward = assetStep(assets.size, currentAsset, forward = true)
-    val assetBack = assetStep(assets.size, currentAsset, forward = false)
+    // A level with nothing to move between is not a level, so a one-file Task with no add-on keeps
+    // the bar it has always had: no page name beside the title, no `(1 / 1)`, no inner arrows.
+    val hasPageLevel = pageCount > 1
+    val pageForward = pageStep(pageCount, currentPage, forward = true)
+    val pageBack = pageStep(pageCount, currentPage, forward = false)
+
+    // This Task's answers, live: the page writes as the reviewer taps and its own flow is what
+    // draws the selection, so a re-read is the page noticing a write it just made.
+    val answers by remember(item.taskId) { viewModel.observeTaskAnswers(item.taskId) }
+        .collectAsStateWithLifecycle(initialValue = emptyList())
 
     // The middle band, and null where there is no file for it to be about. A Task with no Asset —
     // a legacy manual item — has no pair, so it has nowhere to record an action and no kind to
@@ -638,21 +663,32 @@ fun ReviewSession(
     // none may remove: the band is the same dismissible strip the other kinds get, holding only the
     // icon that opens what this file carries. Tapping the page where no highlight sits puts it away
     // and brings it back, exactly as on a picture.
-    val assetBand: (@Composable () -> Unit)? = page?.let { current ->
-        if (kind == AssetKind.PDF) {
-            {
-                MediaInfoBar(contentDescription = "PDF info") { infoOpen = true }
-            }
-        } else {
-            {
-                ReviewAssetControls(
-                    decisions = current.decisions,
-                    control = control,
-                    onToggleAction = { action, enabled ->
-                        viewModel.setItemAction(item, current, action, enabled)
-                    },
-                    onInfo = { infoOpen = true }
-                )
+    //
+    // The add-on page has no file and no pair, so its band is the frame's other half alone: the
+    // Info icon, opening the Task's sheet. It is the static frame every template carries, applied
+    // to a page that carries no template of its own.
+    val assetBand: (@Composable () -> Unit)? = when {
+        onAddOnPage -> {
+            { MediaInfoBar(contentDescription = "Add-on info") { infoOpen = true } }
+        }
+
+        page == null -> null
+
+        else -> {
+            val current = page
+            if (kind == AssetKind.PDF) {
+                { MediaInfoBar(contentDescription = "PDF info") { infoOpen = true } }
+            } else {
+                {
+                    ReviewAssetControls(
+                        decisions = current.decisions,
+                        control = control,
+                        onToggleAction = { action, enabled ->
+                            viewModel.setItemAction(item, current, action, enabled)
+                        },
+                        onInfo = { infoOpen = true }
+                    )
+                }
             }
         }
     }
@@ -708,7 +744,13 @@ fun ReviewSession(
         navigator = MediaNavigator(
             title = item.title,
             onBack = onBack,
-            subtitle = assets.getOrNull(currentAsset)?.name?.takeIf { hasAssetLevel },
+            // The page's own name, and the add-on page's is its word: a questionnaire is not a
+            // file and must not borrow the name of the last one.
+            subtitle = when {
+                !hasPageLevel -> null
+                onAddOnPage -> "Add-on"
+                else -> page?.name
+            },
             // What the *Task* is marked with, under its name and above the file's — the fold of
             // every pair it presents, so a tag set on its video is legible while its photograph is
             // on screen, and a tap that clears the picture does not take the answer with it.
@@ -723,10 +765,33 @@ fun ReviewSession(
             // The queue's own position, and inside it the page's. For Quick Review this is the
             // folder's items and not the owning list's total: completion progress is a list's
             // business and lives on its page.
-            counter = if (hasAssetLevel) {
-                "${index + 1}(${currentAsset + 1}/${assets.size})/${items.size}"
+            counter = if (hasPageLevel) {
+                "${index + 1}(${currentPage + 1}/$pageCount)/${items.size}"
             } else {
                 "${index + 1} / ${items.size}"
+            },
+            // The list behind the *outer* number: Tasks, never pages. Jumping is goTo, the same
+            // move the arrows make, so List Review records the cursor it would have recorded and
+            // Quick Review records nothing.
+            //
+            // When the round holds a single Task there is no outer list to open, and the counter
+            // still names one — its pages. The list then falls back to the inner level, and a jump
+            // is the page move the inner arrows make: it changes no cursor, because the cursor
+            // names the Task and a page is not one.
+            queueJump = when {
+                items.size > 1 -> MediaQueueJump(
+                    entries = queueEntries,
+                    current = index,
+                    onJump = { goTo(items[it]) }
+                )
+
+                pageCount > 1 -> MediaQueueJump(
+                    entries = pageEntries,
+                    current = currentPage,
+                    onJump = { pageIndex = it }
+                )
+
+                else -> null
             },
             // Stepping here is navigation and nothing else, which is what §7 asks of these
             // controls and what the swipe deliberately is not. Neither of them submits, completes
@@ -734,9 +799,9 @@ fun ReviewSession(
             // to go.
             onPrevious = navigation.previous?.let { { dispatch(TaskAction.PreviousTask) } },
             onNext = navigation.next?.let { { dispatch(TaskAction.NextTask) } },
-            onPreviousAsset = assetBack?.let { page -> { assetIndex = page } },
-            onNextAsset = assetForward?.let { page -> { assetIndex = page } },
-            hasAssetSteps = hasAssetLevel
+            onPreviousAsset = pageBack?.let { to -> { pageIndex = to } },
+            onNextAsset = pageForward?.let { to -> { pageIndex = to } },
+            hasAssetSteps = hasPageLevel
         ),
         chromeVisible = chromeVisible,
         // The checkbox never leaves, however far the file's own controls are put away: it is the
@@ -764,7 +829,7 @@ fun ReviewSession(
     ) {
         AssetRun(
             item = item,
-            selectedIndex = currentAsset,
+            selectedIndex = currentPage,
             player = player,
             imageLoader = imageLoader,
             settings = settings,
@@ -788,8 +853,28 @@ fun ReviewSession(
             // Backwards is never a judgment: it steps the queue and changes nothing about the
             // Task that was left behind.
             onLeaveBack = { dispatch(TaskAction.PreviousTask) },
-            onSelectAsset = { assetIndex = it },
+            onSelectAsset = { pageIndex = it },
             onTap = { chromeVisible = !chromeVisible },
+            // The page after the last Asset. Its presence is what makes the page count one more
+            // than the files, and its absence is what leaves every other Task exactly as it was.
+            addOnPage = storedAddOn?.let { addOn ->
+                {
+                    AddOnPage(
+                        addOn = addOn,
+                        answers = answers,
+                        onAnswer = { question, value ->
+                            viewModel.setAddOnAnswer(item.taskId, question.id, value)
+                        },
+                        onClear = { question ->
+                            viewModel.clearAddOnAnswer(item.taskId, question.id)
+                        },
+                        // The page's draft state is keyed by Task as well as question: two Tasks may
+                        // be attached to the same add-on, and the field must not carry one's words
+                        // into the other when the queue moves.
+                        taskId = item.taskId
+                    )
+                }
+            },
             modifier = Modifier.fillMaxSize()
         )
     }
@@ -799,12 +884,16 @@ fun ReviewSession(
             info = reviewItemInfo(item, pageDecisions, resolver, chrome.listTitle),
             // The file the sheet's rows and its two offers are about. Without it a Task standing
             // for several files has no single source to save or share and the offers disappear —
-            // which is exactly what a folder-as-Task used to do.
+            // which is exactly what a folder-as-Task used to do. On the add-on page this is null,
+            // so the sheet has no file to save or share, which is the truth of that page.
             asset = page,
             // The PDF's marks, placed and missing alike. The sheet is the only place a mark this
             // document cannot place is named; nothing on the page says so. Null for every other
             // kind, where a marks section would be a question the file cannot answer.
             marks = if (kind == AssetKind.PDF) pdfMarkInfo else null,
+            // What this Task's questionnaire asked and what the reviewer said, including answers
+            // its current version no longer asks. Drawn on every page of a Task that has one.
+            addOnInfo = addOnInfoOf(storedAddOn, answers, addOnResolver),
             onDismiss = { infoOpen = false }
         )
     }
@@ -852,6 +941,14 @@ fun AssetRun(
     onSelectAsset: (Int) -> Unit,
     onTap: () -> Unit,
     modifier: Modifier,
+    /**
+     * The Task's questionnaire, drawn as the page after its last Asset.
+     *
+     * Null is the ordinary Task and keeps the run exactly as many pages as it has files. Given one,
+     * the run is one page longer and every swipe past the last file arrives here rather than
+     * leaving the Task — which is the whole of where an add-on sits.
+     */
+    addOnPage: (@Composable () -> Unit)? = null,
     pdfTools: List<TemplateButton> = emptyList(),
     pdfMarks: List<AssetMark> = emptyList(),
     onPdfCreateMark: ((TemplateButton, String?, QuoteAnchor) -> Unit)? = null,
@@ -861,9 +958,11 @@ fun AssetRun(
     onPdfMarksResolved: ((List<PdfMarkInfo>) -> Unit)? = null
 ) {
     val assets = assetsOf(item)
-    val asset = assets.getOrNull(selectedIndex)
+    val pageCount = taskPageCount(assets.size, addOnPage != null)
+    val onAddOnPage = addOnPage != null && selectedIndex == assets.size
+    val asset = if (onAddOnPage) null else assets.getOrNull(selectedIndex)
 
-    if (asset == null) {
+    if (asset == null && !onAddOnPage) {
         // No Asset, no viewer: a manual item is still a card in the queue, swipeable and
         // completable exactly like a file's, but with nothing to render.
         SwipeCard(
@@ -882,9 +981,11 @@ fun AssetRun(
     }
 
     // Asked once per composition and read by the card and by both directions of the gesture, so
-    // the three cannot disagree about there being a page to move to.
-    val forward = assetStep(assets.size, selectedIndex, forward = true)
-    val back = assetStep(assets.size, selectedIndex, forward = false)
+    // the three cannot disagree about there being a page to move to. Pages, not Assets: the
+    // questionnaire is the last page, and stepping onto it from the last file is an interior move
+    // that leaves nothing.
+    val forward = pageStep(pageCount, selectedIndex, forward = true)
+    val back = pageStep(pageCount, selectedIndex, forward = false)
 
     SwipeCard(
         // The page and not just the Task: the key is what recentres the card and drops the zoom,
@@ -898,21 +999,28 @@ fun AssetRun(
         modifier = modifier,
         onTap = onTap
     ) { zoom ->
-        ItemPreview(
-            asset = asset,
-            player = player,
-            imageLoader = imageLoader,
-            settings = settings,
-            zoom = zoom,
-            modifier = Modifier.fillMaxSize(),
-            pdfTools = pdfTools,
-            pdfMarks = pdfMarks,
-            onPdfCreateMark = onPdfCreateMark,
-            onPdfEditMark = onPdfEditMark,
-            onPdfDeleteMark = onPdfDeleteMark,
-            onPdfRelocateMark = onPdfRelocateMark,
-            onPdfMarksResolved = onPdfMarksResolved
-        )
+        if (onAddOnPage) {
+            // The questionnaire is not a file: there is nothing to fit, so the card carries no
+            // aspect and the page is laid out by its own scroll.
+            LaunchedEffect(zoom) { zoom.contentAspect = null }
+            addOnPage?.invoke()
+        } else {
+            ItemPreview(
+                asset = asset!!,
+                player = player,
+                imageLoader = imageLoader,
+                settings = settings,
+                zoom = zoom,
+                modifier = Modifier.fillMaxSize(),
+                pdfTools = pdfTools,
+                pdfMarks = pdfMarks,
+                onPdfCreateMark = onPdfCreateMark,
+                onPdfEditMark = onPdfEditMark,
+                onPdfDeleteMark = onPdfDeleteMark,
+                onPdfRelocateMark = onPdfRelocateMark,
+                onPdfMarksResolved = onPdfMarksResolved
+            )
+        }
     }
 }
 
@@ -932,6 +1040,29 @@ internal fun assetStep(assetCount: Int, index: Int, forward: Boolean): Int? {
     if (index !in 0 until assetCount) return null
     val next = if (forward) index + 1 else index - 1
     return next.takeIf { it in 0 until assetCount }
+}
+
+/**
+ * How many pages a Task has: one per Asset, and one more when a questionnaire follows it.
+ *
+ * The add-on page is the *last* page, which is the user's fixed position for it — no start/end
+ * attribute exists to move it. A Task with no add-on is exactly as many pages as it has Assets, so
+ * every existing Task pages exactly as it did.
+ */
+internal fun taskPageCount(assetCount: Int, hasAddOn: Boolean): Int =
+    assetCount + if (hasAddOn) 1 else 0
+
+/**
+ * Which page of a Task a horizontal swipe moves to, or null when the swipe leaves the Task.
+ *
+ * [assetStep]'s sibling, one level up: an Asset is a page and the add-on is the page after the last
+ * one. Keeping it a separate function is what lets the review surface count the questionnaire while
+ * the folder browser, which shows files rather than Tasks, goes on paging Assets alone.
+ */
+internal fun pageStep(pageCount: Int, index: Int, forward: Boolean): Int? {
+    if (index !in 0 until pageCount) return null
+    val next = if (forward) index + 1 else index - 1
+    return next.takeIf { it in 0 until pageCount }
 }
 
 /**
@@ -967,7 +1098,8 @@ fun ReviewItemInfoSheet(
     info: ReviewItemInfo,
     asset: ReviewAsset?,
     onDismiss: () -> Unit,
-    marks: List<PdfMarkInfo>? = null
+    marks: List<PdfMarkInfo>? = null,
+    addOnInfo: AddOnInfo? = null
 ) {
     val context = LocalContext.current
     val sourceUri = asset?.sourceUri?.takeIf { it.isNotEmpty() } ?: info.sourceUri
@@ -999,6 +1131,10 @@ fun ReviewItemInfoSheet(
             // (a read-only viewer, or a file that is not a PDF), not that the file is unmarked.
             marks?.let { addAll(pdfMarkRows(it)) }
             addAll(mediaFactRows(facts, title))
+            // The Task's questionnaire, after the file's own facts: the answers are about the
+            // whole Task, so they sit below whatever page happens to be on screen — and are drawn
+            // on every one of its pages, including the questionnaire's own.
+            addOnInfo?.let { addAll(addOnInfoRows(it)) }
         },
         footer = sourceUri
             ?.takeIf { !sourceMissing }

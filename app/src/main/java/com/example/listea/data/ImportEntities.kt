@@ -152,6 +152,23 @@ data class SourceEntity(
     val assetControls: String = "",
 
     /**
+     * The add-on this Todo's Tasks will be given, as `encodeAddOnAttachment` writes it.
+     *
+     * One line, `addOnId \t version`, or `""` for none. **At most one**, because an add-on is a
+     * questionnaire about the Task as a whole and v0.7.1 has no position or ordering model that
+     * would let two coexist. The picker in the import dialog is therefore a choice rather than a
+     * set, and there is no scope to overlap and no first-match rule to explain.
+     *
+     * This is what the Todo *asked for*; [TaskImportEntity.addOn] is what a Task *got*. The two can
+     * disagree after an add-on edit or a Todo change, and that disagreement is the point: the Todo
+     * is what the next run will attach, the Task is what it was imported with.
+     *
+     * `""` is not "the default add-on". There is no default — an add-on is a choice somebody made
+     * — and a Todo that has never chosen one has a Task whose pages are the files and nothing more.
+     */
+    val addOn: String = "",
+
+    /**
      * How this Todo's decisions leave the app, as `domain/Exports.kt` encodes it.
      *
      * **The Todo's own answer, and the reason the plural case exists at all.** A List may hold Tasks
@@ -258,7 +275,20 @@ data class TaskImportEntity(
      * [SourceEntity.assetControls] — and a version this build cannot decode is skipped rather than
      * half-read, so a row written by a later release draws an empty bar rather than a guess.
      */
-    val assetControls: String = ""
+    val assetControls: String = "",
+
+    /**
+     * The add-on this Task was imported with, as `encodeAddOnAttachment` writes it.
+     *
+     * **This is the copy review reads**, for the same reason [assetControls] is: a Task must be
+     * able to say which questionnaire it shows without walking back to its Todo, and a later edit
+     * to the add-on or to the Todo must not silently re-label Tasks that were already reviewed.
+     *
+     * It is re-stamped by every run from the answer that run was given, not from the Todo's row.
+     * `""` reads as no add-on, which is the state of every Task imported before v0.7.1 and of every
+     * run that chose none.
+     */
+    val addOn: String = ""
 )
 
 /**

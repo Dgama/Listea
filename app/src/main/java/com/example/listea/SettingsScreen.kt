@@ -107,13 +107,14 @@ object SettingsRoute {
     const val Review = "review"
     const val Media = "media"
     const val Todos = "todos"
-    const val Templates = "templates"
+    const val TemplatesAndAddOns = "addons"
     const val Exports = "exports"
     const val File = "file"
     const val History = "history"
     const val About = "about"
 
     private const val TemplatePrefix = "template/"
+    private const val AddOnPrefix = "addon/"
     private const val ExportPrefix = "export/"
 
     fun template(templateId: String): String = TemplatePrefix + templateId
@@ -121,6 +122,15 @@ object SettingsRoute {
     fun templateId(route: String): String? =
         if (route.startsWith(TemplatePrefix)) {
             route.removePrefix(TemplatePrefix).takeIf { it.isNotEmpty() }
+        } else {
+            null
+        }
+
+    fun addOn(addOnId: String): String = AddOnPrefix + addOnId
+
+    fun addOnId(route: String): String? =
+        if (route.startsWith(AddOnPrefix)) {
+            route.removePrefix(AddOnPrefix).takeIf { it.isNotEmpty() }
         } else {
             null
         }
@@ -145,6 +155,7 @@ fun SettingsScreen(
 ) {
     val toIndex = { onRoute(SettingsRoute.Index) }
     val openTemplate = SettingsRoute.templateId(route)
+    val openAddOn = SettingsRoute.addOnId(route)
     val openExport = SettingsRoute.exportKind(route)
 
     when {
@@ -154,18 +165,26 @@ fun SettingsScreen(
             onBack = toIndex
         )
 
-        route == SettingsRoute.Templates -> TemplateListScreen(
+        route == SettingsRoute.TemplatesAndAddOns -> TemplateListScreen(
             modifier = modifier,
             viewModel = viewModel,
             onBack = toIndex,
-            onOpen = { onRoute(SettingsRoute.template(it)) }
+            onOpenTemplate = { onRoute(SettingsRoute.template(it)) },
+            onOpenAddOn = { onRoute(SettingsRoute.addOn(it)) }
         )
 
         openTemplate != null -> TemplateDetailScreen(
             modifier = modifier,
             viewModel = viewModel,
             templateId = openTemplate,
-            onBack = { onRoute(SettingsRoute.Templates) }
+            onBack = { onRoute(SettingsRoute.TemplatesAndAddOns) }
+        )
+
+        openAddOn != null -> AddOnDetailScreen(
+            modifier = modifier,
+            viewModel = viewModel,
+            addOnId = openAddOn,
+            onBack = { onRoute(SettingsRoute.TemplatesAndAddOns) }
         )
 
         route == SettingsRoute.Exports -> ExportListScreen(
@@ -241,6 +260,7 @@ private fun SettingsIndexScreen(
 ) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val templates by viewModel.templates.collectAsStateWithLifecycle()
+    val addOns by viewModel.addOns.collectAsStateWithLifecycle()
     val upstreams by viewModel.upstreams.collectAsStateWithLifecycle()
     val historyCount by viewModel.webhookRecordCount.collectAsStateWithLifecycle()
     val roundCount by viewModel.webhookRoundCount.collectAsStateWithLifecycle()
@@ -302,9 +322,16 @@ private fun SettingsIndexScreen(
 
             SettingsIndexRow(
                 icon = Icons.Filled.Widgets,
-                title = "Templates",
-                state = templates?.let { countLabel(it.size, "template") },
-                onOpen = { onRoute(SettingsRoute.Templates) }
+                title = "Templates & Add-ons",
+                // Both counts or neither: half a sentence read from one table would be a claim
+                // about an install nobody has finished reading.
+                state = if (templates == null || addOns == null) {
+                    null
+                } else {
+                    countLabel(templates!!.size, "template") + " · " +
+                        countLabel(addOns!!.size, "add-on")
+                },
+                onOpen = { onRoute(SettingsRoute.TemplatesAndAddOns) }
             )
             IndexDivider()
 

@@ -84,11 +84,13 @@ import com.example.listea.data.ReviewDecisions
 import com.example.listea.data.SharedFileState
 import com.example.listea.data.SourceSummary
 import com.example.listea.data.decodeActionIds
+import com.example.listea.domain.AddOnVersionRef
 import com.example.listea.domain.AssetKind
 import com.example.listea.domain.ExportChoice
 import com.example.listea.domain.ExportKind
 import com.example.listea.domain.decodeExportChoice
 import com.example.listea.domain.encodeExportChoice
+import com.example.listea.domain.StoredAddOnVersion
 import com.example.listea.domain.StoredTemplateVersion
 import com.example.listea.domain.TemplateVersionRef
 import com.example.listea.domain.Templates
@@ -1596,6 +1598,9 @@ private fun ImportConfirmDialogBody(
     // same reason every draft does — a half-read dialog must come back as it was left.
     var groupingOpen by rememberSaveable(runKey) { mutableStateOf(true) }
     var reviewOpen by rememberSaveable(runKey) { mutableStateOf(true) }
+    // Closed by default, because *None* is the ordinary answer and the summary line already says
+    // so: an optional page must not make every Create read like a questionnaire.
+    var addOnOpen by rememberSaveable(runKey) { mutableStateOf(false) }
     var syncOpen by rememberSaveable(runKey) { mutableStateOf(false) }
     var othersOpen by rememberSaveable(runKey) { mutableStateOf(false) }
     var historyOpen by rememberSaveable(runKey) { mutableStateOf(false) }
@@ -1635,6 +1640,28 @@ private fun ImportConfirmDialogBody(
     // what it says points at the page that can do it today.
     var newTemplateTapped by rememberSaveable(runKey) { mutableStateOf(false) }
 
+    // The add-on draft, held encoded for the same bundle-shaped reason as the templates above and
+    // for one more: a Todo has *at most one*, so this is a plain reference rather than a list, and
+    // `""` is the answer *none*. Seeded from the run: Create starts at none, a refresh starts on
+    // whatever the Todo holds.
+    var addOnAttachment by rememberSaveable(runKey) {
+        mutableStateOf(encodeAddOnAttachment(seed.addOn))
+    }
+    val attachedAddOn = remember(addOnAttachment) { decodeAddOnAttachment(addOnAttachment) }
+
+    /**
+     * One add-on chosen, or the chosen one chosen again to clear it.
+     *
+     * **A choice, not a set.** There is no scope to reconcile and nothing to order: one page follows
+     * the Task, so two questionnaires would have to share it. Picking a second row replaces the
+     * first, which is what a radio group says without any extra rule.
+     */
+    fun setAddOn(choice: StoredAddOnVersion, on: Boolean) {
+        addOnAttachment = encodeAddOnAttachment(withAddOn(attachedAddOn, choice, on))
+    }
+
+    var newAddOnTapped by rememberSaveable(runKey) { mutableStateOf(false) }
+
     val method = decodeExportChoice(exportWord, inheritable = false)
     val address = when (addressMode) {
         ADDRESS_KEEP -> seed.webhookUrl.trim()
@@ -1655,6 +1682,13 @@ private fun ImportConfirmDialogBody(
     }
     val versionNotice = if (request.refresh) {
         refreshVersionNotice(attached, request.templates)
+    } else {
+        null
+    }
+    // Read from the draft for the same reason the template notice is: unticking the add-on
+    // withdraws the sentence along with the write it describes.
+    val addOnNotice = if (request.refresh) {
+        refreshAddOnNotice(attachedAddOn, request.addOns)
     } else {
         null
     }
@@ -1692,6 +1726,9 @@ private fun ImportConfirmDialogBody(
                 // version of what it still holds; Create has already picked current versions and
                 // must not "upgrade" anything.
                 upgradeTemplates = seed.upgradeTemplates,
+                // Not part of the gate: an add-on is optional, so an empty page is a valid run.
+                addOn = attachedAddOn,
+                upgradeAddOn = seed.upgradeAddOn,
                 followUpstream = followUpstream,
                 keepStateOnDelete = keepStateOnDelete,
                 webhookUrl = address,
@@ -1833,6 +1870,32 @@ private fun ImportConfirmDialogBody(
                         )
                     }
                 }
+                // The Task-level question, beside the file-level ones rather than among them: an
+                // add-on asks about the whole Task, so it gets its own section and its own page.
+                // It is drawn for a refresh too, because a refresh re-stamps every Task it touches
+                // and this is the run that may carry the Todo's add-on forward.
+                ImportSection(
+                    title = "Add an add-on",
+                    summary = addOnSummary(request.addOns, attachedAddOn),
+                    expanded = addOnOpen,
+                    onToggle = { addOnOpen = !addOnOpen }
+                ) {
+                    ImportAddOnAttach(
+                        choices = request.addOns,
+                        attached = attachedAddOn,
+                        newAddOnTapped = newAddOnTapped,
+                        onToggle = ::setAddOn,
+                        onNewAddOn = { newAddOnTapped = true }
+                    )
+                    if (addOnNotice != null) {
+                        Spacer(Modifier.height(ListeaDimens.RowGap))
+                        Text(
+                            addOnNotice,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
                 // What a round leaves behind, and where it goes. The method is the Todo's own
                 // standing choice — a List may still override the address, and *Inherit* is a
                 // List's word, not a Todo's — and the address beneath it is the value this run
@@ -1954,6 +2017,17 @@ private fun ImportConfirmDialogBody(
                             onSelect = { recoverFrom = it }
                         )
                     }
+                }
+                // Said once more beside the button, because it is a change to material that already
+                // exists rather than a choice about new material. The section can be folded shut;
+                // this line cannot.
+                if (addOnNotice != null) {
+                    Spacer(Modifier.height(ListeaDimens.RowGap))
+                    Text(
+                        addOnNotice,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         },
@@ -2233,6 +2307,149 @@ private fun ImportTemplateRow(
             // move the Todo and the user should know before it does rather than after. The row is
             // already ticked, so there is nothing to press: leaving it alone *is* the instruction,
             // and unticking it is the way to refuse.
+            if (heldVersion != null) {
+                Text(
+                    "Held at version $heldVersion. This run will attach version " +
+                        choice.ref.version + ".",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+/**
+ * What the add-on section says while folded: the name it would attach, the name the Todo holds, or
+ * *None*.
+ *
+ * The held reference can name an add-on this build cannot read — a Delete never happens, but a
+ * version can be written by a newer build. Then there is no row to tick and no name to show, and the
+ * summary says *Attached* rather than *None*, because the Todo does have one and reading it is a
+ * failure rather than an absence.
+ */
+private fun addOnSummary(
+    choices: List<StoredAddOnVersion>,
+    attached: AddOnVersionRef?
+): String {
+    if (attached == null) return "None"
+    return choices.firstOrNull { it.ref.addOnId == attached.addOnId }?.name ?: "Attached"
+}
+
+/**
+ * The add-on step: which questionnaire, if any, follows every Task this run creates.
+ *
+ * **A radio group, not a tick list**, because a Task has one page after its last file and two
+ * questionnaires would have to share it. Choosing the selected row again clears the answer, which is
+ * how *None* is reached — there is no separate None row, so the same gesture that chose an add-on
+ * takes it back.
+ *
+ * **A row is an add-on, not a version of one.** *N questions* is the line under the name; a version is
+ * how the add-on was when a run happened, not a usage. The one place a version is said out loud is
+ * the held line on a refresh, because that is the run about to move the Todo, and the user should
+ * read it before pressing rather than find it in the Tasks afterwards.
+ *
+ * **`New add-on` points at Settings, and the picker is a snapshot.** Add-ons are created under
+ * Settings → Templates & Add-ons, and the rows here were read when the folder was: one created while
+ * this dialog is open appears when it is closed and reopened. That is said rather than hidden, because
+ * a picker that silently omitted what the user just made would read as the create having failed.
+ */
+@Composable
+private fun ImportAddOnAttach(
+    choices: List<StoredAddOnVersion>,
+    attached: AddOnVersionRef?,
+    newAddOnTapped: Boolean,
+    onToggle: (StoredAddOnVersion, Boolean) -> Unit,
+    onNewAddOn: () -> Unit
+) {
+    Column {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "Add an add-on",
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.weight(1f)
+            )
+            TextButton(onClick = onNewAddOn) { Text("New add-on") }
+        }
+        Text(
+            "An add-on asks about the whole Task rather than any one file, and appears as one " +
+                "page after the last file. It is never required: the Task completes with it " +
+                "answered, partly answered or empty.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        if (newAddOnTapped) {
+            Spacer(Modifier.height(ListeaDimens.RowGap))
+            Text(
+                "Add-ons are created under Settings → Templates & Add-ons. This picker was read " +
+                    "when the folder was, so close and reopen this dialog after creating one.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        if (choices.isEmpty()) {
+            Spacer(Modifier.height(ListeaDimens.RowGap))
+            Text(
+                "There are no add-ons to attach.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        choices.forEach { choice ->
+            val isAttached = attached?.addOnId == choice.ref.addOnId
+            ImportAddOnRow(
+                choice = choice,
+                isAttached = isAttached,
+                // The version this Todo holds of the add-on this row is, when the row would move
+                // it. Null for every ordinary row and for the one that is not held at all.
+                heldVersion = attached
+                    ?.takeIf { it.addOnId == choice.ref.addOnId && it.version != choice.ref.version }
+                    ?.version,
+                onToggle = { onToggle(choice, it) }
+            )
+        }
+        // The held reference names a lineage no row offers — an add-on this build cannot read.
+        // Picking any row replaces it; there is nothing to keep, and nothing here can show its name.
+        if (attached != null && choices.none { it.ref.addOnId == attached.addOnId }) {
+            Spacer(Modifier.height(ListeaDimens.RowGap))
+            Text(
+                "The add-on this Todo currently holds is not in this list, so this build cannot " +
+                    "read it. Choosing another replaces it; leaving the section alone keeps it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+/** One add-on, as a radio and what choosing it would give every Task. */
+@Composable
+private fun ImportAddOnRow(
+    choice: StoredAddOnVersion,
+    isAttached: Boolean,
+    heldVersion: Int?,
+    onToggle: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onToggle(!isAttached) }
+            .padding(vertical = ListeaDimens.CompactGap),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // Re-tapping the selected radio clears it, which is the gesture that reaches *None*.
+        RadioButton(selected = isAttached, onClick = { onToggle(!isAttached) })
+        Spacer(Modifier.width(ListeaDimens.RowGap))
+        Column(Modifier.weight(1f)) {
+            Text(choice.name, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "Add-on · " + countLabel(choice.questions.size, "question"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             if (heldVersion != null) {
                 Text(
                     "Held at version $heldVersion. This run will attach version " +

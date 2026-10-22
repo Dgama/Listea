@@ -74,6 +74,8 @@ fun ListItemViewerScreen(
         if (items.none { it.id == currentItemId }) onClose()
     }
     val item = items.getOrNull(index) ?: return
+    // The list's items in the list's order, as the jump list names them.
+    val queueEntries = remember(items) { reviewQueueEntries(items) }
 
     MediaSystemBars(chromeVisible)
     BackHandler { onClose() }
@@ -86,6 +88,9 @@ fun ListItemViewerScreen(
     // A level with nothing to move between is not a level, so a one-file item keeps the bar it has
     // always had: no file name beside the title, no `(1 / 1)`, no inner pair of arrows.
     val hasAssetLevel = assets.size > 1
+    // A list holding one item still has a queue worth opening when that item holds several files:
+    // the counter then names the files, and this is that list.
+    val assetEntries = remember(assets) { reviewPageEntries(assets, addOn = null) }
 
     MediaShell(
         modifier = modifier,
@@ -99,6 +104,25 @@ fun ListItemViewerScreen(
                 "${index + 1}(${currentAsset + 1}/${assets.size})/${items.size}"
             } else {
                 "${index + 1} / ${items.size}"
+            },
+            // A jump on the outer level opens another item at its first file, exactly as the outer
+            // arrows do, because assetIndex is keyed on the item. When the list holds one item, the
+            // counter names that item's files instead, and the jump moves between them the way the
+            // inner arrows do.
+            queueJump = when {
+                items.size > 1 && index >= 0 -> MediaQueueJump(
+                    entries = queueEntries,
+                    current = index,
+                    onJump = { currentItemId = items[it].id }
+                )
+
+                hasAssetLevel -> MediaQueueJump(
+                    entries = assetEntries,
+                    current = currentAsset,
+                    onJump = { assetIndex = it }
+                )
+
+                else -> null
             },
             onPrevious = if (index > 0) {
                 { currentItemId = items[index - 1].id }

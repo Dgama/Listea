@@ -14,6 +14,7 @@ import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.UnknownHostException
+import com.example.listea.domain.AddOnAnswerValue
 import com.example.listea.domain.ExportChoice
 import com.example.listea.domain.ExportKind
 import java.text.SimpleDateFormat
@@ -489,13 +490,28 @@ fun webhookItems(items: List<ListItemEntity>, settings: AppSettings): List<ListI
  * read all appear as `null`.
  */
 fun buildWebhookPayload(payload: ExportPayload): String {
+    val carriesAddOn = payload.tasks.any { it.addOn != null }
     val carriesMarks = payload.tasks.any { task -> task.assets.any { it.marks.isNotEmpty() } }
-    return describePayload(payload, carriesMarks).toString()
+    return describePayload(payload, exportVersion(carriesMarks, carriesAddOn)).toString()
 }
 
-/** The body itself, with the version chosen by whether [carriesMarks] is true. */
-private fun describePayload(payload: ExportPayload, carriesMarks: Boolean): JSONObject = JSONObject()
-    .put("version", if (carriesMarks) EXPORT_VERSION_MARKS else EXPORT_VERSION)
+/**
+ * The version this body claims: 4 when any Task carries answers, else 3 when any Asset carries a
+ * mark, else 2.
+ *
+ * Each number introduces one key that a receiver can rely on being present; nothing is claimed that
+ * the body does not contain. Answers outrank marks only because a body can carry both and 4 is their
+ * union — the marks array still answers to its own rule.
+ */
+internal fun exportVersion(carriesMarks: Boolean, carriesAddOn: Boolean): Int = when {
+    carriesAddOn -> EXPORT_VERSION_ADD_ON
+    carriesMarks -> EXPORT_VERSION_MARKS
+    else -> EXPORT_VERSION
+}
+
+/** The body itself, with the version already decided. */
+private fun describePayload(payload: ExportPayload, version: Int): JSONObject = JSONObject()
+    .put("version", version)
     .put("event", payload.event)
     .put(
         "list",
@@ -514,52 +530,97 @@ private fun describePayload(payload: ExportPayload, carriesMarks: Boolean): JSON
  * `id` is the Task's public id and never its row id. The Task's `title` is the name the round
  * showed, which is allowed to differ between the Lists a Task appears in.
  */
-private fun taskJson(task: ExportTaskView): JSONObject = JSONObject()
-    .put("id", task.publicId)
-    .put("title", task.title)
-    .put("isCompleted", task.isCompleted)
-    .put(
-        "templates",
-        JSONArray().apply {
-            task.templates.forEach { template ->
-                put(
-                    JSONObject()
-                        .put("id", template.id)
-                        .put("name", template.name ?: JSONObject.NULL)
-                        .put("version", template.version)
-                )
+private fun taskJson(task: ExportTaskView): JSONObject {
+    val json = JSONObject()
+        .put("id", task.publicId)
+        .put("title", task.title)
+        .put("isCompleted", task.isCompleted)
+        .put(
+            "templates",
+            JSONArray().apply {
+                task.templates.forEach { template ->
+                    put(
+                        JSONObject()
+                            .put("id", template.id)
+                            .put("name", template.name ?: JSONObject.NULL)
+                            .put("version", template.version)
+                    )
+                }
             }
-        }
-    )
-    .put(
-        "assets",
-        JSONArray().apply {
-            task.assets.forEach { asset ->
-                put(
-                    JSONObject()
-                        .put("id", asset.publicId)
-                        .put("title", asset.title)
-                        .put("relativePath", asset.relativePath ?: JSONObject.NULL)
-                        .put("sourceMissing", asset.sourceMissing)
-                        .put(
-                            "actions",
-                            JSONArray().apply { asset.actions.forEach { put(it) } }
-                        )
-                        .apply {
-                            // The key is present only where the array is. An empty `marks` on an
-                            // image would be a shape v2 receivers have never seen, and the version
-                            // line is allowed to say 2 precisely because nothing new is here.
-                            if (asset.marks.isNotEmpty()) {
-                                put(
-                                    "marks",
-                                    JSONArray().apply {
-                                        asset.marks.forEach { put(markJson(it)) }
-                                    }
-                                )
+        )
+        .put(
+            "assets",
+            JSONArray().apply {
+                task.assets.forEach { asset ->
+                    put(
+                        JSONObject()
+                            .put("id", asset.publicId)
+                            .put("title", asset.title)
+                            .put("relativePath", asset.relativePath ?: JSONObject.NULL)
+                            .put("sourceMissing", asset.sourceMissing)
+                            .put(
+                                "actions",
+                                JSONArray().apply { asset.actions.forEach { put(it) } }
+                            )
+                            .apply {
+                                // The key is present only where the array is. An empty `marks` on
+                                // an image would be a shape v2 receivers have never seen, and the
+                                // version line is allowed to say 2 precisely because nothing new is
+                                // here.
+                                if (asset.marks.isNotEmpty()) {
+                                    put(
+                                        "marks",
+                                        JSONArray().apply {
+                                            asset.marks.forEach { put(markJson(it)) }
+                                        }
+                                    )
+                                }
                             }
-                        }
-                )
+                    )
+                }
             }
+        )
+    // After `assets`, because it is a sibling of it: the answers are about the Task, not about any
+    // one file. Absent when the Task answered nothing, which is what keeps its body the v2/v3 shape.
+    task.addOn?.let { json.put("addOn", addOnJson(it)) }
+    return json
+}
+
+/**
+ * One Task's questionnaire as the receiver sees it.
+ *
+ * Key order is part of the contract: identity first (`id`, `name`, `version`), then the answers in
+ * question order. `name` and `version` describe the version the Task is *attached to*, so a
+ * receiver can tell two rounds apart when the questionnaire moves.
+ */
+private fun addOnJson(addOn: ExportAddOnView): JSONObject = JSONObject()
+    .put("id", addOn.id)
+    .put("name", addOn.name)
+    .put("version", addOn.version)
+    .put(
+        "answers",
+        JSONArray().apply { addOn.answers.forEach { put(answerJson(it)) } }
+    )
+
+/**
+ * One answer as the receiver sees it: the question's id, its type key, its prompt and a **typed**
+ * value.
+ *
+ * The value is the type's own JSON type — a number for a rating, a boolean for Yes / No, a string
+ * for text — rather than a stringly-typed copy of the stored column, because a receiver should not
+ * have to know this build's spelling to read a score. `type` is what makes a one-word answer
+ * unambiguous.
+ */
+private fun answerJson(answer: ExportAnswerView): JSONObject = JSONObject()
+    .put("questionId", answer.questionId)
+    .put("type", answer.type.key)
+    .put("prompt", answer.prompt)
+    .put(
+        "value",
+        when (val value = answer.value) {
+            is AddOnAnswerValue.Rating -> value.score
+            is AddOnAnswerValue.YesNo -> value.yes
+            is AddOnAnswerValue.Text -> value.text
         }
     )
 
