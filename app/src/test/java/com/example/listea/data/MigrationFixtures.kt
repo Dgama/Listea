@@ -42,7 +42,12 @@ internal val TablesFromLaterSteps = listOf(
     "template_versions",
     "schema_backfills",
     "task_asset_marks",
-    "index_task_asset_marks_assetId"
+    "index_task_asset_marks_assetId",
+    // The v0.7.1 questionnaire: its lineage, its versions and the answers a Task keeps.
+    "addons",
+    "addon_versions",
+    "task_review_answers",
+    "index_task_review_answers_taskId"
 )
 
 /**
@@ -70,15 +75,17 @@ internal val ColumnsFromLaterSteps = mapOf(
     "task_asset_state" to setOf("selections"),
     "list_items" to setOf("selections"),
     "file_review_state" to setOf("selections"),
-    // The 24 → 25 step's export choice, then the 26 → 27 step's Todo address. A Set because more
-    // than one release appends to `sources` and `webhook_history`, and the fixture has to subtract
-    // all of them to come back to the version under test.
-    "sources" to setOf("exportKind", "webhookUrl", "webhookFromDefault"),
+    // The 24 → 25 step's export choice, the 26 → 27 step's Todo address, and the v0.7.1
+    // attachment. A Set because more than one release appends to `sources` and `webhook_history`,
+    // and the fixture has to subtract all of them to come back to the version under test.
+    "sources" to setOf("exportKind", "webhookUrl", "webhookFromDefault", "addOn"),
     "lists" to setOf("exportKind"),
     "webhook_history" to setOf("kind", "webhookUrl", "roundId"),
-    // The newest step's wire identity, appended to the two rows that leave the device.
+    // The v0.6.1 step's wire identity, appended to the two rows that leave the device.
     "tasks" to setOf("publicId"),
-    "assets" to setOf("publicId")
+    "assets" to setOf("publicId"),
+    // The v0.7.1 attachment, appended to the Todo's per-Task stamp.
+    "task_imports" to setOf("addOn")
 )
 
 /** One statement, against a database being built or wound back. */
@@ -408,5 +415,84 @@ internal fun ListeaDatabase.subtractV27Additions() {
  * chain grows rather than a line nobody reads.
  */
 internal fun ListeaDatabase.subtractV28Additions() {
+    // The step above this one, first: a fixture has to come back to v27, and a database left at
+    // v29 would still hold the questionnaire tables and the two attachment columns.
+    subtractV29Additions()
+
     exec("DROP TABLE IF EXISTS task_asset_marks")
+}
+
+/**
+ * Takes everything `MIGRATION_28_29` adds back off, leaving a database in v28's shape.
+ *
+ * Three tables drop outright, because that step creates them. The two columns are `ALTER`s, so
+ * `sources` and `task_imports` are rebuilt rather than altered — [subtractV24Additions]'s rule and
+ * for the same reason: minSdk 24 has no `DROP COLUMN`, and a fixture must come back to an older
+ * shape the way the app itself could. The DDL is transcribed from `28.json`; the pragmas are needed
+ * for `task_imports`, whose foreign keys to `tasks` and `sources` a rename would otherwise rewrite
+ * to point at the temporary name.
+ */
+internal fun ListeaDatabase.subtractV29Additions() {
+    exec("DROP TABLE IF EXISTS task_review_answers")
+    exec("DROP TABLE IF EXISTS addon_versions")
+    exec("DROP TABLE IF EXISTS addons")
+
+    exec("PRAGMA foreign_keys = OFF")
+    exec("PRAGMA legacy_alter_table = ON")
+
+    // --- sources: no addOn ---------------------------------------------------------------------
+    exec(
+        "CREATE TABLE sources_v28 (`id` TEXT NOT NULL, `rootUri` TEXT NOT NULL, " +
+            "`relativePath` TEXT NOT NULL, `displayName` TEXT NOT NULL, " +
+            "`importerKind` TEXT NOT NULL, `importerVersion` INTEGER NOT NULL, " +
+            "`createdAt` INTEGER NOT NULL, `keepTree` INTEGER NOT NULL, " +
+            "`keepStateOnDelete` INTEGER NOT NULL, `contentPolicy` TEXT NOT NULL, " +
+            "`followUpstream` INTEGER NOT NULL, `assetControls` TEXT NOT NULL, " +
+            "`exportKind` TEXT NOT NULL, `webhookUrl` TEXT NOT NULL DEFAULT '', " +
+            "`webhookFromDefault` INTEGER NOT NULL DEFAULT 0, `lastImportAt` INTEGER, " +
+            "`lastImportStatus` TEXT, PRIMARY KEY(`id`))"
+    )
+    exec(
+        "INSERT INTO sources_v28 (id, rootUri, relativePath, displayName, importerKind, " +
+            "importerVersion, createdAt, keepTree, keepStateOnDelete, contentPolicy, " +
+            "followUpstream, assetControls, exportKind, webhookUrl, webhookFromDefault, " +
+            "lastImportAt, lastImportStatus) " +
+            "SELECT id, rootUri, relativePath, displayName, importerKind, importerVersion, " +
+            "createdAt, keepTree, keepStateOnDelete, contentPolicy, followUpstream, " +
+            "assetControls, exportKind, webhookUrl, webhookFromDefault, lastImportAt, " +
+            "lastImportStatus FROM sources"
+    )
+    exec("DROP TABLE sources")
+    exec("ALTER TABLE sources_v28 RENAME TO sources")
+    exec(
+        "CREATE INDEX IF NOT EXISTS `index_sources_rootUri_relativePath` " +
+            "ON `sources` (`rootUri`, `relativePath`)"
+    )
+
+    // --- task_imports: no addOn ----------------------------------------------------------------
+    exec(
+        "CREATE TABLE task_imports_v28 (`taskId` TEXT NOT NULL, `sourceId` TEXT NOT NULL, " +
+            "`groupPath` TEXT NOT NULL, `displayName` TEXT NOT NULL, " +
+            "`importedAt` INTEGER NOT NULL, `lastSeenAt` INTEGER NOT NULL, " +
+            "`assetControls` TEXT NOT NULL, PRIMARY KEY(`taskId`), " +
+            "FOREIGN KEY(`taskId`) REFERENCES `tasks`(`id`) " +
+            "ON UPDATE NO ACTION ON DELETE CASCADE , " +
+            "FOREIGN KEY(`sourceId`) REFERENCES `sources`(`id`) " +
+            "ON UPDATE NO ACTION ON DELETE NO ACTION )"
+    )
+    exec(
+        "INSERT INTO task_imports_v28 (taskId, sourceId, groupPath, displayName, importedAt, " +
+            "lastSeenAt, assetControls) " +
+            "SELECT taskId, sourceId, groupPath, displayName, importedAt, lastSeenAt, " +
+            "assetControls FROM task_imports"
+    )
+    exec("DROP TABLE task_imports")
+    exec("ALTER TABLE task_imports_v28 RENAME TO task_imports")
+    exec(
+        "CREATE INDEX IF NOT EXISTS `index_task_imports_sourceId_groupPath` " +
+            "ON `task_imports` (`sourceId`, `groupPath`)"
+    )
+
+    exec("PRAGMA legacy_alter_table = OFF")
+    exec("PRAGMA foreign_keys = ON")
 }

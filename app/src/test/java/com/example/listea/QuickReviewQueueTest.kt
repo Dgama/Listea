@@ -60,12 +60,14 @@ class QuickReviewQueueTest {
         missingAssets: Int = 0,
         unviewable: Boolean = false,
         sizeBytes: Long? = null,
-        lastModified: Long? = null
+        lastModified: Long? = null,
+        addOn: String = ""
     ) = CatalogRow(
         taskId = taskId,
         groupPath = groupPath,
         displayName = displayName,
         isCompleted = completed,
+        addOn = addOn,
         assetCount = 1,
         missingAssets = missingAssets,
         sizeBytes = sizeBytes,
@@ -183,6 +185,40 @@ class QuickReviewQueueTest {
 
         assertEquals(42L, queue.single().id)
         assertEquals("task-a", queue.single().taskId)
+    }
+
+    @Test
+    fun `a queued Task carries its add-on, and one without stays pageless`() {
+        // The page after a Task's last Asset is drawn from the *item*, not from the catalog, so a
+        // queue that dropped the stamp walked a Todo as if no questionnaire were attached and went
+        // straight from one Task's last file to the next Task. Both queues share this mapping.
+        val rows = listOf(
+            catalogRow("task-a", "a.jpg", "a.jpg", addOn = "addon\t2"),
+            catalogRow("task-b", "b.jpg", "b.jpg")
+        )
+
+        assertEquals(
+            listOf("addon\t2", ""),
+            taskReviewQueue(root, rows).map { it.addOn }
+        )
+        assertEquals(
+            listOf("addon\t2"),
+            folderReviewQueue(root, "", listOf(file("", "a.jpg")), rows).map { it.addOn }
+        )
+    }
+
+    @Test
+    fun `a live read moves decisions and leaves the add-on as the queue froze it`() {
+        // The stamp is material, like the name and the measurements: it says which questionnaire the
+        // Task was imported under, and a round re-reads only what has been decided about it.
+        val queue = taskReviewQueue(
+            root,
+            listOf(catalogRow("task-a", "a.jpg", "a.jpg", addOn = "addon\t2"))
+        )
+
+        val live = withLiveDecisions(queue, listOf(taskState("task-a", completed = true)), emptyList())
+
+        assertEquals("addon\t2", live.single().addOn)
     }
 
     // §6.4, §7

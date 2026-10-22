@@ -176,9 +176,10 @@ class MigrationV26ToV27Test {
         database.exec(
             "INSERT INTO sources (id, rootUri, relativePath, displayName, importerKind, " +
                 "importerVersion, createdAt, keepTree, keepStateOnDelete, contentPolicy, " +
-                "followUpstream, assetControls, exportKind, webhookUrl, webhookFromDefault) VALUES " +
+                "followUpstream, assetControls, exportKind, addOn, webhookUrl, " +
+                "webhookFromDefault) VALUES " +
                 "('s-new', 'content://root', 'jable', 'jable', 'file-as-task', 1, 10, 1, 0, " +
-                "'default', 0, '', 'webhook', 'https://own.example/hook', 0)"
+                "'default', 0, '', 'webhook', '', 'https://own.example/hook', 0)"
         )
 
         assertFalse(bootstrap(database, gateWasOn = true, url = "https://later.example/hook"))
@@ -208,13 +209,15 @@ class MigrationV26ToV27Test {
         database.openHelper.writableDatabase
 
         database.exec(
+            // `addOn` is the later release's column, written here only because the fixture is built
+            // on the current schema; [subtractV27Additions] takes it back off with the rest.
             "INSERT INTO sources (id, rootUri, relativePath, displayName, importerKind, " +
                 "importerVersion, createdAt, keepTree, keepStateOnDelete, contentPolicy, " +
-                "followUpstream, assetControls, exportKind) VALUES " +
+                "followUpstream, assetControls, exportKind, addOn) VALUES " +
                 "('s-old', 'content://root', 'cos', 'cos', 'file-as-task', 1, 1, 1, 0, " +
-                "'default', 0, '', 'webhook'), " +
+                "'default', 0, '', 'webhook', ''), " +
                 "('s-older', 'content://root', 'xasiat', 'xasiat', 'file-as-task', 1, 2, 1, 0, " +
-                "'default', 0, '', 'none')"
+                "'default', 0, '', 'none', '')"
         )
         database.exec(
             "INSERT INTO lists (id, title, createdAt, completedAt, webhookEnabled, webhookUrl, " +
@@ -244,7 +247,11 @@ class MigrationV26ToV27Test {
 
     private fun migrate(): ListeaDatabase {
         val database = Room.databaseBuilder(context, ListeaDatabase::class.java, V26_DB)
-            .addMigrations(ListeaDatabase.MIGRATION_26_27, ListeaDatabase.MIGRATION_27_28)
+            .addMigrations(
+                ListeaDatabase.MIGRATION_26_27,
+                ListeaDatabase.MIGRATION_27_28,
+                ListeaDatabase.MIGRATION_28_29
+            )
             .allowMainThreadQueries()
             .build()
         database.openHelper.writableDatabase
@@ -309,6 +316,6 @@ class MigrationV26ToV27Test {
     private companion object {
         const val V26_DB = "v26-fixture.db"
         const val V26 = 26
-        const val CURRENT = 28
+        const val CURRENT = 29
     }
 }

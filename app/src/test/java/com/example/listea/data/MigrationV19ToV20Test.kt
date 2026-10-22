@@ -80,7 +80,11 @@ class MigrationV19ToV20Test {
         // than as `.last()`: a release after this one appends its own column and the last one stops
         // being this step's. The index is what this step claimed, and it is what stays true.
         assertEquals("assetControls", database.columns("sources")[V19_COLUMNS.getValue("sources")])
-        assertEquals("assetControls", database.columns("task_imports").last())
+        // `task_imports` is read the same way for the same reason: v0.7.1 appended `addOn` after it.
+        assertEquals(
+            "assetControls",
+            database.columns("task_imports")[V19_COLUMNS.getValue("task_imports")]
+        )
         database.close()
     }
 
@@ -446,8 +450,9 @@ class MigrationV19ToV20Test {
                 ListeaDatabase.MIGRATION_24_25,
                 ListeaDatabase.MIGRATION_25_26,
                 ListeaDatabase.MIGRATION_26_27,
-                ListeaDatabase.MIGRATION_27_28
-            )
+                ListeaDatabase.MIGRATION_27_28,
+            ListeaDatabase.MIGRATION_28_29
+        )
             .build()
 
     private fun ListeaDatabase.count(sql: String): Int =

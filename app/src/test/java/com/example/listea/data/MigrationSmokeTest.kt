@@ -104,8 +104,9 @@ class MigrationSmokeTest {
             ListeaDatabase.MIGRATION_24_25,
             ListeaDatabase.MIGRATION_25_26,
             ListeaDatabase.MIGRATION_26_27,
-            ListeaDatabase.MIGRATION_27_28
-            )
+            ListeaDatabase.MIGRATION_27_28,
+            ListeaDatabase.MIGRATION_28_29
+        )
             .build()
 
         database.openHelper.writableDatabase

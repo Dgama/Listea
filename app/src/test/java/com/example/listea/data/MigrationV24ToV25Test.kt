@@ -238,19 +238,20 @@ class MigrationV24ToV25Test {
      */
     private fun writeFixture() {
         val database = openAtCurrentVersion()
-        // `exportKind` and `kind` are written here and thrown away: the rows have to satisfy the
-        // *current* schema's `NOT NULL` on the way in — the column has no SQL default, because the
-        // entity carries a Kotlin one — and `subtractV25Additions` takes the column back off
+        // `exportKind`, `kind` and the later `addOn` are written here and thrown away: the rows have
+        // to satisfy the *current* schema's `NOT NULL` on the way in — these columns have no SQL
+        // default, because the entities carry Kotlin ones — and the subtractions take them back off
         // afterwards. Writing the word the migration is supposed to produce would make the
-        // assertions below pass whatever the migration did, so `none` is written instead.
+        // assertions below pass whatever the migration did, so `none` and no add-on are written.
         database.exec(
             "INSERT INTO sources (id, rootUri, relativePath, displayName, importerKind, " +
                 "importerVersion, createdAt, keepTree, keepStateOnDelete, contentPolicy, " +
-                "followUpstream, assetControls, exportKind, lastImportAt, lastImportStatus) VALUES " +
+                "followUpstream, assetControls, exportKind, addOn, lastImportAt, lastImportStatus) " +
+                "VALUES " +
                 "('s-old', 'content://root', '', 'Holiday', 'file-as-task', 1, 1, 1, 0, " +
-                "'default', 0, '', 'none', NULL, NULL), " +
+                "'default', 0, '', 'none', '', NULL, NULL), " +
                 "('s-older', 'content://other', '', 'Work', 'folder-as-task', 1, 1, 0, 0, " +
-                "'default', 0, '', 'none', NULL, NULL)"
+                "'default', 0, '', 'none', '', NULL, NULL)"
         )
         database.exec(
             "INSERT INTO lists (id, title, createdAt, completedAt, webhookEnabled, webhookUrl, " +
@@ -299,8 +300,9 @@ class MigrationV24ToV25Test {
                 ListeaDatabase.MIGRATION_24_25,
                 ListeaDatabase.MIGRATION_25_26,
                 ListeaDatabase.MIGRATION_26_27,
-                ListeaDatabase.MIGRATION_27_28
-            )
+                ListeaDatabase.MIGRATION_27_28,
+            ListeaDatabase.MIGRATION_28_29
+        )
             .build()
             .also { it.openHelper.writableDatabase }
 
@@ -385,7 +387,7 @@ class MigrationV24ToV25Test {
         const val V24 = 24
 
         /** The version the entities declare, which this step plus every later one reaches. */
-        const val CURRENT = 28
+        const val CURRENT = 29
 
         /** The table `the step takes a v24 database to the current version` writes its column into. */
         const val GONE = "sources"
