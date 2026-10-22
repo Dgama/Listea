@@ -187,12 +187,18 @@ data class MediaNavigator(
     /** The right zone's label, already written: `3(2/3)/7` for a queue with levels under it, `3 / 7` without. */
     val counter: String? = null,
     /**
-     * The queue the counter's outer number names, and the way to jump through it.
+     * The queue the counter names, and the guide through it.
      *
-     * Present only when there is somewhere to jump: a surface passes null when the counter names
-     * only an asset level, when the queue holds at most one entry, or when the current index is not
-     * known. Null leaves the counter as plain text, which is what every surface drew before there
-     * was a list behind it.
+     * [MediaQueueJump.entries] is the outer level — the Tasks or files the outer number walks —
+     * and each entry may carry its own pages, the level below it. The counter opens that guide;
+     * its rows travel to an entry, and an entry with pages has an arrow into them that travels to
+     * one page of it.
+     *
+     * Present only when there is somewhere to jump: a surface passes null when the queue holds at
+     * most one entry and there is no page level either, or when the current index is not known.
+     * Null leaves the counter as plain text, which is what every surface drew before there was a
+     * list behind it. When the counter names only a page level — a one-item queue holding several
+     * pages — [MediaQueueJump.entries] *are* those pages and [MediaQueueJump.current] is -1.
      */
     val queueJump: MediaQueueJump? = null,
     /** The queue's own step controls. */
@@ -845,12 +851,12 @@ private val NavigatorTitleMaxWidth = 120.dp
  *
  * The arithmetic behind the number, so that a later change to the bar has something to check
  * against. On a bar wide enough to have both names, the fixed zones are five controls at 48dp
- * (240dp) and a counter of up to six glyphs (about 55dp) plus the 12dp chevron that marks it as the
- * queue's control; the item's name and the file's name share what is left, and the item's name
- * alone needs about 70dp to say "Whatsapp". Add a margin
- * for the horizontal inset the bar does not own and the total is around 365dp. Read it as "the
- * controls give way first, and only once the name has already been reduced to nothing would
- * shrinking them further buy anything".
+ * (240dp) and a counter of up to six glyphs (about 55dp — the counter is its own control now but
+ * carries no chevron, so it is no wider than the text it shows); the item's name and the file's
+ * name share what is left, and the item's name alone needs about 70dp to say "Whatsapp". That is
+ * 365dp before any margin for the horizontal inset the bar does not own, which is why the controls
+ * give way there rather than later. Read it as "the controls give way first, and only once the name
+ * has already been reduced to nothing would shrinking them further buy anything".
  */
 private val NavigatorStepCompactBelow = 365.dp
 

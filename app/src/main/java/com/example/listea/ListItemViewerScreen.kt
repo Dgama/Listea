@@ -67,6 +67,16 @@ fun ListItemViewerScreen(
 
     val index = items.indexOfFirst { it.id == currentItemId }
 
+    // A page the guide asked for on an item that is not on screen yet. The page index is keyed on
+    // the item, so the item arrives at its first file and this moves it once that state exists.
+    var pendingAsset by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(currentItemId) {
+        pendingAsset?.let { requested ->
+            assetIndex = requested
+            pendingAsset = null
+        }
+    }
+
     // A resync or a cleanup can take the item away while it is open. Closing is better than
     // sliding to a neighbour, which would leave the user looking at something they never asked
     // for and had no way to tell they were now looking at.
@@ -74,8 +84,11 @@ fun ListItemViewerScreen(
         if (items.none { it.id == currentItemId }) onClose()
     }
     val item = items.getOrNull(index) ?: return
-    // The list's items in the list's order, as the jump list names them.
-    val queueEntries = remember(items) { reviewQueueEntries(items) }
+    // The list's items in the list's order, as the guide names them. Each row carries the item's
+    // files, so the guide can be walked a level at a time: the items, then one item's pages.
+    val queueEntries = remember(items) {
+        reviewQueueEntries(items) { entry -> reviewPageEntries(assetsOf(entry), addOn = null) }
+    }
 
     MediaSystemBars(chromeVisible)
     BackHandler { onClose() }
@@ -105,21 +118,29 @@ fun ListItemViewerScreen(
             } else {
                 "${index + 1} / ${items.size}"
             },
-            // A jump on the outer level opens another item at its first file, exactly as the outer
-            // arrows do, because assetIndex is keyed on the item. When the list holds one item, the
-            // counter names that item's files instead, and the jump moves between them the way the
-            // inner arrows do.
+            // The outer level is the list's items; inside a row are that item's files. A row's own
+            // tap opens another item at its first file, exactly as the outer arrows do, and a page
+            // picked under a row goes to that file on that item. When the list holds one item the
+            // counter names its files instead, and the guide's one level is those files.
             queueJump = when {
                 items.size > 1 && index >= 0 -> MediaQueueJump(
                     entries = queueEntries,
                     current = index,
-                    onJump = { currentItemId = items[it].id }
+                    currentPage = currentAsset,
+                    onJump = { entry, page ->
+                        if (entry == index) {
+                            assetIndex = page ?: 0
+                        } else {
+                            pendingAsset = page
+                            currentItemId = items[entry].id
+                        }
+                    }
                 )
 
                 hasAssetLevel -> MediaQueueJump(
                     entries = assetEntries,
                     current = currentAsset,
-                    onJump = { assetIndex = it }
+                    onJump = { page, _ -> assetIndex = page }
                 )
 
                 else -> null

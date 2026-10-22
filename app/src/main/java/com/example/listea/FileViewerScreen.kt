@@ -76,7 +76,7 @@ fun FileViewerScreen(
                 MediaQueueJump(
                     entries = queueEntries,
                     current = index,
-                    onJump = { currentUri = files[it].uri.toString() }
+                    onJump = { file, _ -> currentUri = files[file].uri.toString() }
                 )
             } else {
                 null

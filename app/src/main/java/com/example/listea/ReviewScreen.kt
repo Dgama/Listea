@@ -498,6 +498,15 @@ fun ReviewSession(
     // the two levels are one control group, and a selection living inside the viewer would have to
     // be reported back up for the bar to draw it and driven back down for the arrows to move it.
     var pageIndex by rememberSaveable(currentTaskId) { mutableStateOf(0) }
+    // A page the guide asked for on a Task that is not on screen yet. The page index is keyed on
+    // the Task, so the Task arrives at its first page and this moves it once that state exists.
+    var pendingPage by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(currentTaskId) {
+        pendingPage?.let { requested ->
+            pageIndex = requested
+            pendingPage = null
+        }
+    }
     var finished by rememberSaveable(sessionKey) { mutableStateOf(false) }
     // Not saved: reopening Info after a rotation would be answering a question nobody asked.
     var infoOpen by remember { mutableStateOf(false) }
@@ -549,9 +558,17 @@ fun ReviewSession(
     }
 
     val item = items[index]
-    // The queue as the jump list names it. Rebuilt only when the round's items change, so stepping
-    // or paging never re-maps the whole queue for a menu that is not open.
-    val queueEntries = remember(items) { reviewQueueEntries(items) }
+    // The queue as the guide names it, each Task carrying its pages: its Assets, then its add-on
+    // page when this build can resolve the one it was stamped with. Rebuilt only when the round's
+    // items or the add-on tables change, so stepping or paging never re-maps the whole queue for a
+    // menu that is not open.
+    val queueEntries = remember(items, addOnResolver) {
+        reviewQueueEntries(items) { entry ->
+            val addOn = addOnResolver.versionFor(entry.addOn)
+                ?.takeIf { it.questions.isNotEmpty() }
+            reviewPageEntries(assetsOf(entry), addOn)
+        }
+    }
     // The frame takes real room here, so the system bars are never hidden: there is no full-bleed
     // picture for them to be hiding *from*. They are still forced light, which is the other half
     // of what this does — what sits under them is the navigator's scrim, not the app's surface.
@@ -770,25 +787,33 @@ fun ReviewSession(
             } else {
                 "${index + 1} / ${items.size}"
             },
-            // The list behind the *outer* number: Tasks, never pages. Jumping is goTo, the same
-            // move the arrows make, so List Review records the cursor it would have recorded and
-            // Quick Review records nothing.
+            // The guide behind the *outer* number: the round's Tasks, and under each row its
+            // pages. A row's own tap is goTo, the same move the outer arrows make, so List Review
+            // records the cursor it would have recorded and Quick Review records nothing. A page
+            // picked under a row is the page move the inner arrows make: it changes no cursor,
+            // because the cursor names the Task and a page is not one.
             //
-            // When the round holds a single Task there is no outer list to open, and the counter
-            // still names one — its pages. The list then falls back to the inner level, and a jump
-            // is the page move the inner arrows make: it changes no cursor, because the cursor
-            // names the Task and a page is not one.
+            // When the round holds a single Task there is no outer level to open, and the counter
+            // still names one — its pages. The guide then starts at that page level.
             queueJump = when {
                 items.size > 1 -> MediaQueueJump(
                     entries = queueEntries,
                     current = index,
-                    onJump = { goTo(items[it]) }
+                    currentPage = currentPage,
+                    onJump = { entry, page ->
+                        if (entry == index) {
+                            pageIndex = page ?: 0
+                        } else {
+                            pendingPage = page ?: 0
+                            goTo(items[entry])
+                        }
+                    }
                 )
 
                 pageCount > 1 -> MediaQueueJump(
                     entries = pageEntries,
                     current = currentPage,
-                    onJump = { pageIndex = it }
+                    onJump = { page, _ -> pageIndex = page }
                 )
 
                 else -> null

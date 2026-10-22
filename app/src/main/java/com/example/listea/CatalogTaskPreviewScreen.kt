@@ -114,6 +114,15 @@ fun CatalogTaskPreviewScreen(
     // its first file. Saved, so a rotation returns to the same file rather than to the first one,
     // which for a folder Task is a different picture entirely.
     var assetIndex by rememberSaveable(currentTaskId) { mutableStateOf(0) }
+    // A page the guide asked for on a Task that is not on screen yet. The page index is keyed on
+    // the Task, so the Task arrives at its first file and this moves it once that state exists.
+    var pendingAsset by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(currentTaskId) {
+        pendingAsset?.let { requested ->
+            assetIndex = requested
+            pendingAsset = null
+        }
+    }
     var chromeVisible by rememberSaveable { mutableStateOf(true) }
 
     val taskIndex = tasks.indexOfFirst { it.taskId == currentTaskId }
@@ -132,13 +141,17 @@ fun CatalogTaskPreviewScreen(
     // A level with nothing to move between is not a level: a folder holding one Task draws no
     // outer arrows, and a Task holding one file draws no inner pair.
     val hasTaskLevel = tasks.size > 1 && taskIndex >= 0
-    // The level's Tasks in the level's order, as the jump list names them. A folder Task's name is
-    // often its path's last segment already, so the path is only carried when it adds something.
+    // The level's Tasks in the level's order, as the guide names them, each carrying its files as
+    // the level below. A folder Task's name is often its path's last segment already, so the path
+    // is only carried when it adds something.
     val queueEntries = remember(tasks) {
         tasks.map { task ->
             MediaQueueEntry(
                 label = task.displayName,
-                detail = task.groupPath.takeIf { it.isNotBlank() && it != task.displayName }
+                detail = task.groupPath.takeIf { it.isNotBlank() && it != task.displayName },
+                pages = reviewPageEntries(task.assets, addOn = null)
+                    .takeIf { it.size > 1 }
+                    .orEmpty()
             )
         }
     }
@@ -165,8 +178,9 @@ fun CatalogTaskPreviewScreen(
                 hasTaskLevel -> "${taskIndex + 1} / ${tasks.size}"
                 else -> null
             },
-            // The list follows the level the counter names: Tasks while there is a Task level, and
-            // the Task's files when the counter has fallen back to the file-only form. A Task level
+            // The guide follows the level the counter names: Tasks while there is a Task level, and
+            // the Task's files when the counter has fallen back to the file-only form. Inside a
+            // Task row are its files, and a row's own tap lands on the first of them. A Task level
             // holding one row leaves the outer number with nothing to jump through, but its files
             // are still a level, and a position that cannot be opened there is the same dead label
             // this control exists to replace.
@@ -174,13 +188,21 @@ fun CatalogTaskPreviewScreen(
                 hasTaskLevel -> MediaQueueJump(
                     entries = queueEntries,
                     current = taskIndex,
-                    onJump = { currentTaskId = tasks[it].taskId }
+                    currentPage = currentAsset,
+                    onJump = { entry, page ->
+                        if (entry == taskIndex) {
+                            assetIndex = page ?: 0
+                        } else {
+                            pendingAsset = page
+                            currentTaskId = tasks[entry].taskId
+                        }
+                    }
                 )
 
                 hasAssetLevel -> MediaQueueJump(
                     entries = assetEntries,
                     current = currentAsset,
-                    onJump = { assetIndex = it }
+                    onJump = { asset, _ -> assetIndex = asset }
                 )
 
                 else -> null
