@@ -29,6 +29,7 @@ where the other pages link to rather than repeat.
 | Page | What it covers |
 |---|---|
 | [Architecture](ARCHITECTURE.md) | The normative boundaries: what a Task, Asset, Upstream and List are, what Core does and does not own, identity rules, and the invariants implementations must preserve. Source code cites this document by name. |
+| [v0.8 — framework (draft)](iterations/v0.8.md) | The v0.8.x arc: Package protocol, Task payload, Resources, Structured Viewer and Headless Review Template, the typed page model, ReviewSubmission, and ExportMapping. |
 | [Development](development.md) | Environment and dependencies, build and test commands, project layout, and the architectural notes worth knowing before changing anything. |
 | [Roadmap](roadmap.md) | The current system, the architectural direction away from media-only review, and the possible future workloads that direction is for. Nothing on that page is implemented. |
 
@@ -68,8 +69,10 @@ Review rework; it should be re-shot or deleted.
 
 ## A note on what is current
 
-These pages describe **what Listea does today**, verified against the implementation. Anything
-about future capability is confined to [Roadmap](roadmap.md) and is labelled as such there.
+These pages describe **what Listea does today**, verified against the implementation. Product
+direction lives in [Roadmap](roadmap.md); the v0.8.x framework direction is recorded as explicitly
+planned in [Architecture](ARCHITECTURE.md#framework-evolution--v08x-planned) and
+[v0.8 (draft)](iterations/v0.8.md). Planned material is labelled as planned.
 
 If a page disagrees with the app, the app is right and the page is a bug — please open an issue.
 
@@ -80,12 +83,14 @@ document said — the divergence is recorded in a blockquote at the point it ari
 left open rather than quietly taken.
 
 Most of those blockquotes record a decision already taken and the reasoning for it, so a reader who
-finds one is not looking at an unresolved bug. **Two are genuinely open.** In
-[File, Source, and Upstream](ARCHITECTURE.md#file-source-and-upstream) a retired word survives in
-identifiers the code has not let go of, and the code does not settle whether it should. In
+finds one is not looking at an unresolved bug. **One is genuinely open.** In
 [TaskState](ARCHITECTURE.md#taskstate) the decision — `★` and the configured actions live on the
 Task–Asset pair — is settled, but the sentence the section is built on no longer describes it, and
-whether to reshape the sentence or narrow the rule is left to a later reader.
+whether to reshape the sentence or narrow the rule is left to a later reader. The former second open
+item, the retired word in
+[File, Source, and Upstream](ARCHITECTURE.md#file-source-and-upstream), now records the v0.8.x
+decision: the table name stays, the word survives only as external material, and the remaining
+Todo-dialog wording is a later wording pass.
 
 Two more are worth knowing about because they are recent. [Templates](ARCHITECTURE.md#templates)
 records v0.5.4 turning the Asset Control band into stored rows, and

@@ -1,14 +1,16 @@
 # Roadmap
 
 > **Nothing on this page is implemented.** It describes where Listea is going and why. For what
-> Listea does today, see [the documentation](README.md).
+> Listea does today, see [the documentation](README.md). For the nearer v0.8.x framework round, see
+> [Architecture → Framework evolution](ARCHITECTURE.md#framework-evolution--v08x-planned) and the
+> [v0.8 draft](iterations/v0.8.md); this page keeps the longer product direction.
 
 - [The current system](#the-current-system)
 - [Architectural direction](#architectural-direction)
   - [1. Review templates](#1-review-templates)
   - [2. Cross-platform-ready structure](#2-cross-platform-ready-structure)
   - [3. A general task model](#3-a-general-task-model)
-- [Next milestone: a check-in task workflow](#next-milestone-a-check-in-task-workflow)
+- [A later milestone: a check-in task workflow](#a-later-milestone-a-check-in-task-workflow)
 - [Possible future workloads](#possible-future-workloads)
 - [Not planned](#not-planned)
 
@@ -27,13 +29,14 @@ Concretely, and as a baseline for everything below:
   and one file bar; inside it an image's action bar and zoom, a video transport, or — since v0.7.0
   — a PDF's page list, selection layer and marks.
 - State **is checked plus actions** — the tick keyed by the Task's own id, the chips by the
-  Task–Asset pair they were given on, and a PDF's passage marks keyed by that same pair.
+  Task–Asset pair they were given on, a PDF's passage marks keyed by that same pair, and since
+  v0.7.1 an Add-on's answers owned by the Task as current state.
 - A queue **comes from a Todo** — the Tasks one Create Tasks run produced — or from a List built
-  out of Tasks picked from one.
+  out of Tasks picked from one. The position label opens a two-level guide to that queue.
 - The output **is an export**, describing a List and its items. Since v0.5.6 that is one of two
   methods — a webhook or a file — and a Quick Review round uses the same shape with no List behind
-  it, standing the folder in as the subject. Since v0.7.0 a PDF Asset may also carry `marks`, and
-  the body says version 3 when it does.
+  it, standing the folder in as the subject. Since v0.7.0 a PDF Asset may also carry `marks`; since
+  v0.7.1 a Task may carry visible Add-on answers, and the body rises to version 4 when it does.
 
 That is a coherent product and it works. The limitation is not quality; it is that every one of
 those five sentences still ends at *file* or *folder*. v0.7.0 loosened the grip of *media* — a PDF
@@ -125,7 +128,7 @@ to be a folder.
 This is the deepest of the three. It reaches the database schema, the identity scheme, the queue
 builders and the export payload, and it is the one that makes the other two worth doing.
 
-**Status: the identity half is done; the content half is untouched.**
+**Status: the identity half is done; the content half is the v0.8.x framework round.**
 
 - **v0.2.5** gave a reviewable item an id of its own, so the model no longer assumes a filesystem
   path is the thing decisions belong to. `ReviewItem` — the queue row the screens actually walk —
@@ -134,13 +137,20 @@ builders and the export payload, and it is the one that makes the other two wort
   now be flagged, reset or replaced when its content changes, and the decision is a named per-Todo
   policy rather than something inferred. That is the "identity survives a change" half, which a
   general task model needs.
-- What is still missing is the other half: **every Task is files**, so there is still no way to
-  review something that is not on disk. `AssetKind` has an `OTHER` member for content no viewer
-  claims, but nothing creates one.
+- **v0.8.x (planned)** is the first move on the content half: an optional Task payload, a directory
+  Package protocol, Package-scoped Resources, a typed page model, and one submission path shared
+  with media. See [Architecture → Framework evolution](ARCHITECTURE.md#framework-evolution--v08x-planned).
+- What is still missing after that is the product layer: vocabulary and primary-questionnaire
+  experiences, which are v0.9.x. `AssetKind.OTHER` remains the member for content no viewer claims;
+  it is not a structured payload kind.
 
-## Next milestone: a check-in task workflow
+## A later milestone: a check-in task workflow
 
-**The next concrete architectural milestone is to build a check-in task workflow — the first
+> **Sequencing note (2026-10-23).** The nearer milestones are the v0.8.x framework round and the
+> v0.9.x vocabulary/primary-questionnaire work. The check-in below remains the clearest *second*
+> non-media task type and the same architectural test; it comes after them.
+
+**A later concrete architectural milestone is to build a check-in task workflow — a second
 non-media task type.**
 
 A check-in is a small, recurring, non-file task: something you confirm you did, in a queue, one at a
@@ -166,12 +176,14 @@ Everything that turns out to be hard is exactly the coupling that needs removing
 
 ## Possible future workloads
 
-Illustrations of what a general task engine could carry. **None of these is planned, scheduled or
-committed to** — they are here to show what the architecture above is *for*.
+Illustrations of what a general task engine could carry. Except where a nearer direction is named,
+**none of these is planned, scheduled or committed to** — they are here to show what the
+architecture above is *for*.
 
-- **Daily check-in tasks** — the milestone above, generalised into recurring routines.
-- **Vocabulary or flashcard review** — a queue of prompts, a lightweight decision per card, results
-  handed onward. Structurally the same shape as media triage.
+- **Daily check-in tasks** — the later milestone above, generalised into recurring routines.
+- **Vocabulary or flashcard review** — the v0.9.x direction the v0.8.x framework prepares for: a
+  queue of prompts, a lightweight decision per card, results handed onward. Structurally the same
+  shape as media triage.
 - **Lightweight structured decisions** — approve/reject queues over small records.
 - **Externally received tasks** — items arriving from outside the device rather than being
   discovered on it, which would make the webhook a two-way idea rather than an outbox.
@@ -191,7 +203,7 @@ Currently out of scope, and not being worked on:
 
 ---
 
-There are no dates on this page, and no promised order beyond the milestone named above. This is a
-direction, not a schedule.
+There are no dates on this page, and no promised order beyond the nearer v0.8.x/v0.9.x direction
+named above. This is a direction, not a schedule.
 
 Back to [the documentation](README.md), or the [project README](../README.md).
