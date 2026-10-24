@@ -12,9 +12,14 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.exoplayer.ExoPlayer
 import com.example.listea.data.AssetDecisions
 import com.example.listea.data.ReviewItem
+import com.example.listea.data.TaskPayloadEntity
+import com.example.listea.data.TaskResourceView
+import com.example.listea.domain.parseProfilePrompt
+import kotlinx.coroutines.flow.Flow
 
 /**
  * Looking at what a list item actually is, opened by tapping it on the list page.
@@ -47,6 +52,11 @@ fun ListItemViewerScreen(
     listTitle: String,
     settings: AppSettings,
     resolver: TemplateResolver,
+    // The Prompt body is read by Task id rather than carried on every item, and the same is true
+    // here: a list of a thousand prompts must not hold a thousand bodies in memory to show one.
+    // These are reads only — the screen still has no write it could make.
+    observePayload: (String) -> Flow<TaskPayloadEntity?>,
+    observeResources: (String) -> Flow<List<TaskResourceView>>,
     onClose: () -> Unit
 ) {
     val context = LocalContext.current
@@ -57,10 +67,11 @@ fun ListItemViewerScreen(
     // Keyed on what was opened, so tapping a different item starts there rather than resuming
     // wherever the last look happened to end.
     var currentItemId by rememberSaveable(initialItemId) { mutableStateOf(initialItemId) }
-    // Which file of the opened item is on screen, keyed on the item so looking at another one
-    // starts at its first file. Held here rather than in [AssetRun] because the navigator states
-    // the item and the file at once, and a selection the bar has to draw cannot live below it.
-    var assetIndex by rememberSaveable(currentItemId) { mutableStateOf(0) }
+    // Which page of the opened item is on screen, keyed on the item so looking at another one
+    // starts at its first page. The page list is the typed one: a Prompt's Content page comes
+    // first, then its Assets. Held here rather than in [AssetRun] because the navigator states the
+    // item and the page at once, and a selection the bar has to draw cannot live below it.
+    var pageIndex by rememberSaveable(currentItemId) { mutableStateOf(0) }
     // Not saved: rotating should return to the item, not to a sheet about it.
     var infoOpen by remember { mutableStateOf(false) }
     var chromeVisible by rememberSaveable { mutableStateOf(true) }
@@ -68,12 +79,12 @@ fun ListItemViewerScreen(
     val index = items.indexOfFirst { it.id == currentItemId }
 
     // A page the guide asked for on an item that is not on screen yet. The page index is keyed on
-    // the item, so the item arrives at its first file and this moves it once that state exists.
-    var pendingAsset by remember { mutableStateOf<Int?>(null) }
+    // the item, so the item arrives at its first page and this moves it once that state exists.
+    var pendingPage by remember { mutableStateOf<Int?>(null) }
     LaunchedEffect(currentItemId) {
-        pendingAsset?.let { requested ->
-            assetIndex = requested
-            pendingAsset = null
+        pendingPage?.let { requested ->
+            pageIndex = requested
+            pendingPage = null
         }
     }
 
@@ -85,62 +96,89 @@ fun ListItemViewerScreen(
     }
     val item = items.getOrNull(index) ?: return
     // The list's items in the list's order, as the guide names them. Each row carries the item's
-    // files, so the guide can be walked a level at a time: the items, then one item's pages.
+    // pages, so the guide can be walked a level at a time: the items, then one item's pages. A
+    // Prompt's Content page is one of those pages and keeps its place at the front.
     val queueEntries = remember(items) {
-        reviewQueueEntries(items) { entry -> reviewPageEntries(assetsOf(entry), addOn = null) }
+        reviewQueueEntries(items) { entry ->
+            reviewPageEntries(assetsOf(entry), addOn = null, content = entry.hasContentPage())
+        }
     }
 
     MediaSystemBars(chromeVisible)
     BackHandler { onClose() }
 
-    // The file's place inside the item, clamped rather than repaired: a resync can take a file
+    // The page's place inside the item, clamped rather than repaired: a resync can take a file
     // away under a selection that was already made, and showing what is still there beats writing
-    // state from a composition.
+    // state from a composition. A Prompt's Content page sits at index 0 and pushes its Assets to
+    // 1..n, so one counter serves both kinds of page.
     val assets = assetsOf(item)
-    val currentAsset = assetIndex.coerceIn(0, maxOf(assets.lastIndex, 0))
-    // A level with nothing to move between is not a level, so a one-file item keeps the bar it has
-    // always had: no file name beside the title, no `(1 / 1)`, no inner pair of arrows.
-    val hasAssetLevel = assets.size > 1
-    // A list holding one item still has a queue worth opening when that item holds several files:
-    // the counter then names the files, and this is that list.
-    val assetEntries = remember(assets) { reviewPageEntries(assets, addOn = null) }
+    val contentPage = item.hasContentPage()
+    val contentOffset = if (contentPage) 1 else 0
+    val pageCount = assets.size + contentOffset
+    val currentPage = pageIndex.coerceIn(0, maxOf(pageCount - 1, 0))
+    val currentAsset = (currentPage - contentOffset).coerceAtLeast(0)
+    val onContentPage = contentPage && currentPage == 0
+    // A level with nothing to move between is not a level, so a one-page item keeps the bar it has
+    // always had: no page name beside the title, no `(1 / 1)`, no inner pair of arrows.
+    val hasPageLevel = pageCount > 1
+    // A list holding one item still has a queue worth opening when that item holds several pages:
+    // the counter then names the pages, and this is that list.
+    val pageEntries = remember(assets, contentPage) {
+        reviewPageEntries(assets, addOn = null, content = contentPage)
+    }
+
+    // The Prompt body, for the Content page only. Read by Task id rather than carried, and read
+    // here rather than in the card so the card stays a pure renderer with no database behind it.
+    val payloadRow by remember(item.taskId) { observePayload(item.taskId) }
+        .collectAsStateWithLifecycle(initialValue = null)
+    val taskResources by remember(item.taskId) { observeResources(item.taskId) }
+        .collectAsStateWithLifecycle(initialValue = emptyList())
+    val prompt = remember(payloadRow) { payloadRow?.let { parseProfilePrompt(it.payload) } }
+    val photo = remember(prompt, taskResources) {
+        prompt?.photoResource?.let { key -> taskResources.firstOrNull { it.resourceKey == key } }
+    }
+    val photoMissing = prompt?.photoResource != null && (photo == null || photo.missing)
 
     MediaShell(
         modifier = modifier,
         navigator = MediaNavigator(
             title = item.title,
             onBack = onClose,
-            subtitle = assets.getOrNull(currentAsset)?.name?.takeIf { hasAssetLevel },
+            subtitle = when {
+                !hasPageLevel -> null
+                onContentPage -> "Prompt"
+                else -> assets.getOrNull(currentAsset)?.name
+            },
             // Where in the list this is, which is the same number the page it was opened from
-            // shows — and inside it, the item's own file position.
-            counter = if (hasAssetLevel) {
-                "${index + 1}(${currentAsset + 1}/${assets.size})/${items.size}"
+            // shows — and inside it, the item's own page position.
+            counter = if (hasPageLevel) {
+                "${index + 1}(${currentPage + 1}/${pageCount})/${items.size}"
             } else {
                 "${index + 1} / ${items.size}"
             },
-            // The outer level is the list's items; inside a row are that item's files. A row's own
-            // tap opens another item at its first file, exactly as the outer arrows do, and a page
-            // picked under a row goes to that file on that item. When the list holds one item the
-            // counter names its files instead, and the guide's one level is those files.
+            // The outer level is the list's items; inside a row are that item's pages. A row's own
+            // tap opens another item at its first page, exactly as the outer arrows do, and a page
+            // picked under a row goes to that page on that item. When the list holds one item the
+            // counter names its pages instead, and the guide's one level is those pages.
             queueJump = when {
                 items.size > 1 && index >= 0 -> MediaQueueJump(
                     entries = queueEntries,
                     current = index,
-                    currentPage = currentAsset,
+                    currentPage = currentPage,
                     onJump = { entry, page ->
                         if (entry == index) {
-                            assetIndex = page ?: 0
+                            pageIndex = page ?: 0
                         } else {
-                            pendingAsset = page
+                            pendingPage = page
                             currentItemId = items[entry].id
                         }
                     }
                 )
 
-                hasAssetLevel -> MediaQueueJump(
-                    entries = assetEntries,
-                    current = currentAsset,
-                    onJump = { page, _ -> assetIndex = page }
+                hasPageLevel -> MediaQueueJump(
+                    entries = pageEntries,
+                    current = currentPage,
+                    onJump = { page, _ -> pageIndex = page }
                 )
 
                 else -> null
@@ -155,44 +193,87 @@ fun ListItemViewerScreen(
             } else {
                 null
             },
-            onPreviousAsset = assetStep(assets.size, currentAsset, forward = false)?.let { page ->
-                { assetIndex = page }
+            onPreviousAsset = assetStep(pageCount, currentPage, forward = false)?.let { page ->
+                { pageIndex = page }
             },
-            onNextAsset = assetStep(assets.size, currentAsset, forward = true)?.let { page ->
-                { assetIndex = page }
+            onNextAsset = assetStep(pageCount, currentPage, forward = true)?.let { page ->
+                { pageIndex = page }
             },
-            hasAssetSteps = hasAssetLevel
+            hasAssetSteps = hasPageLevel
         ),
         chromeVisible = chromeVisible,
         media = {
-            AssetRun(
-                item = item,
-                selectedIndex = currentAsset,
-                player = player,
-                imageLoader = imageLoader,
-                settings = settings,
-                // Both ends simply stop. There is no queue being worked through and nothing to
-                // complete, so running off the end is not an event — it is just the end.
-                canLeaveForward = index < items.lastIndex,
-                canLeaveBack = index > 0,
-                onLeaveForward = { currentItemId = items[index + 1].id },
-                onLeaveBack = { currentItemId = items[index - 1].id },
-                onSelectAsset = { assetIndex = it },
-                onTap = { chromeVisible = !chromeVisible },
-                modifier = Modifier.fillMaxSize()
-            )
+            if (onContentPage) {
+                // A page turn, not a judgment: this surface has nothing it could decide. The
+                // gesture was the one thing missing on device — the card scrolls vertically and
+                // the arrows work, but a swipe did nothing. Inside a multi-page Task it turns to
+                // the first file; at the Task's edge it moves to the next item, as the arrows do.
+                ContentPageSwipe(
+                    canSwipeForward = currentPage < pageCount - 1 || index < items.lastIndex,
+                    canSwipeBack = index > 0,
+                    onSwipeForward = {
+                        if (currentPage < pageCount - 1) {
+                            pageIndex = currentPage + 1
+                        } else if (index < items.lastIndex) {
+                            currentItemId = items[index + 1].id
+                        }
+                    },
+                    onSwipeBack = {
+                        if (index > 0) currentItemId = items[index - 1].id
+                    },
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    if (prompt != null) {
+                        ProfilePromptPage(
+                            prompt = prompt,
+                            photoUri = photo?.takeIf { !it.missing }?.uri,
+                            photoMissing = photoMissing,
+                            // A look says nothing: no pill is selected and none can be taken. The
+                            // same card as Review, so Preview and Review cannot disagree about what
+                            // the Prompt says.
+                            selectedOptionId = null,
+                            interactive = false,
+                            onSelect = {},
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        PromptNoticePage(
+                            "This Prompt cannot be shown.",
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                }
+            } else {
+                AssetRun(
+                    item = item,
+                    selectedIndex = currentAsset,
+                    player = player,
+                    imageLoader = imageLoader,
+                    settings = settings,
+                    // Both ends simply stop. There is no queue being worked through and nothing to
+                    // complete, so running off the end is not an event — it is just the end.
+                    canLeaveForward = index < items.lastIndex,
+                    canLeaveBack = index > 0,
+                    onLeaveForward = { currentItemId = items[index + 1].id },
+                    onLeaveBack = { currentItemId = items[index - 1].id },
+                    onSelectAsset = { pageIndex = it + contentOffset },
+                    onTap = { chromeVisible = !chromeVisible },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
         },
         taskBar = { MediaInfoBar("Item info") { infoOpen = true } }
     )
 
     if (infoOpen) {
         // The same sheet Review shows, including the item's completion and its actions. Reading
-        // them here is not a way to set them: the sheet has never had a control on it.
+        // them here is not a way to set them: the sheet has never had a control on it. The Content
+        // page has no file, so the sheet describes the Task alone.
         //
         // The actions are the page's own pair record, taken from the same file the sheet is handed
         // beside them, so the two halves of the sheet describe one file rather than one file and a
         // neighbour's tags — see [ReviewItemInfoSheet].
-        val page = assets.getOrNull(currentAsset)
+        val page = assets.getOrNull(currentAsset).takeUnless { onContentPage }
         ReviewItemInfoSheet(
             info = reviewItemInfo(item, page?.decisions ?: AssetDecisions(), resolver, listTitle),
             asset = page,

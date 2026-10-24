@@ -178,7 +178,13 @@ object Templates {
     )
 
     /**
-     * The only Task Review shipped: the media workflow exactly as it behaves today.
+     * The Task Review every Todo starts on: the media workflow exactly as it behaves today.
+     *
+     * It is a **headless** review — it draws no bar of its own; the completion checkbox on the
+     * review surface is its commit control. The *stored* seed calls it *Headless Template for File
+     * Decisions*; this definition keeps its original display name because the name is part of the
+     * pinned content hash of version 1, and a template's name is not identity enough to justify a
+     * new version.
      *
      * It offers all three [TaskAction]s, including the two that submit nothing — a template that
      * could only complete would make "I looked at this and have nothing to say" unwritable.
@@ -274,21 +280,25 @@ object Templates {
     /**
      * The built-in rapid review as a **stored** template.
      *
-     * Headless stops being special here: this is the same lineage, name and reference as
+     * Headless stops being special here: this is the same lineage and reference as
      * [MediaRapidReview], but it is a row with a version, seeded on install and upgrade like an
      * asset control. It names the completion checkbox as its commit control and accepts no viewer
-     * events, which is exactly the behaviour the code-defined version has always had.
+     * events, which is exactly the behaviour the code-defined version has always had. Its name is
+     * the seed's own, worded for the picker; the definition keeps the hash-pinned display name.
      */
     val MediaRapidReviewStored: StoredTemplateVersion = StoredTemplateVersion(
         ref = MediaRapidReview.ref,
-        name = MediaRapidReview.displayName,
+        // The seed's own name, deliberately not [MediaRapidReview.displayName]: a name is data a
+        // person reads and may change, and changing it must not move the definition's hash.
+        name = "Headless Template for File Decisions",
         scope = TemplateScope(emptyList()),
         buttons = emptyList(),
         kind = TemplateKind.TASK_REVIEW,
         taskReview = TaskReviewDefinition(
             viewer = MediaViewer.ref,
             accepts = emptySet(),
-            commit = CommitPolicy.Explicit(TASK_REVIEW_COMPLETE_CONTROL),
+            commit = CommitPolicy.ConfirmControl(TASK_REVIEW_COMPLETE_CONTROL),
+            revisable = true,
             completesTask = true,
             advanceAfterCommit = true
         )
@@ -306,7 +316,7 @@ object Templates {
      */
     val ImageSampleReview: StoredTemplateVersion = StoredTemplateVersion(
         ref = TemplateVersionRef(TemplateId("builtin.image.sample-review"), 1),
-        name = "Sample a point",
+        name = "Headless Template for Sampling a Point",
         scope = TemplateScope(emptyList()),
         buttons = listOf(
             TemplateButton(
@@ -320,7 +330,36 @@ object Templates {
         taskReview = TaskReviewDefinition(
             viewer = MediaViewer.ref,
             accepts = setOf(ViewerEventType.IMAGE_POINT),
-            commit = CommitPolicy.Explicit(IMAGE_SAMPLE_SUBMIT_ID),
+            commit = CommitPolicy.ConfirmControl(IMAGE_SAMPLE_SUBMIT_ID),
+            revisable = true,
+            completesTask = true,
+            advanceAfterCommit = true
+        )
+    )
+
+    /**
+     * The first Headless structured review: the dating card's Like/Dislike, committed immediately.
+     *
+     * This is the template the Package acceptance walks. It catches one `choice.select`, and the
+     * tap that produces it *is* the commit — [CommitPolicy.Immediate]. Revisability is its own
+     * field and stays true, so a second tap appends a second event and the latest answer is
+     * current; a vocabulary drill built from the same Viewer would set it false and be one answer
+     * for good.
+     *
+     * Its button list is empty on purpose. There is no Submit control to draw: the Viewer's own
+     * options are the only controls, and the template says what catching one means.
+     */
+    val StructuredSingleChoice: StoredTemplateVersion = StoredTemplateVersion(
+        ref = TemplateVersionRef(TemplateId("builtin.structured.single-choice"), 1),
+        name = "Headless Template for Single Choice",
+        scope = TemplateScope(emptyList()),
+        buttons = emptyList(),
+        kind = TemplateKind.TASK_REVIEW,
+        taskReview = TaskReviewDefinition(
+            viewer = Viewers.Profile.ref,
+            accepts = setOf(ViewerEventType.CHOICE_SELECT),
+            commit = CommitPolicy.Immediate(ViewerEventType.CHOICE_SELECT),
+            revisable = true,
             completesTask = true,
             advanceAfterCommit = true
         )
@@ -328,7 +367,33 @@ object Templates {
 
     /** The Task Reviews every install starts with, in picker order. */
     val StoredTaskReviews: List<StoredTemplateVersion> =
-        listOf(MediaRapidReviewStored, ImageSampleReview)
+        listOf(MediaRapidReviewStored, ImageSampleReview, StructuredSingleChoice)
+
+    /**
+     * The names the built-in Task Reviews shipped under before the vocabulary said *headless*.
+     *
+     * `(templateId, old name, new name)`. The seeding callback does not overwrite a row, because a
+     * name belongs to the person who may have changed it. This is the one narrow exception: a row
+     * is renamed only while it still carries the seed's *old* name. An untouched install therefore
+     * reads the new names, and a template somebody renamed is left exactly as they wrote it.
+     */
+    val EarlierTaskReviewNames: List<Triple<String, String, String>> = listOf(
+        Triple(
+            MediaRapidReview.ref.templateId.value,
+            "Rapid Review",
+            MediaRapidReviewStored.name
+        ),
+        Triple(
+            ImageSampleReview.ref.templateId.value,
+            "Sample a point",
+            ImageSampleReview.name
+        ),
+        Triple(
+            StructuredSingleChoice.ref.templateId.value,
+            "Single Choice",
+            StructuredSingleChoice.name
+        )
+    )
 
     /** Every defined version, viewer first because the review template composes it. */
     val all: List<TemplateVersion> =

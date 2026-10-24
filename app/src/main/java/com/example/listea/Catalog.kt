@@ -81,8 +81,17 @@ fun reviewBlockFor(assets: List<ReviewAsset>): ReviewBlock? = when {
 fun catalogBlock(row: CatalogRow): ReviewBlock? = when {
     row.missingAssets > 0 -> ReviewBlock.MISSING
     row.hasUnviewableAsset -> ReviewBlock.NO_VIEWER
+    // A Prompt Task's content is its payload; zero Assets is not an absence of content. A kind
+    // and schema no Viewer draws is a named refusal rather than vacuous eligibility, and a Task
+    // with no payload (a legacy manual item) keeps the old zero-Asset answer.
+    row.payloadKind != null && !payloadViewerAvailable(row.payloadKind, row.payloadSchema) ->
+        ReviewBlock.NO_VIEWER
     else -> null
 }
+
+/** Whether this build has a Viewer for a stored Prompt envelope. */
+fun payloadViewerAvailable(kind: String?, schema: Int?): Boolean =
+    kind != null && schema != null && com.example.listea.domain.PackageProtocol.supportsKind(kind, schema)
 
 /**
  * The order catalog rows are read in: by group path, case-insensitively, exact path breaking ties.
@@ -185,7 +194,16 @@ fun catalogAtScope(rows: List<CatalogRow>, scope: String, flat: Boolean = false)
     val scopes = rows
         .filter { it.groupPath != scope && it.groupPath.startsWith(prefix) && !directChildOf(it.groupPath, scope) }
         .groupBy { it.groupPath.removePrefix(prefix).substringBefore('/') }
-        .map { (name, below) -> CatalogEntry.Scope(prefix + name, name, below.size) }
+        .map { (name, below) ->
+            val path = prefix + name
+            // A Package scope is named by the manifest's title, not by its key. The rows below it
+            // carry both, so the scope can say "Dating demo" where the directory says
+            // "dating-demo" — and a scope with no Package rows falls back to the path segment.
+            val title = below.firstOrNull { it.packageKey == path }
+                ?.packageTitle
+                ?.takeIf { it.isNotBlank() }
+            CatalogEntry.Scope(path, title ?: name, below.size)
+        }
         .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER, CatalogEntry.Scope::name).thenBy(CatalogEntry.Scope::path))
 
     return CatalogView(

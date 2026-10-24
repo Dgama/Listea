@@ -11,6 +11,7 @@ import com.example.listea.ImporterKind
 import com.example.listea.ImportPlan
 import com.example.listea.PlannedTask
 import com.example.listea.assetViewerAvailable
+import com.example.listea.childRelativePath
 import com.example.listea.decideContentDecision
 import com.example.listea.hasSourceChanges
 import com.example.listea.isAncestorOrSame
@@ -186,9 +187,13 @@ abstract class ListsDao {
     @Query(
         """
         SELECT ti.taskId AS taskId, ti.assetControls AS assetControls, ti.addOn AS addOn,
-               ti.taskReview AS taskReview
+               ti.taskReview AS taskReview, ppt.packageKey AS packageKey,
+               ppt.promptKey AS promptKey, tp.kind AS payloadKind,
+               tp.schemaVersion AS payloadSchema, tp.revision AS payloadRevision
         FROM task_imports ti
         JOIN list_items i ON i.taskId = ti.taskId
+        LEFT JOIN package_prompt_tasks ppt ON ppt.taskId = ti.taskId
+        LEFT JOIN task_payloads tp ON tp.taskId = ti.taskId
         WHERE i.listId = :listId
         """
     )
@@ -247,9 +252,13 @@ abstract class ListsDao {
     @Query(
         """
         SELECT ti.taskId AS taskId, ti.assetControls AS assetControls, ti.addOn AS addOn,
-               ti.taskReview AS taskReview
+               ti.taskReview AS taskReview, ppt.packageKey AS packageKey,
+               ppt.promptKey AS promptKey, tp.kind AS payloadKind,
+               tp.schemaVersion AS payloadSchema, tp.revision AS payloadRevision
         FROM task_imports ti
         JOIN list_items i ON i.taskId = ti.taskId
+        LEFT JOIN package_prompt_tasks ppt ON ppt.taskId = ti.taskId
+        LEFT JOIN task_payloads tp ON tp.taskId = ti.taskId
         WHERE i.listId = :listId
         """
     )
@@ -315,6 +324,47 @@ abstract class ListsDao {
         """
     )
     abstract suspend fun getPayloadTasks(taskIds: List<String>): List<PayloadTaskRow>
+
+    /**
+     * Those Tasks' Prompt envelopes, when they have one.
+     *
+     * A `LEFT JOIN` onto the Prompt link because the envelope is stored on the Task and the Prompt
+     * key is the Package's: a body the import could not name still has a kind and a revision, and a
+     * v5 body should say what kind of content it is even then. A Task with no payload row is simply
+     * absent, which is how the writer tells the two apart.
+     */
+    @Query(
+        """
+        SELECT tp.taskId AS taskId, ppt.packageKey AS packageKey,
+               ppt.promptKey AS promptKey, tp.kind AS kind,
+               tp.schemaVersion AS schemaVersion, tp.revision AS revision
+        FROM task_payloads tp
+        LEFT JOIN package_prompt_tasks ppt ON ppt.taskId = tp.taskId
+        WHERE tp.taskId IN (:taskIds)
+        """
+    )
+    abstract suspend fun getPayloadPrompts(taskIds: List<String>): List<PayloadPromptRow>
+
+    /**
+     * The newest submission of each Task in the round, as stored text.
+     *
+     * `NOT EXISTS` rather than `MAX(at)`: two submissions can share a millisecond, and the ordering
+     * that decides *latest* everywhere else is `(at, id)`. Picking by timestamp alone would let the
+     * export and the review surface disagree about which answer is on record.
+     */
+    @Query(
+        """
+        SELECT r.taskId AS taskId, r.response AS response
+        FROM review_events r
+        WHERE r.taskId IN (:taskIds)
+          AND NOT EXISTS (
+              SELECT 1 FROM review_events n
+              WHERE n.taskId = r.taskId
+                AND (n.at > r.at OR (n.at = r.at AND n.id > r.id))
+          )
+        """
+    )
+    abstract suspend fun getLatestResponses(taskIds: List<String>): List<PayloadReviewRow>
 
     /**
      * The Assets under those Tasks, with each pair's decisions in the same read.
@@ -2009,18 +2059,22 @@ abstract class ListsDao {
      * that gets near it (an import told to drop a Task, step 2b) is an explicit policy a user names
      * rather than an inference this function makes.
      *
-     * **The order is the whole of the safety**, and two foreign keys enforce it rather than a
+     * **The order is the whole of the safety**, and the foreign keys enforce it rather than a
      * comment doing so. `list_items.taskId` is `NO ACTION`, so a membership left behind fails the
-     * delete loudly instead of a Task being taken by cascade; `task_imports.sourceId` is `NO ACTION`
-     * too, so the provenance rows must fall with their Tasks before the Source can go.
+     * delete loudly instead of a Task being taken by cascade; `task_imports.sourceId` and the
+     * three Package tables' `sourceId` are `NO ACTION` too, so those rows must fall before the
+     * Source can go.
      *
      * 1. read the Source, the Task count and the Lists that hold them — a snapshot's `sourceName`
      *    and the report both need facts that will not exist a moment later;
      * 2. snapshot, **before** anything is removed, or there is nothing left to copy;
      * 3. memberships;
      * 4. Tasks, which cascade `assets`, `task_state`, `task_imports` and the legacy id links;
-     * 5. the Source row;
-     * 6. tell each List that lost rows, so none of them silently gets shorter.
+     * 5. the Package rows — checkpoint, Prompt links, Resources — whose `sourceId` foreign keys
+     *    are NO ACTION as well, and whose Prompt links can outlive a Task the revision stopped
+     *    naming;
+     * 6. the Source row;
+     * 7. tell each List that lost rows, so none of them silently gets shorter.
      *
      * Returns `null` when the Todo is already gone, having touched nothing. The caller reaches this
      * from a card it just drew, so the race is theoretical — but a delete that guessed past a
@@ -2044,6 +2098,14 @@ abstract class ListsDao {
         if (keepState) snapshotDissolvedState(sourceId, now)
         deleteListItemsOfTodoTasks(sourceId)
         deleteTasksOfTodo(sourceId)
+        // The Package tables name the Todo with NO ACTION foreign keys, like `task_imports`, so
+        // they have to fall before the Source row. `PackageImportTest` found this on device: a
+        // Package Todo refused to delete and the app could only say "Nothing was changed".
+        // Prompt links usually went with their Tasks by cascade; this also clears links whose
+        // Task is already gone, which is the state reconciliation leaves behind.
+        deletePackagePromptTasksOfTodo(sourceId)
+        deletePackageResourcesOfTodo(sourceId)
+        deletePackageCheckpointsOfTodo(sourceId)
         deleteSourceRow(sourceId)
         for (row in held) {
             noteDissolution(row.listId, row.itemCount, now, DissolutionReason.Dissolved.key)
@@ -2272,6 +2334,15 @@ abstract class ListsDao {
             "(SELECT taskId FROM task_imports WHERE sourceId = :sourceId)"
     )
     protected abstract suspend fun deleteTasksOfTodo(sourceId: String)
+
+    @Query("DELETE FROM package_prompt_tasks WHERE sourceId = :sourceId")
+    protected abstract suspend fun deletePackagePromptTasksOfTodo(sourceId: String)
+
+    @Query("DELETE FROM package_resources WHERE sourceId = :sourceId")
+    protected abstract suspend fun deletePackageResourcesOfTodo(sourceId: String)
+
+    @Query("DELETE FROM package_checkpoints WHERE sourceId = :sourceId")
+    protected abstract suspend fun deletePackageCheckpointsOfTodo(sourceId: String)
 
     @Query("DELETE FROM sources WHERE id = :sourceId")
     protected abstract suspend fun deleteSourceRow(sourceId: String)
@@ -2960,6 +3031,11 @@ abstract class ListsDao {
             reset++
         }
 
+        // Package metadata comes after every Task id exists, because a payload, a Prompt link and a
+        // Resource use all name one. Each Package classifies itself against its own checkpoint and
+        // either advances or refuses without touching the Tasks above.
+        val packages = applyPackages(source, plan, now)
+
         // A file the plan no longer names, inside the scope that was authoritatively scanned, has
         // gone missing. Marked, never deleted, and never for an Asset outside the coverage: a
         // scoped refresh must not reach past the folder it scanned.
@@ -2987,10 +3063,12 @@ abstract class ListsDao {
         // which is what lets the dialog warn before the fact and the report be honest after it.
         val recovered = recoverFrom?.let { recoverStateFrom(it, sourceId, now) } ?: 0
 
-        updateSourceStatus(sourceId, now, if (conflicts.isEmpty()) ImportOutcome.COMPLETE.key else ImportOutcome.PARTIAL.key)
+        val packagesRejected = plan.packagesRejected + packages.rejected
+        val partial = conflicts.isNotEmpty() || packagesRejected > 0
+        updateSourceStatus(sourceId, now, if (partial) ImportOutcome.PARTIAL.key else ImportOutcome.COMPLETE.key)
 
         return ImportResult(
-            outcome = if (conflicts.isEmpty()) ImportOutcome.COMPLETE else ImportOutcome.PARTIAL,
+            outcome = if (partial) ImportOutcome.PARTIAL else ImportOutcome.COMPLETE,
             tasksCreated = created,
             tasksAdopted = adopted,
             tasksReconciled = reconciled,
@@ -3001,7 +3079,10 @@ abstract class ListsDao {
             assetsUpdated = assetsUpdated,
             assetsMarkedMissing = assetsMissing,
             conflicts = conflicts,
-            notices = plan.notices
+            notices = plan.notices,
+            packagesWritten = packages.written,
+            packagesRejected = packagesRejected,
+            packageDiagnostics = plan.diagnostics
         )
     }
 
@@ -3031,6 +3112,28 @@ abstract class ListsDao {
         coverage: String,
         plan: ImportPlan
     ): Boolean {
+        // A Package can change without changing any Task row — a payload revision, a checkpoint
+        // that has never been written — so it is asked before the Task comparison rather than
+        // being inferred from it. An unchanged fingerprint and a complete set of Prompt links is
+        // the one combination that answers "no" without a write.
+        for (plannedPackage in plan.packages) {
+            val checkpoint = packageCheckpoint(sourceId, plannedPackage.packageKey) ?: return true
+            if (checkpoint.revision != plannedPackage.revision ||
+                checkpoint.fingerprint != plannedPackage.fingerprint
+            ) {
+                return true
+            }
+            val linked = packagePromptTasks(sourceId, plannedPackage.packageKey)
+                .filter { it.present }
+                .map { it.promptKey }
+                .toSet()
+            val planned = plan.tasks
+                .filter { it.prompt?.packageKey == plannedPackage.packageKey }
+                .mapNotNull { it.prompt?.promptKey }
+                .toSet()
+            if (!linked.containsAll(planned)) return true
+        }
+
         val imports = taskImportsForSource(sourceId)
         if (imports.isEmpty()) return plan.tasks.isNotEmpty()
         val plannedPaths = plan.tasks.flatMap { it.assets }.map { it.rootRelativePath }.toSet()
@@ -3183,10 +3286,20 @@ abstract class ListsDao {
                COUNT(a.id) AS assetCount,
                COALESCE(SUM(a.sourceMissing), 0) AS missingAssets,
                SUM(a.sizeBytes) AS sizeBytes,
-               MAX(a.lastModified) AS lastModified
+               MAX(a.lastModified) AS lastModified,
+               ppt.packageKey AS packageKey,
+               pc.title AS packageTitle,
+               ppt.promptKey AS promptKey,
+               tp.kind AS payloadKind,
+               tp.schemaVersion AS payloadSchema,
+               tp.revision AS payloadRevision
         FROM task_imports ti
         JOIN task_state ts ON ts.taskId = ti.taskId
         LEFT JOIN assets a ON a.taskId = ti.taskId
+        LEFT JOIN package_prompt_tasks ppt ON ppt.taskId = ti.taskId
+        LEFT JOIN package_checkpoints pc
+               ON pc.sourceId = ti.sourceId AND pc.packageKey = ppt.packageKey
+        LEFT JOIN task_payloads tp ON tp.taskId = ti.taskId
         WHERE ti.sourceId = :sourceId
         GROUP BY ti.taskId
         """
@@ -3223,7 +3336,13 @@ abstract class ListsDao {
                 hasUnviewableAsset = assets.any { asset ->
                     !assetViewerAvailable(asset.relativePath?.substringAfterLast('/').orEmpty())
                 },
-                assets = assets.map { it.toReviewAsset(pairs[it.id]?.decisions ?: AssetDecisions()) }
+                assets = assets.map { it.toReviewAsset(pairs[it.id]?.decisions ?: AssetDecisions()) },
+                packageKey = projection.packageKey,
+                packageTitle = projection.packageTitle,
+                promptKey = projection.promptKey,
+                payloadKind = projection.payloadKind,
+                payloadSchema = projection.payloadSchema,
+                payloadRevision = projection.payloadRevision
             )
         }
     }
@@ -3435,6 +3554,283 @@ abstract class ListsDao {
         }
         return NewTaskDelta(assetsCreated = task.assets.size)
     }
+
+    // --- Packages (v0.8.2) --------------------------------------------------------------------
+
+    @Query(
+        "SELECT * FROM package_checkpoints WHERE sourceId = :sourceId AND packageKey = :packageKey"
+    )
+    protected abstract suspend fun packageCheckpoint(
+        sourceId: String,
+        packageKey: String
+    ): PackageCheckpointEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    protected abstract suspend fun upsertPackageCheckpoint(checkpoint: PackageCheckpointEntity)
+
+    @Query(
+        "SELECT * FROM package_prompt_tasks WHERE sourceId = :sourceId AND packageKey = :packageKey"
+    )
+    protected abstract suspend fun packagePromptTasks(
+        sourceId: String,
+        packageKey: String
+    ): List<PackagePromptTaskEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    protected abstract suspend fun insertPackagePromptTask(link: PackagePromptTaskEntity)
+
+    @Query("UPDATE package_prompt_tasks SET present = :present WHERE taskId = :taskId")
+    protected abstract suspend fun setPackagePromptPresent(taskId: String, present: Boolean)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    protected abstract suspend fun upsertTaskPayload(payload: TaskPayloadEntity)
+
+    @Query("SELECT * FROM task_payloads WHERE taskId = :taskId")
+    abstract suspend fun taskPayload(taskId: String): TaskPayloadEntity?
+
+    /** The same row, watched: the Content page re-reads its body rather than carrying it in a queue. */
+    @Query("SELECT * FROM task_payloads WHERE taskId = :taskId")
+    abstract fun observeTaskPayload(taskId: String): Flow<TaskPayloadEntity?>
+
+    @Query("SELECT * FROM package_resources WHERE sourceId = :sourceId AND packageKey = :packageKey")
+    protected abstract suspend fun packageResources(
+        sourceId: String,
+        packageKey: String
+    ): List<PackageResourceEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    protected abstract suspend fun upsertPackageResource(resource: PackageResourceEntity)
+
+    @Query("UPDATE package_resources SET missing = 1, updatedAt = :now WHERE id = :id")
+    protected abstract suspend fun markPackageResourceMissing(id: String, now: Long)
+
+    @Query("DELETE FROM task_resources WHERE taskId = :taskId")
+    protected abstract suspend fun clearTaskResources(taskId: String)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    protected abstract suspend fun insertTaskResource(link: TaskResourceEntity)
+
+    @Query("SELECT * FROM task_resources WHERE taskId = :taskId")
+    abstract suspend fun taskResources(taskId: String): List<TaskResourceEntity>
+
+    @Query("SELECT * FROM package_resources WHERE id = :id")
+    abstract suspend fun packageResource(id: String): PackageResourceEntity?
+
+    /**
+     * The Resources one Prompt uses, with the requiredness of *this* use.
+     *
+     * The join is the point: a Resource row may be read by two Prompts, one of which requires the
+     * photo and one of which does not, so the requiredness is the link's and never the Resource's.
+     * [rootUri] is the document URI the import's scan saw; [relativePath] is the member path kept
+     * as provenance for a person reading the row.
+     */
+    @Query(
+        """
+        SELECT pr.resourceKey AS resourceKey, pr.kind AS kind, pr.rootUri AS uri,
+               pr.relativePath AS relativePath, pr.missing AS missing, tr.required AS required
+        FROM task_resources tr
+        JOIN package_resources pr ON pr.id = tr.resourceId
+        WHERE tr.taskId = :taskId
+        ORDER BY pr.resourceKey
+        """
+    )
+    abstract fun observeTaskResourceViews(taskId: String): Flow<List<TaskResourceView>>
+
+    /** The same rows once, for the submission boundary's synchronous check. */
+    @Query(
+        """
+        SELECT pr.resourceKey AS resourceKey, pr.kind AS kind, pr.rootUri AS uri,
+               pr.relativePath AS relativePath, pr.missing AS missing, tr.required AS required
+        FROM task_resources tr
+        JOIN package_resources pr ON pr.id = tr.resourceId
+        WHERE tr.taskId = :taskId
+        ORDER BY pr.resourceKey
+        """
+    )
+    abstract suspend fun taskResourceViews(taskId: String): List<TaskResourceView>
+
+    /**
+     * The last response written for a Task, read rather than observed.
+     *
+     * The submission boundary needs the same latest row the Info sheet observes, but it asks once
+     * and inside the write's own decision: a non-revisable template refuses a second primary
+     * commit, and a check that raced a flow would be deciding on a value that might already have
+     * moved.
+     */
+    @Query(
+        "SELECT response FROM review_events WHERE taskId = :taskId " +
+            "ORDER BY at DESC, id DESC LIMIT 1"
+    )
+    abstract suspend fun latestResponse(taskId: String): String?
+
+    @Query(
+        "SELECT * FROM task_imports WHERE sourceId = :sourceId AND groupPath = :groupPath"
+    )
+    protected abstract suspend fun taskImportForGroupPath(
+        sourceId: String,
+        groupPath: String
+    ): TaskImportEntity?
+
+    /**
+     * Advance every Package in a run, after the ordinary Task loop has minted or reconciled its
+     * Tasks.
+     *
+     * The Task loop runs first because a Package Task is an ordinary Task: the same `task_imports`
+     * row, the same `task_state`, the same List memberships, the same drop policy. This function
+     * adds only what is Package-specific — payloads, links, Resources, and the checkpoint — and
+     * therefore never mints a Task of its own.
+     *
+     * The reconciliation identity is `(sourceId, packageKey, promptKey)`, read through
+     * `package_prompt_tasks`, and not `groupPath`. The two agree for every Package this build
+     * writes, but only the link row is the promise: changing a title keeps the Task, and only a
+     * changed `promptKey` creates another one. A Prompt the revision no longer names is marked
+     * absent and keeps everything else; a Prompt that comes back is marked present again by the
+     * ordinary upsert. Nothing here deletes a Task, a payload, an event, or a Resource row.
+     */
+    private suspend fun applyPackages(
+        source: SourceEntity,
+        plan: ImportPlan,
+        now: Long
+    ): PackageRunDelta {
+        var written = 0
+        var rejected = 0
+
+        for (plannedPackage in plan.packages) {
+            val checkpoint = packageCheckpoint(source.id, plannedPackage.packageKey)
+            val links = packagePromptTasks(source.id, plannedPackage.packageKey)
+            val planned = plan.tasks.filter { it.prompt?.packageKey == plannedPackage.packageKey }
+            val plannedKeys = planned.mapNotNull { it.prompt?.promptKey }.toSet()
+
+            val sameFingerprint = checkpoint != null &&
+                checkpoint.revision == plannedPackage.revision &&
+                checkpoint.fingerprint == plannedPackage.fingerprint
+            if (sameFingerprint) {
+                val linked = links.filter { it.present }.map { it.promptKey }.toSet()
+                val complete = linked.containsAll(plannedKeys) &&
+                    links.none { it.present && it.promptKey !in plannedKeys }
+                if (complete) continue
+            } else if (checkpoint != null) {
+                val stale = plannedPackage.revision < checkpoint.revision
+                val fingerprintConflict = plannedPackage.revision == checkpoint.revision
+                if (stale || fingerprintConflict) {
+                    rejected++
+                    continue
+                }
+            }
+
+            // Resources first: a Prompt's links name them, and a row that is absent makes the
+            // Prompt's requiredness impossible to express.
+            val existingResources = packageResources(source.id, plannedPackage.packageKey)
+                .associateBy { it.resourceKey }
+            val resourceIds = mutableMapOf<String, String>()
+            for (resource in plannedPackage.resources) {
+                val id = existingResources[resource.resourceKey]?.id ?: UUID.randomUUID().toString()
+                resourceIds[resource.resourceKey] = id
+                upsertPackageResource(
+                    PackageResourceEntity(
+                        id = id,
+                        sourceId = source.id,
+                        packageKey = plannedPackage.packageKey,
+                        resourceKey = resource.resourceKey,
+                        kind = resource.kind,
+                        // The document URI the scan saw, so a Viewer can open the Resource without
+                        // walking the granted tree. The member path stays beside it as provenance;
+                        // a host that could not hand over a URI leaves the Source root, and
+                        // `missing` decides whether anyone may read it anyway.
+                        //
+                        // The path is the Package-relative member as declared, not the path inside
+                        // the Upstream: package-protocol.md's storage note promises that pair (where
+                        // the file was declared, and the exact document that answered it), and the
+                        // checkpoint already records where the Package itself lives.
+                        rootUri = resource.uri ?: source.rootUri,
+                        relativePath = resource.member,
+                        missing = !resource.present,
+                        updatedAt = now
+                    )
+                )
+            }
+            for (row in existingResources.values) {
+                if (row.resourceKey !in resourceIds && !row.missing) {
+                    markPackageResourceMissing(row.id, now)
+                }
+            }
+
+            var advanced = false
+            for (task in planned) {
+                val prompt = task.prompt ?: continue
+                val link = links.firstOrNull { it.promptKey == prompt.promptKey }
+                val taskId = link?.taskId
+                    ?: taskImportForGroupPath(source.id, task.groupPath)?.taskId
+                    ?: continue
+                if (link == null) {
+                    insertPackagePromptTask(
+                        PackagePromptTaskEntity(
+                            taskId = taskId,
+                            sourceId = source.id,
+                            packageKey = plannedPackage.packageKey,
+                            promptKey = prompt.promptKey,
+                            present = true
+                        )
+                    )
+                } else if (!link.present) {
+                    setPackagePromptPresent(taskId, true)
+                }
+
+                upsertTaskPayload(
+                    TaskPayloadEntity(
+                        taskId = taskId,
+                        kind = prompt.kind,
+                        schemaVersion = prompt.schema,
+                        payload = prompt.payload,
+                        revision = prompt.revision,
+                        updatedAt = now
+                    )
+                )
+
+                clearTaskResources(taskId)
+                for (use in prompt.resources) {
+                    val resourceId = resourceIds[use.resourceKey] ?: continue
+                    insertTaskResource(
+                        TaskResourceEntity(taskId = taskId, resourceId = resourceId, required = use.required)
+                    )
+                }
+                advanced = true
+            }
+
+            for (link in links) {
+                if (link.present && link.promptKey !in plannedKeys) {
+                    setPackagePromptPresent(link.taskId, false)
+                    advanced = true
+                }
+            }
+
+            upsertPackageCheckpoint(
+                PackageCheckpointEntity(
+                    sourceId = source.id,
+                    packageKey = plannedPackage.packageKey,
+                    rootUri = source.rootUri,
+                    relativePath = plannedPackage.rootRelativePath,
+                    protocol = plannedPackage.protocol,
+                    title = plannedPackage.title,
+                    revision = plannedPackage.revision,
+                    fingerprint = plannedPackage.fingerprint,
+                    lastSeenAt = now
+                )
+            )
+            // An empty Package (no Prompts) still writes its checkpoint, which is a Package that
+            // was seen and says nothing. It counts as written because the checkpoint moved or was
+            // created, and a later import must be able to tell that from "never looked at".
+            if (advanced || checkpoint == null || checkpoint.revision != plannedPackage.revision ||
+                checkpoint.fingerprint != plannedPackage.fingerprint
+            ) {
+                written++
+            }
+        }
+
+        return PackageRunDelta(written = written, rejected = rejected)
+    }
+
+    private class PackageRunDelta(val written: Int, val rejected: Int)
 
     // --- passage marks (v0.7.0) ---------------------------------------------------------------
 

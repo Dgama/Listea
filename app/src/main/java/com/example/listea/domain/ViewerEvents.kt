@@ -10,14 +10,17 @@ import java.util.Locale
  * the key is what a stored definition writes down — so a later release may add a member without
  * moving the ones already on disk.
  *
- * **One member in v0.8.1.** The image viewer's long press is the only intent a shipped viewer
- * produces, and it is enough to prove the path: an event that comes from the content rather than
- * from a button somebody configured. A choice event arrives with the structured page in v0.8.2.
+ * **Two members in v0.8.2.** The image viewer's long press reports a point on content; the
+ * structured profile viewer reports the option the person chose. Both come from the content rather
+ * than from a button somebody configured, which is what makes them events and not controls.
  */
 enum class ViewerEventType(val key: String) {
 
     /** A point on an image, with the colour of the image at that point. */
-    IMAGE_POINT("image.point");
+    IMAGE_POINT("image.point"),
+
+    /** One declared option chosen in a Prompt. */
+    CHOICE_SELECT("choice.select");
 
     companion object {
         /** The type a stored [key] names, or null for one this build has never written. */
@@ -53,6 +56,21 @@ sealed interface ViewerEvent {
     ) : ViewerEvent {
         override val type = ViewerEventType.IMAGE_POINT
     }
+
+    /**
+     * An option the person chose in a Prompt.
+     *
+     * [optionId] is the machine identity declared by the Package; [label] is what they read when
+     * they chose it. Both are kept because a later revision may rename the label or remove the
+     * option, and the record should still say what the person saw. The id is not an index: options
+     * may be reordered between revisions without changing the answer.
+     */
+    data class Choice(
+        val optionId: String,
+        val label: String
+    ) : ViewerEvent {
+        override val type = ViewerEventType.CHOICE_SELECT
+    }
 }
 
 /**
@@ -74,6 +92,13 @@ internal fun ViewerEvent.encodeValue(): String = when (this) {
         formatPoint(y),
         color.uppercase(),
         assetPath.replace('\t', ' ').replace('\n', ' ')
+    ).joinToString("\t")
+
+    // The label is human interpretation, not identity: flatten whitespace that would break the
+    // line grammar and bound it to the protocol's option-label limit. The id stays exact.
+    is ViewerEvent.Choice -> listOf(
+        optionId,
+        label.replace('\t', ' ').replace('\n', ' ').take(MAX_CHOICE_LABEL)
     ).joinToString("\t")
 }
 
@@ -99,6 +124,15 @@ internal fun parseEventValue(type: ViewerEventType, value: String): ViewerEvent?
             assetPath = fields[3]
         )
     }
+
+    ViewerEventType.CHOICE_SELECT -> {
+        val fields = value.split('\t', limit = 2)
+        if (fields.size != 2) return null
+        if (!PackageProtocol.isKey(fields[0])) return null
+        val label = fields[1]
+        if (label.isEmpty() || label.length > MAX_CHOICE_LABEL) return null
+        ViewerEvent.Choice(optionId = fields[0], label = label)
+    }
 }
 
 /**
@@ -111,9 +145,13 @@ internal fun parseEventValue(type: ViewerEventType, value: String): ViewerEvent?
  */
 internal fun ViewerEvent.assetUri(): String? = when (this) {
     is ViewerEvent.ImagePoint -> assetPath.ifEmpty { null }
+    is ViewerEvent.Choice -> null
 }
 
 private val COLOR_PATTERN = Regex("^#[0-9A-Fa-f]{6}$")
+
+/** The protocol's option-label bound; see `docs/package-protocol.md`. */
+private const val MAX_CHOICE_LABEL = 200
 
 /**
  * Four fixed decimals, locale-independent.
@@ -126,24 +164,33 @@ private fun formatPoint(value: Double): String =
     String.format(Locale.ROOT, "%.4f", value)
 
 /**
- * When a Task Review commits.
+ * How an answer becomes a judgment, owned by the template.
  *
- * **Explicit, and owned by the template.** The submit control is part of what the template
- * declares, not something the viewer draws for every review. That is what makes a Headless
- * template and a template with a custom Submit button the same thing: both name a control, and the
- * surface draws exactly the control the definition names.
+ * Commit modality and revisability are independent, and both are template properties. The three
+ * forms cover the products this app has to serve:
  *
- * [controlId] is either an id in the version's own button list — an [ButtonType.ACTION] button —
- * or [TASK_REVIEW_COMPLETE_CONTROL], the built-in completion checkbox every review surface has
- * always had. The two are deliberately one namespace: a template that names `complete` gets the
- * checkbox, and a template that names anything else gets no checkbox at all.
+ * - [Immediate] — the intent that carries the answer is itself the commit. Tapping Like commits a
+ *   dating judgment at once.
+ * - [ConfirmControl] — the intent selects; a control named [controlId] commits. This is the
+ *   v0.8.1 behaviour, kept as one member of a wider vocabulary rather than the only one.
+ * - [ConfirmIntent] — the intent selects; another declared intent confirms. A later viewer may
+ *   offer "select a card, then swipe left to accept" without Core learning a new mode.
+ *
+ * [ConfirmControl.controlId] is either an id in the version's own button list — an
+ * [ButtonType.ACTION] button — or [TASK_REVIEW_COMPLETE_CONTROL], the built-in completion checkbox
+ * every review surface has always had. The two are deliberately one namespace: a template that
+ * names `complete` gets the checkbox, and a template that names anything else gets no checkbox.
  */
 sealed interface CommitPolicy {
 
-    data class Explicit(val controlId: String) : CommitPolicy
+    data class Immediate(val intent: ViewerEventType) : CommitPolicy
+
+    data class ConfirmControl(val controlId: String) : CommitPolicy
+
+    data class ConfirmIntent(val intent: ViewerEventType) : CommitPolicy
 }
 
-/** The built-in completion control's id; see [CommitPolicy.Explicit.controlId]. */
+/** The built-in completion control's id; see [CommitPolicy.ConfirmControl.controlId]. */
 const val TASK_REVIEW_COMPLETE_CONTROL = "complete"
 
 /**
@@ -163,29 +210,35 @@ data class TaskReviewDefinition(
     val viewer: TemplateVersionRef,
     val accepts: Set<ViewerEventType>,
     val commit: CommitPolicy,
+    val revisable: Boolean,
     val completesTask: Boolean,
     val advanceAfterCommit: Boolean
 )
 
-/** The encoding below's version, written as the first line of every stored definition. */
-const val TASK_REVIEW_DEFINITION_VERSION = 1
+/** The encoding below's version, written as the first line of every newly stored definition. */
+const val TASK_REVIEW_DEFINITION_VERSION = 2
 
 private const val DEFINITION_TAG = "v"
 private const val VIEWER_TAG = "viewer"
 private const val ACCEPTS_TAG = "accepts"
 private const val COMMIT_TAG = "commit"
+private const val REVISABLE_TAG = "revisable"
 private const val COMPLETES_TAG = "completes"
 private const val ADVANCE_TAG = "advance"
-private const val COMMIT_EXPLICIT = "explicit:"
+private const val COMMIT_IMMEDIATE = "immediate:"
+private const val COMMIT_CONFIRM_CONTROL = "confirm:control:"
+private const val COMMIT_CONFIRM_INTENT = "confirm:intent:"
+private const val COMMIT_LEGACY_EXPLICIT = "explicit:"
 
 /**
  * A Task Review definition as one string, one fact per line.
  *
  * ```text
- * v=1
+ * v=2
  * viewer=builtin.media.viewer@1
  * accepts=image.point
- * commit=explicit:submit
+ * commit=confirm:control:submit
+ * revisable=true
  * completes=true
  * advance=true
  * ```
@@ -198,13 +251,24 @@ fun encodeTaskReviewDefinition(definition: TaskReviewDefinition): String = listO
     "$DEFINITION_TAG=$TASK_REVIEW_DEFINITION_VERSION",
     "$VIEWER_TAG=${definition.viewer}",
     "$ACCEPTS_TAG=${definition.accepts.map { it.key }.sorted().joinToString(",")}",
-    "$COMMIT_TAG=$COMMIT_EXPLICIT${(definition.commit as CommitPolicy.Explicit).controlId}",
+    "$COMMIT_TAG=${encodeCommit(definition.commit)}",
+    "$REVISABLE_TAG=${definition.revisable}",
     "$COMPLETES_TAG=${definition.completesTask}",
     "$ADVANCE_TAG=${definition.advanceAfterCommit}"
 ).joinToString("\n")
 
+private fun encodeCommit(commit: CommitPolicy): String = when (commit) {
+    is CommitPolicy.Immediate -> "$COMMIT_IMMEDIATE${commit.intent.key}"
+    is CommitPolicy.ConfirmControl -> "$COMMIT_CONFIRM_CONTROL${commit.controlId}"
+    is CommitPolicy.ConfirmIntent -> "$COMMIT_CONFIRM_INTENT${commit.intent.key}"
+}
+
 /**
  * The definition a stored payload holds, or null when this build cannot read it.
+ *
+ * Version 1 wrote `commit=explicit:<control>` and had no revisability line; it is still readable,
+ * with [CommitPolicy.ConfirmControl] and `revisable=true`, because that was what those definitions
+ * did: a second commit was accepted. Version 2 requires every line.
  *
  * Fail closed, like every other stored vocabulary in the app: an unknown version, an unknown event
  * key, a commit mode this build has never written, a duplicate or unknown line, a missing required
@@ -217,7 +281,7 @@ fun decodeTaskReviewDefinition(
     text: String,
     version: Int
 ): TaskReviewDefinition? {
-    if (version != TASK_REVIEW_DEFINITION_VERSION) return null
+    if (version != TASK_REVIEW_DEFINITION_VERSION && version != 1) return null
     if (text.isEmpty()) return null
 
     val fields = mutableMapOf<String, String>()
@@ -230,8 +294,9 @@ fun decodeTaskReviewDefinition(
         if (key in fields) return null
         fields[key] = value
     }
-    if (fields.keys.any { it !in KNOWN_TAGS }) return null
-    if (fields[DEFINITION_TAG] != TASK_REVIEW_DEFINITION_VERSION.toString()) return null
+    val knownTags = if (version == 1) KNOWN_TAGS_V1 else KNOWN_TAGS
+    if (fields.keys.any { it !in knownTags }) return null
+    if (fields[DEFINITION_TAG] != version.toString()) return null
 
     val viewer = parseTemplateVersionRef(fields[VIEWER_TAG] ?: return null) ?: return null
     val accepts = (fields[ACCEPTS_TAG] ?: return null)
@@ -239,27 +304,49 @@ fun decodeTaskReviewDefinition(
         .filter { it.isNotBlank() }
         .map { ViewerEventType.fromKey(it.trim()) ?: return null }
         .toSet()
-    val commit = when {
-        fields[COMMIT_TAG].orEmpty().startsWith(COMMIT_EXPLICIT) ->
-            fields.getValue(COMMIT_TAG).removePrefix(COMMIT_EXPLICIT).trim()
-
-        else -> null
-    }?.takeIf { it.isNotEmpty() } ?: return null
+    val commit = if (version == 1) {
+        val id = fields[COMMIT_TAG]?.removePrefix(COMMIT_LEGACY_EXPLICIT)
+            ?.takeIf { it != fields[COMMIT_TAG] && it.isNotEmpty() }
+            ?: return null
+        CommitPolicy.ConfirmControl(id)
+    } else {
+        parseCommit(fields[COMMIT_TAG] ?: return null) ?: return null
+    }
+    val revisable = if (version == 1) true else booleanField(fields[REVISABLE_TAG]) ?: return null
     val completes = booleanField(fields[COMPLETES_TAG]) ?: return null
     val advance = booleanField(fields[ADVANCE_TAG]) ?: return null
 
     return TaskReviewDefinition(
         viewer = viewer,
         accepts = accepts,
-        commit = CommitPolicy.Explicit(commit),
+        commit = commit,
+        revisable = revisable,
         completesTask = completes,
         advanceAfterCommit = advance
     )
 }
 
-private val KNOWN_TAGS = setOf(
+private fun parseCommit(value: String): CommitPolicy? = when {
+    value.startsWith(COMMIT_IMMEDIATE) ->
+        ViewerEventType.fromKey(value.removePrefix(COMMIT_IMMEDIATE))
+            ?.let(CommitPolicy::Immediate)
+
+    value.startsWith(COMMIT_CONFIRM_CONTROL) ->
+        value.removePrefix(COMMIT_CONFIRM_CONTROL)
+            .takeIf { it.isNotEmpty() }
+            ?.let(CommitPolicy::ConfirmControl)
+
+    value.startsWith(COMMIT_CONFIRM_INTENT) ->
+        ViewerEventType.fromKey(value.removePrefix(COMMIT_CONFIRM_INTENT))
+            ?.let(CommitPolicy::ConfirmIntent)
+
+    else -> null
+}
+
+private val KNOWN_TAGS_V1 = setOf(
     DEFINITION_TAG, VIEWER_TAG, ACCEPTS_TAG, COMMIT_TAG, COMPLETES_TAG, ADVANCE_TAG
 )
+private val KNOWN_TAGS = KNOWN_TAGS_V1 + REVISABLE_TAG
 
 private fun booleanField(value: String?): Boolean? = when (value) {
     "true" -> true

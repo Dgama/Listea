@@ -473,8 +473,12 @@ internal fun reviewQueueEntries(
  */
 internal fun reviewPageEntries(
     assets: List<ReviewAsset>,
-    addOn: StoredAddOnVersion?
+    addOn: StoredAddOnVersion?,
+    content: Boolean = false
 ): List<MediaQueueEntry> = buildList {
+    // The Content page is first because it is what the Prompt is; its row says so rather than
+    // borrowing a file's name, exactly as the add-on's does.
+    if (content) add(MediaQueueEntry("Prompt"))
     assets.forEach { add(MediaQueueEntry(it.name)) }
     addOn?.let { add(MediaQueueEntry("add-on ${it.name}")) }
 }

@@ -4,6 +4,10 @@ import com.example.listea.data.ScannedFile
 import com.example.listea.domain.AddOnVersionRef
 import com.example.listea.domain.ExportChoice
 import com.example.listea.domain.ExportKind
+import com.example.listea.domain.DiagnosticScope
+import com.example.listea.domain.PackageDiagnostic
+import com.example.listea.domain.PlannedPackageResource
+import com.example.listea.domain.PlannedPromptResource
 import com.example.listea.domain.TemplateVersionRef
 
 /**
@@ -26,7 +30,14 @@ import com.example.listea.domain.TemplateVersionRef
 /** The grouping rules v0.2.5 ships, keyed by the value persisted on `sources.importerKind`. */
 enum class ImporterKind(val key: String) {
     FILE_AS_TASK("file-as-task"),
-    FOLDER_AS_TASK("folder-as-task");
+    FOLDER_AS_TASK("folder-as-task"),
+
+    /**
+     * One Todo over the Packages beneath a folder: each `listea.package/1` manifest is read and
+     * each planned Prompt becomes a Task. This is a third printing convention, not a detection
+     * rule under the other two — see `docs/package-protocol.md`.
+     */
+    PACKAGE("package");
 
     companion object {
         fun fromKey(key: String): ImporterKind? = entries.firstOrNull { it.key == key }
@@ -213,7 +224,11 @@ data class ImportOptions(
 fun normalizeKeepTree(importer: ImporterKind, keepTree: Boolean): Boolean =
     when (importer) {
         ImporterKind.FILE_AS_TASK -> keepTree
+        // Both group their Tasks by something other than the browsed tree: a folder-as-Task run
+        // produces one Task per child folder, and a Package run produces one per Prompt. Neither
+        // has a filesystem tree to keep, and a stored `true` would promise a level nothing creates.
         ImporterKind.FOLDER_AS_TASK -> false
+        ImporterKind.PACKAGE -> false
     }
 
 /** One file, as an importer wants to attach it to a Task. Root-relative, ordered. */
@@ -230,7 +245,45 @@ data class PlannedAsset(
 data class PlannedTask(
     val groupPath: String,
     val displayName: String,
-    val assets: List<PlannedAsset>
+    val assets: List<PlannedAsset>,
+
+    /**
+     * The Prompt this Task answers, when it came from a Package; null for a media Task.
+     *
+     * The payload travels with the Task rather than in a second list because the two are one
+     * output: a Package Prompt that produced no Task is a Prompt nothing takes on, and a Task
+     * written without its payload would be a Task that can never be reviewed. It is also what lets
+     * the existing run loop mint package Tasks without a parallel writing path.
+     */
+    val prompt: PlannedTaskPrompt? = null
+)
+
+/**
+ * The stored half of one Package Prompt: what a Viewer needs to draw it and what a submission
+ * needs to check itself against.
+ *
+ * [payload] is the canonical description body. Core never parses it; [kind] and [schema] are the
+ * envelope that says which Viewer may.
+ */
+data class PlannedTaskPrompt(
+    val packageKey: String,
+    val promptKey: String,
+    val kind: String,
+    val schema: Int,
+    val payload: String,
+    val revision: Int,
+    val resources: List<PlannedPromptResource>
+)
+
+/** One accepted Package in a run: its checkpoint and the Resources its Prompts may use. */
+data class PlannedPackage(
+    val rootRelativePath: String,
+    val packageKey: String,
+    val protocol: String,
+    val title: String,
+    val revision: Int,
+    val fingerprint: String,
+    val resources: List<PlannedPackageResource>
 )
 
 /**
@@ -250,10 +303,21 @@ sealed interface ImportNotice {
     data class EmptyFolder(override val relativePath: String) : ImportNotice
 }
 
-/** What an importer made of a snapshot: the Tasks it would write, and the things it skipped. */
+/**
+ * What an importer made of a snapshot: the Tasks it would write, the things it skipped, and — for
+ * a Package run — the checkpoints and per-record diagnostics.
+ *
+ * [packages] is empty for the two folder rules. It is not derivable from [tasks]: a Package whose
+ * Prompts all failed still writes a checkpoint, and one whose fingerprint is unchanged writes no
+ * Task at all while still being seen.
+ */
 data class ImportPlan(
     val tasks: List<PlannedTask>,
-    val notices: List<ImportNotice>
+    val notices: List<ImportNotice>,
+    val packages: List<PlannedPackage> = emptyList(),
+    val diagnostics: List<PackageDiagnostic> = emptyList(),
+    /** How many Packages the planning pass refused outright. A run result adds its own refusals. */
+    val packagesRejected: Int = 0
 )
 
 /**
@@ -264,10 +328,31 @@ data class ImportPlan(
  * this returns is rebased through it; a file at `a.jpg` under an import root of `holiday` is
  * `holiday/a.jpg`, which is the identity every other part of Listea names it by.
  */
-fun plan(kind: ImporterKind, importRoot: String, snapshot: FolderSnapshot): ImportPlan =
+fun plan(
+    kind: ImporterKind,
+    importRoot: String,
+    snapshot: FolderSnapshot,
+    packagePlanner: ((String, FolderSnapshot) -> ImportPlan)? = null
+): ImportPlan =
     when (kind) {
         ImporterKind.FILE_AS_TASK -> planFileAsTask(importRoot, snapshot)
         ImporterKind.FOLDER_AS_TASK -> planFolderAsTask(importRoot, snapshot)
+        // The Package planner reads bytes, so it arrives from the host as a function. A caller
+        // without one (a data-layer helper that only knows the two folder rules) gets a plan that
+        // says so rather than a silent empty run that would look like an empty folder.
+        ImporterKind.PACKAGE -> packagePlanner?.invoke(importRoot, snapshot)
+            ?: ImportPlan(
+                tasks = emptyList(),
+                notices = emptyList(),
+                diagnostics = listOf(
+                    PackageDiagnostic(
+                        scope = DiagnosticScope.PACKAGE,
+                        key = null,
+                        code = "package-unsupported",
+                        message = "This path cannot read Packages."
+                    )
+                )
+            )
     }
 
 /**

@@ -55,9 +55,14 @@ import java.util.UUID
         AddOnEntity::class,
         AddOnVersionEntity::class,
         TaskReviewAnswerEntity::class,
-        ReviewEventAnswerEntity::class
+        ReviewEventAnswerEntity::class,
+        TaskPayloadEntity::class,
+        PackageCheckpointEntity::class,
+        PackagePromptTaskEntity::class,
+        PackageResourceEntity::class,
+        TaskResourceEntity::class
     ],
-    version = 31,
+    version = 32,
     exportSchema = true
 )
 abstract class ListeaDatabase : RoomDatabase() {
@@ -1473,6 +1478,90 @@ abstract class ListeaDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * The Package tables: the first stored Prompt payload, its import checkpoint, and the links
+         * from a Task to the Package's Prompts and Resources.
+         *
+         * Additive and empty. No existing row changes meaning: a Task imported from a folder has no
+         * `task_payloads` row and no Package link, and every reader must treat that absence as *not
+         * a Package Task* rather than as a Prompt with no body. Nothing is backfilled, because
+         * there is nothing in a pre-Package database that was a Prompt.
+         */
+        internal val MIGRATION_31_32 = object : Migration(31, 32) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `task_payloads` (" +
+                        "`taskId` TEXT NOT NULL, `kind` TEXT NOT NULL, " +
+                        "`schemaVersion` INTEGER NOT NULL, `payload` TEXT NOT NULL, " +
+                        "`revision` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`taskId`), " +
+                        "FOREIGN KEY(`taskId`) REFERENCES `tasks`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE )"
+                )
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `package_checkpoints` (" +
+                        "`sourceId` TEXT NOT NULL, `packageKey` TEXT NOT NULL, " +
+                        "`rootUri` TEXT NOT NULL, `relativePath` TEXT NOT NULL, " +
+                        "`protocol` TEXT NOT NULL, `title` TEXT NOT NULL, " +
+                        "`revision` INTEGER NOT NULL, `fingerprint` TEXT NOT NULL, " +
+                        "`lastSeenAt` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`sourceId`, `packageKey`), " +
+                        "FOREIGN KEY(`sourceId`) REFERENCES `sources`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE NO ACTION )"
+                )
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `package_prompt_tasks` (" +
+                        "`taskId` TEXT NOT NULL, `sourceId` TEXT NOT NULL, " +
+                        "`packageKey` TEXT NOT NULL, `promptKey` TEXT NOT NULL, " +
+                        "`present` INTEGER NOT NULL, PRIMARY KEY(`taskId`), " +
+                        "FOREIGN KEY(`taskId`) REFERENCES `tasks`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE, " +
+                        "FOREIGN KEY(`sourceId`) REFERENCES `sources`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE NO ACTION )"
+                )
+                connection.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS " +
+                        "`index_package_prompt_tasks_sourceId_packageKey_promptKey` " +
+                        "ON `package_prompt_tasks` (`sourceId`, `packageKey`, `promptKey`)"
+                )
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `package_resources` (" +
+                        "`id` TEXT NOT NULL, `sourceId` TEXT NOT NULL, " +
+                        "`packageKey` TEXT NOT NULL, `resourceKey` TEXT NOT NULL, " +
+                        "`kind` TEXT NOT NULL, `rootUri` TEXT NOT NULL, " +
+                        "`relativePath` TEXT NOT NULL, `missing` INTEGER NOT NULL, " +
+                        "`updatedAt` INTEGER NOT NULL, PRIMARY KEY(`id`), " +
+                        "FOREIGN KEY(`sourceId`) REFERENCES `sources`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE NO ACTION )"
+                )
+                connection.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS " +
+                        "`index_package_resources_sourceId_packageKey_resourceKey` " +
+                        "ON `package_resources` (`sourceId`, `packageKey`, `resourceKey`)"
+                )
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `task_resources` (" +
+                        "`taskId` TEXT NOT NULL, `resourceId` TEXT NOT NULL, " +
+                        "`required` INTEGER NOT NULL, PRIMARY KEY(`taskId`, `resourceId`), " +
+                        "FOREIGN KEY(`taskId`) REFERENCES `tasks`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE, " +
+                        "FOREIGN KEY(`resourceId`) REFERENCES `package_resources`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE )"
+                )
+                connection.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_task_resources_resourceId` " +
+                        "ON `task_resources` (`resourceId`)"
+                )
+                // The round ships a new built-in Task Review. `INSERT OR IGNORE` leaves the two
+                // existing rows alone and writes the third; the creation callback sees the same
+                // description on a fresh install. The guard in [SeedBuiltIn] is "no templates at
+                // all" and would not reach a database that already holds two, so an upgrade needs
+                // this line rather than the callback.
+                seedBuiltInTaskReviews(connection, System.currentTimeMillis())
+                Log.i("ListeaDatabase", "31 -> 32")
+            }
+        }
+
         /** One row of [MIGRATION_30_31]'s backfill, held until every response has been read. */
         private data class BackfilledEvent(
             val reviewEventId: String,
@@ -2305,6 +2394,24 @@ abstract class ListeaDatabase : RoomDatabase() {
 
                 override fun onOpen(db: SupportSQLiteDatabase) {
                     if (countTemplates(db) == 0L) writeBuiltIn(db)
+                    repairEarlierNames(db)
+                }
+
+                /**
+                 * Moves the built-in Task Reviews onto the vocabulary that names them *headless*.
+                 *
+                 * The update is conditional on the old name, so it is a correction of an
+                 * untouched seed rather than a rename of somebody's template: a row already
+                 * carrying the new name is left alone, and so is one the user renamed to anything
+                 * else. It runs on every open and is a no-op after the first.
+                 */
+                private fun repairEarlierNames(db: SupportSQLiteDatabase) {
+                    for ((id, oldName, newName) in Templates.EarlierTaskReviewNames) {
+                        db.execSQL(
+                            "UPDATE templates SET name = ? WHERE id = ? AND name = ?",
+                            arrayOf(newName, id, oldName)
+                        )
+                    }
                 }
 
                 private fun writeBuiltIn(db: SupportSQLiteDatabase) {
@@ -2360,7 +2467,8 @@ abstract class ListeaDatabase : RoomDatabase() {
                     MIGRATION_27_28,
                     MIGRATION_28_29,
                     MIGRATION_29_30,
-                    MIGRATION_30_31
+                    MIGRATION_30_31,
+                    MIGRATION_31_32
                 )
                     .build()
                     .also { instance = it }

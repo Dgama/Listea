@@ -727,7 +727,22 @@ data class ReviewItem(
      * stamped — every Task imported before v0.8.1 — and reads as the built-in rapid review, which
      * is what those Tasks were in fact judged by.
      */
-    val taskReview: String = ""
+    val taskReview: String = "",
+
+    /**
+     * The Prompt this Task answers, when it came from a Package; all null for a media Task.
+     *
+     * [payloadKind] and [payloadSchema] are the envelope that selects the Viewer. [payloadRevision]
+     * is the Package revision the body was read at, carried so the submission boundary can compare
+     * what is stored now with what the review opened — a body that moved under an open review must
+     * not be judged as if it had not. The body itself is deliberately absent: it is read by Task id
+     * when the Content page is composed, so a long queue does not carry every description.
+     */
+    val packageKey: String? = null,
+    val promptKey: String? = null,
+    val payloadKind: String? = null,
+    val payloadSchema: Int? = null,
+    val payloadRevision: Int? = null
 )
 
 /**
@@ -760,7 +775,12 @@ fun ListItemEntity.toReviewItem(
     rootUri: String?,
     assetControls: String = "",
     addOn: String = "",
-    taskReview: String = ""
+    taskReview: String = "",
+    packageKey: String? = null,
+    promptKey: String? = null,
+    payloadKind: String? = null,
+    payloadSchema: Int? = null,
+    payloadRevision: Int? = null
 ): ReviewItem = ReviewItem(
     id = id,
     // The row's own column, not a projection: `list_items.taskId` is where membership records
@@ -792,7 +812,14 @@ fun ListItemEntity.toReviewItem(
     addOn = addOn,
     // And the same again for the review: a Task is judged by the template its own import stamped,
     // not by whatever the Todo or the List says today.
-    taskReview = taskReview
+    taskReview = taskReview,
+    // The Prompt envelope travels with the rest of the import facts: a List review builds its
+    // queue from membership rows and must still know whether this Task has a Content page.
+    packageKey = packageKey,
+    promptKey = promptKey,
+    payloadKind = payloadKind,
+    payloadSchema = payloadSchema,
+    payloadRevision = payloadRevision
 )
 
 /**

@@ -1,6 +1,7 @@
 package com.example.listea.data
 
 import com.example.listea.ImportNotice
+import com.example.listea.domain.PackageDiagnostic
 
 /**
  * The shape of one import run's answer, returned to the caller and shown, then dropped.
@@ -100,5 +101,25 @@ data class ImportResult(
     val assetsUpdated: Int = 0,
     val assetsMarkedMissing: Int = 0,
     val conflicts: List<ImportConflict> = emptyList(),
-    val notices: List<ImportNotice> = emptyList()
+    val notices: List<ImportNotice> = emptyList(),
+
+    /**
+     * How many Packages this run advanced — a new checkpoint or a higher revision.
+     *
+     * A Package whose fingerprint is unchanged is neither written nor counted: it was seen and it
+     * said nothing new, which is the ordinary result of following an upstream.
+     */
+    val packagesWritten: Int = 0,
+
+    /** How many Packages were refused, by planning or by reconciliation, and wrote nothing. */
+    val packagesRejected: Int = 0,
+
+    /**
+     * Everything the Package planner had to say, in the order it found it.
+     *
+     * Kept as diagnostics rather than notices because they are not all the same kind of fact: a
+     * rejected envelope explains why nothing was imported, while a missing optional photo is a
+     * note about a Prompt that was. The report groups them by whether a Package was written.
+     */
+    val packageDiagnostics: List<PackageDiagnostic> = emptyList()
 )

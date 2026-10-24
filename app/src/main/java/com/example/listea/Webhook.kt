@@ -489,38 +489,49 @@ fun webhookItems(items: List<ListItemEntity>, settings: AppSettings): List<ListI
  * never an omission: `completedAt`, an Asset with no path, and a template version this build cannot
  * read all appear as `null`.
  */
-fun buildWebhookPayload(payload: ExportPayload): String {
-    val carriesAddOn = payload.tasks.any { it.addOn != null }
-    val carriesMarks = payload.tasks.any { task -> task.assets.any { it.marks.isNotEmpty() } }
-    return describePayload(payload, exportVersion(carriesMarks, carriesAddOn)).toString()
-}
+fun buildWebhookPayload(payload: ExportPayload): String = buildWebhookPayload(mapExport(payload))
 
 /**
- * The version this body claims: 4 when any Task carries answers, else 3 when any Asset carries a
- * mark, else 2.
+ * The body itself, from the shared mapping.
+ *
+ * This is the single renderer: [WebhookExporter] sends these bytes and [TxtExporter] writes them.
+ * Neither writer decides a version or orders a key; both ask [mapExport], which is what makes the
+ * two outputs diffable rather than merely intended to agree.
+ */
+internal fun buildWebhookPayload(mapping: ExportMapping): String =
+    describePayload(mapping).toString()
+
+/**
+ * The version this body claims: 5 when any Task is a structured Prompt, else 4 when any Task
+ * carries answers, else 3 when any Asset carries a mark, else 2.
  *
  * Each number introduces one key that a receiver can rely on being present; nothing is claimed that
- * the body does not contain. Answers outrank marks only because a body can carry both and 4 is their
- * union — the marks array still answers to its own rule.
+ * the body does not contain. The order is supersets all the way down — a v5 body may still carry
+ * marks and answers, each under its own rule.
  */
-internal fun exportVersion(carriesMarks: Boolean, carriesAddOn: Boolean): Int = when {
+internal fun exportVersion(
+    carriesMarks: Boolean,
+    carriesAddOn: Boolean,
+    carriesContent: Boolean = false
+): Int = when {
+    carriesContent -> EXPORT_VERSION_CONTENT
     carriesAddOn -> EXPORT_VERSION_ADD_ON
     carriesMarks -> EXPORT_VERSION_MARKS
     else -> EXPORT_VERSION
 }
 
 /** The body itself, with the version already decided. */
-private fun describePayload(payload: ExportPayload, version: Int): JSONObject = JSONObject()
-    .put("version", version)
-    .put("event", payload.event)
+private fun describePayload(mapping: ExportMapping): JSONObject = JSONObject()
+    .put("version", mapping.version)
+    .put("event", mapping.event)
     .put(
         "list",
         JSONObject()
-            .put("id", payload.listId)
-            .put("title", payload.listTitle)
-            .put("completedAt", payload.completedAt ?: JSONObject.NULL)
+            .put("id", mapping.listId)
+            .put("title", mapping.listTitle)
+            .put("completedAt", mapping.completedAt ?: JSONObject.NULL)
     )
-    .put("tasks", JSONArray().apply { payload.tasks.forEach { put(taskJson(it)) } })
+    .put("tasks", JSONArray().apply { mapping.tasks.forEach { put(taskJson(it)) } })
 
 /**
  * One Task as the receiver sees it. `isCompleted` is here rather than on an Asset because checking
@@ -583,6 +594,36 @@ private fun taskJson(task: ExportTaskView): JSONObject {
     // After `assets`, because it is a sibling of it: the answers are about the Task, not about any
     // one file. Absent when the Task answered nothing, which is what keeps its body the v2/v3 shape.
     task.addOn?.let { json.put("addOn", addOnJson(it)) }
+    // After `addOn`, and present only on structured Tasks. `content` says what kind of Prompt this
+    // is; `result` says what was decided about it. The profile text and the photo stay on the
+    // device — see EXPORT_VERSION_CONTENT.
+    task.content?.let { content ->
+        json.put(
+            "content",
+            JSONObject()
+                .put("kind", content.kind)
+                .put("schema", content.schema)
+                .put("revision", content.revision)
+                .put("promptKey", content.promptKey ?: JSONObject.NULL)
+        )
+    }
+    task.result?.let { result ->
+        json.put(
+            "result",
+            JSONObject()
+                .put("completed", result.completed)
+                .apply {
+                    result.choice?.let { choice ->
+                        put(
+                            "choice",
+                            JSONObject()
+                                .put("id", choice.id)
+                                .put("label", choice.label)
+                        )
+                    }
+                }
+        )
+    }
     return json
 }
 

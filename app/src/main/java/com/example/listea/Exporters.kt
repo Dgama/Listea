@@ -7,6 +7,7 @@ import com.example.listea.data.ListItemEntity
 import com.example.listea.data.PayloadAnswerRow
 import com.example.listea.data.PayloadAssetRow
 import com.example.listea.data.PayloadMarkRow
+import com.example.listea.data.PayloadPromptRow
 import com.example.listea.data.PayloadTaskRow
 import com.example.listea.data.ReviewItem
 import com.example.listea.data.decodeActionIds
@@ -16,8 +17,11 @@ import com.example.listea.domain.AddOnQuestionType
 import com.example.listea.domain.ExportChoice
 import com.example.listea.domain.ExportKind
 import com.example.listea.domain.MarkKind
+import com.example.listea.domain.ReviewResponse
 import com.example.listea.domain.StoredAddOnVersion
+import com.example.listea.domain.ViewerEvent
 import com.example.listea.domain.markKind
+import com.example.listea.domain.parse
 import com.example.listea.domain.resolveAddOnAnswers
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -84,6 +88,20 @@ const val EXPORT_VERSION_MARKS = 3
  * both, and the marks array is still written only where there are marks.
  */
 const val EXPORT_VERSION_ADD_ON = 4
+
+/**
+ * The version a body carries **only when at least one Task is a structured Prompt**.
+ *
+ * Version 5 adds two Task-level keys beside `addOn`: `content`, the Prompt's identity, and `result`,
+ * the completion and the one option chosen. It is a superset of 4 in the same way 4 is a superset of
+ * 3, so a media-only round stays byte-for-byte the body v0.7.1 sent.
+ *
+ * **The profile body is not exported.** `content` names kind, schema, revision and Prompt key; it
+ * does not carry the stem, the fields, the photo, or the Resource bytes. Those are personal content
+ * whose only home is the Package, and an export is a record of decisions — D6 in
+ * `docs/iterations/v0.8.2-plan.md`. A receiver that needs to read the Prompt asks the Package.
+ */
+const val EXPORT_VERSION_CONTENT = 5
 
 /** One template a Task was imported under: identity only, never its controls. */
 data class ExportTemplateView(
@@ -178,8 +196,75 @@ data class ExportTaskView(
     val isCompleted: Boolean,
     val templates: List<ExportTemplateView>,
     val assets: List<ExportAssetView>,
-    val addOn: ExportAddOnView? = null
+    val addOn: ExportAddOnView? = null,
+    /** The Prompt's identity when this Task is structured content, else null. */
+    val content: ExportContentView? = null,
+    /** The structured answer, present exactly when [content] is. */
+    val result: ExportResultView? = null
 )
+
+/**
+ * What kind of Prompt a Task is, without being the Prompt.
+ *
+ * [promptKey] is the Package's own name for the question; null on a payload Task that is not linked
+ * to a manifest Prompt. [revision] is the revision the body was read at, so a receiver can tell two
+ * answers apart when a Package republished the question with different labels.
+ */
+data class ExportContentView(
+    val kind: String,
+    val schema: Int,
+    val revision: Int,
+    val promptKey: String?
+)
+
+/**
+ * The judgment recorded against a structured Task.
+ *
+ * [completed] is the Task's own state, the same fact `isCompleted` carries; it repeats here because
+ * a v5 receiver reads `result` as the answer object and should not have to join two levels to know
+ * whether the Task was finished. [choice] is the newest `choice.select` on record, with the label
+ * as it was when the person chose — the id is identity, the label is the snapshot.
+ *
+ * A freeform or multiple-choice Prompt would extend this object; with one Viewer shipping, a result
+ * without a choice is a Task completed without a structured event.
+ */
+data class ExportResultView(
+    val completed: Boolean,
+    val choice: ExportChoiceView?
+)
+
+data class ExportChoiceView(val id: String, val label: String)
+
+/**
+ * A round after the version has been decided: every writer's only input.
+ *
+ * Pure and explicit, so the webhook body and the text file are not two assemblies that happen to
+ * agree today. [version] is computed once from the tasks, and both renderers walk the same values in
+ * the same order.
+ */
+data class ExportMapping(
+    val version: Int,
+    val event: String,
+    val listId: Long,
+    val listTitle: String,
+    val completedAt: Long?,
+    val tasks: List<ExportTaskView>
+)
+
+/** The round's payload as the wire sees it, with the version its contents earn. */
+fun mapExport(payload: ExportPayload): ExportMapping {
+    val carriesContent = payload.tasks.any { it.content != null }
+    val carriesAddOn = payload.tasks.any { it.addOn != null }
+    val carriesMarks = payload.tasks.any { task -> task.assets.any { it.marks.isNotEmpty() } }
+    return ExportMapping(
+        version = exportVersion(carriesMarks, carriesAddOn, carriesContent),
+        event = payload.event,
+        listId = payload.listId,
+        listTitle = payload.listTitle,
+        completedAt = payload.completedAt,
+        tasks = payload.tasks
+    )
+}
 
 /**
  * The folder a stored Asset path sits in, relative to the Upstream root.
@@ -213,7 +298,9 @@ fun exportTaskViews(
     marksByAsset: Map<String, List<PayloadMarkRow>> = emptyMap(),
     fingerprintByAsset: Map<String, String> = emptyMap(),
     addOnResolver: AddOnResolver = AddOnResolver.Empty,
-    answersByTask: Map<String, List<PayloadAnswerRow>> = emptyMap()
+    answersByTask: Map<String, List<PayloadAnswerRow>> = emptyMap(),
+    promptsByTask: Map<String, PayloadPromptRow> = emptyMap(),
+    responseByTask: Map<String, String> = emptyMap()
 ): List<ExportTaskView> = rows.distinctBy { it.taskId }.map { row ->
     val task = tasks[row.taskId]
     val attachments = task?.assetControls.orEmpty()
@@ -224,6 +311,7 @@ fun exportTaskViews(
             version = ref.version
         )
     }
+    val content = exportContentView(promptsByTask[row.taskId])
     ExportTaskView(
         publicId = task?.publicId.orEmpty(),
         title = row.title.ifBlank { task?.displayName.orEmpty() },
@@ -241,8 +329,50 @@ fun exportTaskViews(
         addOn = exportAddOnView(
             addOn = addOnResolver.versionFor(task?.addOn.orEmpty()),
             answerRows = answersByTask[row.taskId].orEmpty()
-        )
+        ),
+        content = content,
+        result = content?.let { view ->
+            ExportResultView(
+                completed = row.isCompleted,
+                choice = exportChoiceView(responseByTask[row.taskId])
+            )
+        }
     )
+}
+
+/**
+ * A Task's Prompt identity, or null when it has no readable envelope.
+ *
+ * Kind, schema and revision are all required together: an envelope missing one of them is a row
+ * this build cannot describe, and a half-written `content` object would make the body claim v5
+ * while saying nothing a receiver can use. The Prompt key is optional because a payload Task need
+ * not come from a Package Prompt link.
+ */
+private fun exportContentView(prompt: PayloadPromptRow?): ExportContentView? {
+    if (prompt == null) return null
+    val kind = prompt.kind ?: return null
+    val schema = prompt.schemaVersion ?: return null
+    val revision = prompt.revision ?: return null
+    return ExportContentView(
+        kind = kind,
+        schema = schema,
+        revision = revision,
+        promptKey = prompt.promptKey
+    )
+}
+
+/**
+ * The newest choice on record for a Task, or null.
+ *
+ * The response is read with the same fail-closed reader the review surface uses: a row from a later
+ * build is unreadable rather than guessed at, and a legacy media review carries no choice. History
+ * is append-only, so the *last* choice event in the latest primary submission is the current answer.
+ */
+private fun exportChoiceView(response: String?): ExportChoiceView? {
+    val primary = response?.let { ReviewResponse.parse(it) } as? ReviewResponse.PrimaryReview
+        ?: return null
+    val choice = primary.events.filterIsInstance<ViewerEvent.Choice>().lastOrNull() ?: return null
+    return ExportChoiceView(id = choice.optionId, label = choice.label)
 }
 
 /**
@@ -708,7 +838,7 @@ class WebhookExporter(
 
     override val kind = ExportKind.WEBHOOK
 
-    override fun render(payload: ExportPayload): String = buildWebhookPayload(payload)
+    override fun render(payload: ExportPayload): String = buildWebhookPayload(mapExport(payload))
 
     /**
      * The POST, on a thread that may block.
@@ -762,7 +892,7 @@ class TxtExporter(
     override val asksBeforeDelivering = false
     override val deliveredOutcome = NoticeOutcome.WRITTEN
 
-    override fun render(payload: ExportPayload): String = buildWebhookPayload(payload)
+    override fun render(payload: ExportPayload): String = buildWebhookPayload(mapExport(payload))
 
     override suspend fun deliver(payload: ExportPayload, body: String): ExportAttempt {
         val stem = exportNameStem(payload)

@@ -53,6 +53,7 @@ import com.example.listea.data.newItemPublicId
 import com.example.listea.data.PayloadAnswerRow
 import com.example.listea.data.PayloadAssetRow
 import com.example.listea.data.PayloadMarkRow
+import com.example.listea.data.PayloadPromptRow
 import com.example.listea.data.PayloadTaskRow
 import com.example.listea.data.ReviewAsset
 import com.example.listea.data.ReviewItem
@@ -68,6 +69,8 @@ import com.example.listea.data.rootRelativePathOf
 import com.example.listea.data.taskDecisions
 import com.example.listea.data.toReviewAsset
 import com.example.listea.data.TaskAssetControls
+import com.example.listea.data.TaskPayloadEntity
+import com.example.listea.data.TaskResourceView
 import com.example.listea.data.TemplateEntity
 import com.example.listea.data.TemplateStore
 import com.example.listea.data.TemplateVersionEntity
@@ -89,6 +92,7 @@ import com.example.listea.domain.ReviewContext
 import com.example.listea.domain.decodeExportChoice
 import com.example.listea.domain.encodeExportChoice
 import com.example.listea.domain.ReviewResponse
+import com.example.listea.domain.parse
 import com.example.listea.domain.StoredAddOnVersion
 import com.example.listea.domain.StoredTemplateVersion
 import com.example.listea.domain.TemplateButton
@@ -96,6 +100,11 @@ import com.example.listea.domain.TemplateScope
 import com.example.listea.domain.TemplateVersionRef
 import com.example.listea.domain.Templates
 import com.example.listea.domain.ViewerEvent
+import com.example.listea.domain.ViewerEventType
+import com.example.listea.domain.CommitPolicy
+import com.example.listea.domain.TaskReviewDefinition
+import com.example.listea.domain.Viewers
+import com.example.listea.domain.parseProfilePrompt
 import java.util.UUID
 
 /** What the Folder screen should be showing about a pending "create list from folder" action. */
@@ -1037,11 +1046,17 @@ class ListsViewModel @JvmOverloads constructor(
                         val resolved = byTask[item.taskId].orEmpty().map { asset ->
                             asset.toReviewAsset(stateByAsset[asset.id] ?: AssetDecisions())
                         }
+                        val control = controls.firstOrNull { it.taskId == item.taskId }
                         item.toReviewItem(
                             rootUri = owner.sourceRootUri,
                             assetControls = controlByTask[item.taskId].orEmpty(),
                             addOn = addOnByTask[item.taskId].orEmpty(),
-                            taskReview = reviewByTask[item.taskId].orEmpty()
+                            taskReview = reviewByTask[item.taskId].orEmpty(),
+                            packageKey = control?.packageKey,
+                            promptKey = control?.promptKey,
+                            payloadKind = control?.payloadKind,
+                            payloadSchema = control?.payloadSchema,
+                            payloadRevision = control?.payloadRevision
                         ).copy(
                             assets = resolved,
                             reviewBlocked = reviewBlockFor(resolved)
@@ -1214,6 +1229,19 @@ class ListsViewModel @JvmOverloads constructor(
      * column holds two grammars and only that reader knows which of them a row is.
      */
     fun observeLatestResponse(taskId: String): Flow<String?> = dao.observeLatestResponse(taskId)
+
+    /**
+     * The Prompt body for one Task, read when its Content page is composed.
+     *
+     * Deliberately not carried on the queue item: a round may hold hundreds of Tasks, and every
+     * body in memory to draw one page is the cost this split exists to avoid.
+     */
+    fun observeTaskPayload(taskId: String): Flow<TaskPayloadEntity?> =
+        dao.observeTaskPayload(taskId)
+
+    /** The Resources one Prompt uses, with this Task's own requiredness for each. */
+    fun observeTaskResources(taskId: String): Flow<List<TaskResourceView>> =
+        dao.observeTaskResourceViews(taskId)
 
     /**
      * The events of that same latest submission, as the domain events the sheet lists.
@@ -1662,15 +1690,23 @@ class ListsViewModel @JvmOverloads constructor(
         item: ReviewItem,
         terms: ReviewTerms,
         review: StoredTemplateVersion? = null,
-        events: List<ViewerEvent> = emptyList()
+        events: List<ViewerEvent> = emptyList(),
+        onResult: (accepted: Boolean) -> Unit = {}
     ) = launchDb {
         // A template that accepts viewer events is submitted *with* them or not at all. Writing a
         // completion whose response holds nothing the definition accepts would record a judgment
         // nobody made, and the surface has no way to say so afterwards. The refusal is here rather
         // than in the button, because the button is one caller and this is the boundary every
         // caller crosses.
+        //
+        // Since v0.8.2 this boundary also checks a structured Prompt's own facts: that a Viewer can
+        // draw the stored envelope, that the event names an option the body declares, that the
+        // revision is the one the review opened, that every required Resource is present, and that
+        // a non-revisable template has not already committed. A refusal writes neither an event nor
+        // a state change, and [onResult] is how the surface learns not to advance.
         val definition = review?.taskReview
-        if (definition != null && definition.accepts.isNotEmpty() && events.isEmpty()) {
+        if (!submissionAccepted(item, definition, events)) {
+            onResult(false)
             return@launchDb
         }
         val response: ReviewResponse = if (definition != null && definition.accepts.isNotEmpty()) {
@@ -1689,6 +1725,67 @@ class ListsViewModel @JvmOverloads constructor(
             ids to ids.associateWith { scopeOf(it) }
         }
         transitioned.forEach { onCompletionTransition(it, true, scopes.getValue(it)) }
+        onResult(true)
+    }
+
+    /**
+     * Whether this submission may be written at all: the v0.8.1 rule, widened for Prompt Tasks.
+     *
+     * A media Task keeps exactly the check it had — a definition that catches events is committed
+     * with one or not at all. A Prompt Task is held to the stronger set §8.3 lists, because its
+     * content is stored data rather than a file: the body can be unreadable, the revision can have
+     * moved since the review opened, and the option a viewer reported can be one the Prompt no
+     * longer declares.
+     */
+    private suspend fun submissionAccepted(
+        item: ReviewItem,
+        definition: TaskReviewDefinition?,
+        events: List<ViewerEvent>
+    ): Boolean {
+        if (item.payloadKind == null) {
+            return !(definition != null && definition.accepts.isNotEmpty() && events.isEmpty())
+        }
+
+        val payload = dao.taskPayload(item.taskId) ?: return false
+        val capability = Viewers.forPayload(payload.kind, payload.schemaVersion) ?: return false
+        val review = definition ?: return false
+        if (review.accepts.isEmpty()) return false
+
+        // The body moved under an open review: the option list on screen is not this body's.
+        if (item.payloadRevision != null && payload.revision != item.payloadRevision) return false
+
+        // `choice.single` is exactly one choice event, and it must be one the Viewer can emit and
+        // the template catches.
+        val choice = events.singleOrNull() as? ViewerEvent.Choice ?: return false
+        if (choice.type !in capability.intents) return false
+        if (choice.type !in review.accepts) return false
+
+        // The commit must be one this event is allowed to make. A control-committed template has
+        // already had its control pressed by the time this runs, so the event need not be the
+        // commit's own intent; the two intent forms name the event that commits.
+        val commits = when (val commit = review.commit) {
+            is CommitPolicy.Immediate -> commit.intent == choice.type
+            is CommitPolicy.ConfirmIntent -> commit.intent == choice.type
+            is CommitPolicy.ConfirmControl -> true
+        }
+        if (!commits) return false
+
+        // The option and its label snapshot must be declared by the body that is stored now. The
+        // label is compared as well as the id: a Package's revision may have renamed a choice, and
+        // an answer recorded with the old label is not an answer to this Prompt.
+        val prompt = parseProfilePrompt(payload.payload) ?: return false
+        if (prompt.options.none { it.id == choice.optionId && it.label == choice.label }) return false
+
+        // Required content that is not there cannot support a judgment.
+        if (dao.taskResourceViews(item.taskId).any { it.required && it.missing }) return false
+
+        // One answer for good, when the template says so.
+        if (!review.revisable) {
+            val recorded = dao.latestResponse(item.taskId)?.let { ReviewResponse.parse(it) }
+
+            if (recorded is ReviewResponse.PrimaryReview) return false
+        }
+        return true
     }
 
     /**
@@ -2078,6 +2175,22 @@ class ListsViewModel @JvmOverloads constructor(
      * Todo and its Tasks agreeing about a run neither of them can see: the Todo's copy is what the
      * next run will get, each Task's is what this one got, and both come from here.
      */
+    /**
+     * The run's plan, with the host half of Package reading supplied where it is needed.
+     *
+     * The two folder rules are pure over the snapshot they are handed. A Package rule is not: a
+     * manifest and a description are bytes in files, and reading them is exactly what the importer
+     * is not allowed to do. [planPackages] is that read, kept in one place so Create, Refresh and a
+     * follow-the-upstream sync all see the same Packages.
+     */
+    private fun importPlan(
+        importer: ImporterKind,
+        importRoot: String,
+        tree: FolderSnapshot
+    ): ImportPlan = plan(importer, importRoot, tree) { root, snapshot ->
+        planPackages(getApplication(), root, snapshot)
+    }
+
     private suspend fun applyImport(
         pending: PendingImport,
         options: ImportOptions,
@@ -2213,7 +2326,7 @@ class ListsViewModel @JvmOverloads constructor(
             dao.runImport(
                 source.id,
                 pending.folderPath,
-                plan(importer, pending.folderPath, pending.tree),
+                importPlan(importer, pending.folderPath, pending.tree),
                 now(),
                 recoverFrom = recoverFrom?.sourceId,
                 // The dialog's answer, not the row's: the write-back below records it, and a run
@@ -2293,7 +2406,7 @@ class ListsViewModel @JvmOverloads constructor(
 
         val importer = ImporterKind.fromKey(source.importerKind) ?: return@launchDb
         val tree = scanFolderTreeAt(source.rootUri, source.relativePath) ?: return@launchDb
-        if (!dao.sourceHasChanges(sourceId, source.relativePath, plan(importer, source.relativePath, tree))) {
+        if (!dao.sourceHasChanges(sourceId, source.relativePath, importPlan(importer, source.relativePath, tree))) {
             return@launchDb
         }
 
@@ -3604,7 +3717,14 @@ class ListsViewModel @JvmOverloads constructor(
          */
         val addOnResolver: AddOnResolver = AddOnResolver.Empty,
         /** Stored answers, by Task. Absent for every Task that answered nothing. */
-        val answersByTask: Map<String, List<PayloadAnswerRow>> = emptyMap()
+        val answersByTask: Map<String, List<PayloadAnswerRow>> = emptyMap(),
+        /** Prompt envelopes, by Task. Absent for every media Task. */
+        val promptsByTask: Map<String, PayloadPromptRow> = emptyMap(),
+        /**
+         * The newest submission's stored response, by Task. Absent for a Task never submitted, and
+         * unreadable rows are dropped by the export writer rather than guessed at.
+         */
+        val responseByTask: Map<String, String> = emptyMap()
     )
 
     private suspend fun payloadFacts(rows: List<ListItemEntity>): PayloadFacts {
@@ -3620,6 +3740,18 @@ class ListsViewModel @JvmOverloads constructor(
             emptyMap()
         } else {
             dao.getPayloadAnswers(taskIds).groupBy { it.taskId }
+        }
+        // The v5 reads, asked for every round and empty when no Task is structured. One query each
+        // rather than one per Task, so a large round does not turn into a walk of the history table.
+        val promptsByTask = if (taskIds.isEmpty()) {
+            emptyMap()
+        } else {
+            dao.getPayloadPrompts(taskIds).associateBy { it.taskId }
+        }
+        val responseByTask = if (taskIds.isEmpty()) {
+            emptyMap()
+        } else {
+            dao.getLatestResponses(taskIds).associate { it.taskId to it.response }
         }
         val assets = assetsByTask.values.flatten()
         val marksByAsset = if (assets.isEmpty()) {
@@ -3656,7 +3788,9 @@ class ListsViewModel @JvmOverloads constructor(
             marksByAsset = marksByAsset,
             fingerprintByAsset = fingerprintByAsset,
             addOnResolver = addOnResolverNow(),
-            answersByTask = answersByTask
+            answersByTask = answersByTask,
+            promptsByTask = promptsByTask,
+            responseByTask = responseByTask
         )
     }
 
@@ -3761,7 +3895,9 @@ class ListsViewModel @JvmOverloads constructor(
                     marksByAsset = facts.marksByAsset,
                     fingerprintByAsset = facts.fingerprintByAsset,
                     addOnResolver = facts.addOnResolver,
-                    answersByTask = facts.answersByTask
+                    answersByTask = facts.answersByTask,
+                    promptsByTask = facts.promptsByTask,
+                    responseByTask = facts.responseByTask
                 )
             )
 

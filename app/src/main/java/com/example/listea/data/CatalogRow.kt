@@ -25,7 +25,13 @@ data class CatalogProjection(
     val assetCount: Int,
     val missingAssets: Int,
     val sizeBytes: Long?,
-    val lastModified: Long?
+    val lastModified: Long?,
+    val packageKey: String? = null,
+    val packageTitle: String? = null,
+    val promptKey: String? = null,
+    val payloadKind: String? = null,
+    val payloadSchema: Int? = null,
+    val payloadRevision: Int? = null
 )
 
 /**
@@ -42,7 +48,37 @@ data class TaskAssetControls(
     val taskId: String,
     val assetControls: String,
     val addOn: String = "",
-    val taskReview: String = ""
+    val taskReview: String = "",
+
+    /**
+     * The Prompt envelope, for a Task that came from a Package. Null on a media Task and on a Task
+     * with no payload row, which a List resolves as *no Content page*.
+     *
+     * Read beside the other import facts because a List review builds its queue from membership
+     * rows that cannot answer them; the payload body is not here for the reason
+     * [com.example.listea.data.ReviewItem.payloadKind] gives.
+     */
+    val packageKey: String? = null,
+    val promptKey: String? = null,
+    val payloadKind: String? = null,
+    val payloadSchema: Int? = null,
+    val payloadRevision: Int? = null
+)
+
+/**
+ * One Resource as a Prompt uses it: where the file is, whether the import found it, and whether
+ * *this* Prompt requires it.
+ *
+ * [relativePath] is the member's path inside the Package, kept for a human reading the Info sheet;
+ * [uri] is the document URI the scan saw and is what a Viewer opens.
+ */
+data class TaskResourceView(
+    val resourceKey: String,
+    val kind: String,
+    val uri: String,
+    val relativePath: String,
+    val missing: Boolean,
+    val required: Boolean
 )
 
 /**
@@ -122,7 +158,21 @@ data class CatalogRow(
     val hasUnviewableAsset: Boolean,
 
     /** The Assets themselves, resolved for the viewer boundary rather than re-read per card. */
-    val assets: List<ReviewAsset> = emptyList()
+    val assets: List<ReviewAsset> = emptyList(),
+
+    /**
+     * The Prompt this Task answers, if it came from a Package; all null for a media Task.
+     *
+     * [packageTitle] is the manifest's title, carried so a catalog scope can be named by what the
+     * producer called the Package rather than by its key. The three `payload*` fields are the
+     * stored envelope; the body itself is deliberately not read on this path.
+     */
+    val packageKey: String? = null,
+    val packageTitle: String? = null,
+    val promptKey: String? = null,
+    val payloadKind: String? = null,
+    val payloadSchema: Int? = null,
+    val payloadRevision: Int? = null
 )
 
 /**

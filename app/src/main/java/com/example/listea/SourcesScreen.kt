@@ -320,6 +320,7 @@ internal fun todoDetail(source: SourceSummary): String = buildString {
     append(
         when (source.importerKind) {
             ImporterKind.FOLDER_AS_TASK.key -> "Folder as Task"
+            ImporterKind.PACKAGE.key -> "Package Prompts"
             else -> "File as Task"
         }
     )

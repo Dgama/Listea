@@ -57,7 +57,10 @@ import com.example.listea.domain.MarkKind
 import com.example.listea.domain.QuoteAnchor
 import com.example.listea.domain.ReviewContext
 import com.example.listea.domain.ReviewResponse
+import com.example.listea.domain.encodeValue
 import com.example.listea.domain.parse
+import com.example.listea.domain.parseEventValue
+import com.example.listea.domain.parseProfilePrompt
 import com.example.listea.domain.StoredTemplateVersion
 import com.example.listea.domain.TASK_REVIEW_COMPLETE_CONTROL
 import com.example.listea.domain.TaskAction
@@ -589,16 +592,30 @@ fun ReviewSession(
     }
     val reviewDefinition = review.taskReview
     val definitionAcceptsEvents = !reviewDefinition?.accepts.isNullOrEmpty()
-    val commitControlId = when (val commit = reviewDefinition?.commit) {
-        is CommitPolicy.Explicit -> commit.controlId
+    // The control that commits, when the template commits from one. Null for both intent forms:
+    // an Immediate template commits from the viewer's own tap, and a ConfirmIntent template from
+    // another viewer intent, so neither has a button to draw.
+    val commitControlId: String? = when (val commit = reviewDefinition?.commit) {
+        is CommitPolicy.ConfirmControl -> commit.controlId
+        is CommitPolicy.Immediate, is CommitPolicy.ConfirmIntent -> null
         null -> TASK_REVIEW_COMPLETE_CONTROL
     }
     // A template that does not commit from the completion checkbox draws its own control and the
     // checkbox goes away: two controls that both complete the Task would be two answers to what
-    // the template already said.
-    val commitIsCompletion = commitControlId == TASK_REVIEW_COMPLETE_CONTROL
-    val commitLabel = review.buttons.firstOrNull { it.id == commitControlId }?.name ?: "Submit"
+    // the template already said. A definition-less Task keeps the checkbox, as it always has.
+    val commitIsCompletion = reviewDefinition == null ||
+        (reviewDefinition.commit is CommitPolicy.ConfirmControl &&
+            commitControlId == TASK_REVIEW_COMPLETE_CONTROL)
+    val commitLabel = commitControlId
+        ?.let { id -> review.buttons.firstOrNull { it.id == id }?.name }
+        ?: "Submit"
     val acceptsPoint = reviewDefinition?.accepts?.contains(ViewerEventType.IMAGE_POINT) == true
+    val acceptsChoice = reviewDefinition?.accepts?.contains(ViewerEventType.CHOICE_SELECT) == true
+    // The tap itself commits: this is the dating card's Like, and the vocabulary round's one-tap
+    // final answer. A ConfirmControl or ConfirmIntent template waits for its own route instead.
+    val commitsChoiceImmediately =
+        (reviewDefinition?.commit as? CommitPolicy.Immediate)?.intent ==
+            ViewerEventType.CHOICE_SELECT
 
     // What the viewer has reported and the template will catch. Held encoded so it survives a
     // rotation, exactly as the import dialog's drafts are. Keyed by Task *and* page because a point
@@ -608,6 +625,27 @@ fun ReviewSession(
     var sampling by remember(item.taskId, pageIndex) { mutableStateOf(false) }
     val sample = remember(pendingSample) { decodeSample(pendingSample) }
     val sampleScope = rememberCoroutineScope()
+
+    // A choice a ConfirmControl/ConfirmIntent template is holding until its own route commits. An
+    // Immediate template never uses it: the tap commits, and nothing is left pending. Encoded for
+    // the same reason the sample is — it survives a rotation — and keyed by Task and page so moving
+    // on cannot commit a choice under another Prompt.
+    var pendingChoice by rememberSaveable(item.taskId, pageIndex) { mutableStateOf<String?>(null) }
+    val choice = remember(pendingChoice) {
+        pendingChoice?.let { parseEventValue(ViewerEventType.CHOICE_SELECT, it) as? ViewerEvent.Choice }
+    }
+
+    // The Content page's own two reads. The body is read by Task id here, not carried on the item;
+    // the Resources are read with the Task's own requiredness.
+    val payloadRow by remember(item.taskId) { viewModel.observeTaskPayload(item.taskId) }
+        .collectAsStateWithLifecycle(initialValue = null)
+    val taskResources by remember(item.taskId) { viewModel.observeTaskResources(item.taskId) }
+        .collectAsStateWithLifecycle(initialValue = emptyList())
+    val prompt = remember(payloadRow) { payloadRow?.let { parseProfilePrompt(it.payload) } }
+    val photo = remember(prompt, taskResources) {
+        prompt?.photoResource?.let { key -> taskResources.firstOrNull { it.resourceKey == key } }
+    }
+    val photoMissing = prompt?.photoResource != null && (photo == null || photo.missing)
 
     // What is on record for this Task, so a committed point is not write-only. Read as text and
     // parsed through the domain reader: the column holds two grammars, and a row from a later build
@@ -621,12 +659,19 @@ fun ReviewSession(
         (recorded as? ReviewResponse.PrimaryReview)
             ?.events?.filterIsInstance<ViewerEvent.ImagePoint>()?.lastOrNull()
     }
+    // The same for a choice: the latest answer on record, so a revisited Prompt shows what was
+    // said rather than an untouched card. History is append-only; this is only the newest.
+    val recordedChoice = remember(recorded) {
+        (recorded as? ReviewResponse.PrimaryReview)
+            ?.events?.filterIsInstance<ViewerEvent.Choice>()?.lastOrNull()
+    }
     // The same submission's events as rows of their own. Read from `review_event_answers` rather
     // than filtered out of the response above: that table is where a caught event is addressed as
     // an event, and it is what the Info sheet's Recorded section lists. A template that catches no
     // events keeps its flow empty and its sheet exactly as it was.
-    val recordedEvents by remember(item.taskId, acceptsPoint) {
-        if (acceptsPoint) viewModel.observeLatestEventAnswers(item.taskId) else flowOf(emptyList())
+    val recordedEvents by remember(item.taskId, definitionAcceptsEvents) {
+        if (definitionAcceptsEvents) viewModel.observeLatestEventAnswers(item.taskId)
+        else flowOf(emptyList())
     }.collectAsStateWithLifecycle(initialValue = emptyList())
     // Which file each recorded point came from, so a Task of several pictures says so instead of
     // naming a content URI. Keyed by the source URI the event carries, as the write path is.
@@ -675,15 +720,20 @@ fun ReviewSession(
      * records the fold of the pairs, exactly as it always has.
      */
     fun commit(events: List<ViewerEvent>) {
-        viewModel.submitItemReview(item, terms, review, events)
-        if (reviewDefinition?.advanceAfterCommit == false) return
-        if (index == items.lastIndex) {
-            finished = true
-            // Announced after the check above, so the delivery it may lead to sees
-            // the item that was just swiped as checked.
-            onQueueFinished?.invoke(items)
-        } else {
-            goTo(items[index + 1])
+        viewModel.submitItemReview(item, terms, review, events) { accepted ->
+            // A refused commit wrote nothing, so there is nowhere to move: advancing would show the
+            // next Prompt while this one stayed unanswered, and the round would have walked past a
+            // judgment it never made.
+            if (!accepted) return@submitItemReview
+            if (reviewDefinition?.advanceAfterCommit == false) return@submitItemReview
+            if (index == items.lastIndex) {
+                finished = true
+                // Announced after the check above, so the delivery it may lead to sees
+                // the item that was just swiped as checked.
+                onQueueFinished?.invoke(items)
+            } else {
+                goTo(items[index + 1])
+            }
         }
     }
 
@@ -721,14 +771,23 @@ fun ReviewSession(
     val storedAddOn = addOnResolver.versionFor(item.addOn)
         ?.takeIf { it.questions.isNotEmpty() }
     val hasAddOnPage = storedAddOn != null
-    val pageCount = taskPageCount(assets.size, hasAddOnPage)
+    // The pages this Task presents, in the order the arrows and the guide walk them: the Prompt
+    // body first when it has one, then the Assets, then the add-on. One list is now the source for
+    // the count, the step, the guide and which page is showing.
+    val pages = reviewPages(item, hasAddOnPage)
+    val pageCount = pages.size
     // The pages as the jump list names them, for when the queue itself has only one Task to move
-    // between. The add-on page is one of them, and its row says so — see [reviewPageEntries].
-    val pageEntries = remember(assets, storedAddOn) { reviewPageEntries(assets, storedAddOn) }
+    // between. The Content and add-on pages are both entries, and each row says what it is — see
+    // [reviewPageEntries].
+    val pageEntries = remember(assets, storedAddOn, pages) {
+        reviewPageEntries(assets, storedAddOn, content = item.hasContentPage())
+    }
     val currentPage = pageIndex.coerceIn(0, maxOf(pageCount - 1, 0))
-    // The add-on page is the one index past the last Asset. `page` is then null, which every
-    // file-specific value below already reads as *no file* rather than as an error.
-    val onAddOnPage = hasAddOnPage && currentPage == assets.size
+    val currentModel = pages.getOrNull(currentPage)
+    val contentPage = currentModel as? ReviewPage.Content
+    // The add-on page is the last index. `page` is then null, which every file-specific value below
+    // already reads as *no file* rather than as an error.
+    val onAddOnPage = currentModel is ReviewPage.AddOn
 
     // The bands' two answers, resolved here because this is the only place that knows both which
     // Task is on screen and which of its files. The chip row belongs to the *file* — its kind comes
@@ -739,7 +798,10 @@ fun ReviewSession(
     //
     // `name` and not `relativePath`: a classifier wants the basename, and it is what
     // `reviewBlockFor` already hands `assetViewerAvailable` for the same file.
-    val page = if (onAddOnPage) null else assets.getOrNull(currentPage)
+    // The Asset behind the page, which is none of them on the Content and add-on pages. The page
+    // list already answers this; the old index arithmetic would have pointed one file too far on
+    // a Prompt's first Asset.
+    val page = (currentModel as? ReviewPage.Asset)?.asset
     val kind = assetKindOf(page?.name.orEmpty())
     // Null is a real answer here and is resolved to the empty row rather than to a default: nothing
     // attached admits this file's kind, so nothing offers it a button. See [TemplateResolver].
@@ -784,6 +846,29 @@ fun ReviewSession(
     // Info icon, opening the Task's sheet. It is the static frame every template carries, applied
     // to a page that carries no template of its own.
     val assetBand: (@Composable () -> Unit)? = when {
+        contentPage != null -> {
+            {
+                Column {
+                    // Only a control-committed template draws a button here. An Immediate template
+                    // has none: the options on the card are the controls, and the tap is the commit.
+                    if (commitControlId != null && !commitIsCompletion) {
+                        ReviewTemplateControl(
+                            label = commitLabel,
+                            enabled = choice != null && !sampling,
+                            status = when {
+                                choice != null -> "Selected: ${choice.label}"
+                                recordedChoice != null -> "Recorded: ${recordedChoice.label}"
+                                acceptsChoice -> "Choose an option."
+                                else -> null
+                            },
+                            onClick = { choice?.let { commit(listOf(it)) } }
+                        )
+                    }
+                    MediaInfoBar(contentDescription = "Prompt info") { infoOpen = true }
+                }
+            }
+        }
+
         onAddOnPage -> {
             { MediaInfoBar(contentDescription = "Add-on info") { infoOpen = true } }
         }
@@ -801,7 +886,7 @@ fun ReviewSession(
                         // would be. It is the button the template names, and pressing it is the
                         // only thing that records the sample — which is the compatibility case
                         // this round exists to prove: a template, not the viewer, owns submission.
-                        if (!commitIsCompletion) {
+                        if (commitControlId != null && !commitIsCompletion) {
                             ReviewTemplateControl(
                                 label = commitLabel,
                                 enabled = sample != null && !sampling,
@@ -895,6 +980,7 @@ fun ReviewSession(
             // file and must not borrow the name of the last one.
             subtitle = when {
                 !hasPageLevel -> null
+                contentPage != null -> "Prompt"
                 onAddOnPage -> "Add-on"
                 else -> page?.name
             },
@@ -990,6 +1076,48 @@ fun ReviewSession(
         },
         assetControls = assetBand,
     ) {
+        if (contentPage != null) {
+            // The Prompt's own refusal reasons, resolved once for both the card and its notice.
+            // Each one is a fact the submission boundary would refuse on, said before the tap
+            // rather than only after it.
+            val missingRequired = taskResources.firstOrNull { it.required && it.missing }
+            val notice = when {
+                payloadRow == null -> "This Prompt's body could not be read."
+                prompt == null -> "This build cannot read this Prompt."
+                item.payloadRevision != null && payloadRow?.revision != item.payloadRevision ->
+                    "This Prompt was updated after the review opened. Reopen it to judge the new text."
+
+                missingRequired != null ->
+                    "The file this Prompt requires is missing from the source, so it cannot be answered."
+                !acceptsChoice -> "No Task Review in force catches a choice."
+                else -> null
+            }
+            if (prompt != null) {
+                ProfilePromptPage(
+                    prompt = prompt,
+                    photoUri = photo?.takeIf { !it.missing }?.uri,
+                    photoMissing = photoMissing,
+                    selectedOptionId = (choice ?: recordedChoice)?.optionId,
+                    interactive = notice == null,
+                    notice = notice,
+                    onSelect = { option ->
+                        val event = ViewerEvent.Choice(option.id, option.label)
+                        if (commitsChoiceImmediately) {
+                            // The tap is the judgment. A refusal inside the write boundary leaves
+                            // this page on screen, which is the honest answer to a refused commit.
+                            commit(listOf(event))
+                        } else {
+                            // A template with its own commit route holds the choice until that
+                            // route fires; nothing is written here.
+                            pendingChoice = event.encodeValue()
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                PromptNoticePage(notice ?: "This Prompt cannot be shown.")
+            }
+        } else {
         AssetRun(
             item = item,
             selectedIndex = currentPage,
@@ -1071,6 +1199,7 @@ fun ReviewSession(
             },
             modifier = Modifier.fillMaxSize()
         )
+        }
     }
 
     if (infoOpen) {
@@ -1090,7 +1219,7 @@ fun ReviewSession(
             addOnInfo = addOnInfoOf(storedAddOn, answers, addOnResolver),
             // What the latest submission's template caught. Null for a template that accepts no
             // events, so its sheet does not gain a section that could only ever say "None".
-            recordedEvents = recordedEvents.takeIf { acceptsPoint },
+            recordedEvents = recordedEvents.takeIf { definitionAcceptsEvents },
             recordedSourceNames = recordedSourceNames,
             onDismiss = { infoOpen = false }
         )
@@ -1435,9 +1564,12 @@ fun recordedEventRows(
         val label = when (event) {
             is ViewerEvent.ImagePoint ->
                 if (events.size == 1) "Image point" else "Point ${index + 1}"
+
+            is ViewerEvent.Choice -> "Choice: ${event.label}"
         }
         val summary = when (event) {
             is ViewerEvent.ImagePoint -> pointSummary(event)
+            is ViewerEvent.Choice -> event.optionId
         }
         val source = (event as? ViewerEvent.ImagePoint)
             ?.assetPath?.let { sourceNames[it] }

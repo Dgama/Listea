@@ -215,7 +215,8 @@ fun taskReviewQueue(rootUri: String, rows: List<CatalogRow>): List<ReviewItem> =
 
 /** Whether a catalog Task may be put in a queue at all: §6.4, the content-presentation half. */
 private fun reviewable(row: CatalogRow): Boolean =
-    row.missingAssets == 0 && !row.hasUnviewableAsset
+    row.missingAssets == 0 && !row.hasUnviewableAsset &&
+        (row.payloadKind == null || payloadViewerAvailable(row.payloadKind, row.payloadSchema))
 
 /**
  * A queue with each item's decisions taken from the state as it stands now, rather than from
@@ -302,5 +303,12 @@ private fun reviewItemFor(
     // that dropped it would judge every Task by the List's legacy fallback, and a Task imported
     // under *Sample a point* would open with the built-in's completion checkbox instead of the
     // template's own Submit.
-    taskReview = row.taskReview
+    taskReview = row.taskReview,
+    // And the Prompt envelope, for the same reason: a queue item that dropped it would present a
+    // Package Prompt as a Task with no pages at all.
+    packageKey = row.packageKey,
+    promptKey = row.promptKey,
+    payloadKind = row.payloadKind,
+    payloadSchema = row.payloadSchema,
+    payloadRevision = row.payloadRevision
 )

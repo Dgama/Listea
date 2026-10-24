@@ -18,7 +18,11 @@ import com.example.listea.data.CatalogRow
 import com.example.listea.data.DecisionTarget
 import com.example.listea.data.ReviewDecisions
 import com.example.listea.data.ReviewItem
+import com.example.listea.data.TaskPayloadEntity
+import com.example.listea.data.TaskResourceView
 import com.example.listea.data.decodeActionIds
+import com.example.listea.domain.parseProfilePrompt
+import kotlinx.coroutines.flow.Flow
 
 /**
  * The catalog's preview, wired to the Source and the level it was opened from.
@@ -66,6 +70,8 @@ fun CatalogTaskPreview(
         initialTaskId = taskId,
         rootUri = rootUri,
         settings = settings,
+        observePayload = viewModel::observeTaskPayload,
+        observeResources = viewModel::observeTaskResources,
         onClose = onExit
     )
 }
@@ -100,6 +106,11 @@ fun CatalogTaskPreviewScreen(
     initialTaskId: String,
     rootUri: String,
     settings: AppSettings,
+    // The Prompt body is read by Task id when its page is composed, not carried on every row: a
+    // catalog of a thousand prompts must not hold a thousand bodies to show one. Reads only — this
+    // screen still has no write it could make.
+    observePayload: (String) -> Flow<TaskPayloadEntity?>,
+    observeResources: (String) -> Flow<List<TaskResourceView>>,
     onClose: () -> Unit
 ) {
     val context = LocalContext.current
@@ -110,17 +121,17 @@ fun CatalogTaskPreviewScreen(
     // Keyed on what was opened, so tapping a different Task starts there rather than resuming
     // wherever the last look happened to end.
     var currentTaskId by rememberSaveable(initialTaskId) { mutableStateOf(initialTaskId) }
-    // Which file of the Task is on screen, keyed on the Task so stepping to the next one starts at
-    // its first file. Saved, so a rotation returns to the same file rather than to the first one,
-    // which for a folder Task is a different picture entirely.
-    var assetIndex by rememberSaveable(currentTaskId) { mutableStateOf(0) }
+    // Which page of the Task is on screen, keyed on the Task so stepping to the next one starts at
+    // its first page. Saved, so a rotation returns to the same page rather than to the first one,
+    // which for a folder Task is a different picture entirely. A Prompt's Content page is page 0.
+    var pageIndex by rememberSaveable(currentTaskId) { mutableStateOf(0) }
     // A page the guide asked for on a Task that is not on screen yet. The page index is keyed on
-    // the Task, so the Task arrives at its first file and this moves it once that state exists.
-    var pendingAsset by remember { mutableStateOf<Int?>(null) }
+    // the Task, so the Task arrives at its first page and this moves it once that state exists.
+    var pendingPage by remember { mutableStateOf<Int?>(null) }
     LaunchedEffect(currentTaskId) {
-        pendingAsset?.let { requested ->
-            assetIndex = requested
-            pendingAsset = null
+        pendingPage?.let { requested ->
+            pageIndex = requested
+            pendingPage = null
         }
     }
     var chromeVisible by rememberSaveable { mutableStateOf(true) }
@@ -136,12 +147,17 @@ fun CatalogTaskPreviewScreen(
 
     val item = remember(row, rootUri) { row.asPreviewItem(rootUri) }
     val assets = item.assets
-    val currentAsset = assetIndex.coerceIn(0, maxOf(assets.lastIndex, 0))
-    val hasAssetLevel = assets.size > 1
+    val contentPage = item.hasContentPage()
+    val contentOffset = if (contentPage) 1 else 0
+    val pageCount = assets.size + contentOffset
+    val currentPage = pageIndex.coerceIn(0, maxOf(pageCount - 1, 0))
+    val currentAsset = (currentPage - contentOffset).coerceAtLeast(0)
+    val onContentPage = contentPage && currentPage == 0
+    val hasPageLevel = pageCount > 1
     // A level with nothing to move between is not a level: a folder holding one Task draws no
     // outer arrows, and a Task holding one file draws no inner pair.
     val hasTaskLevel = tasks.size > 1 && taskIndex >= 0
-    // The level's Tasks in the level's order, as the guide names them, each carrying its files as
+    // The level's Tasks in the level's order, as the guide names them, each carrying its pages as
     // the level below. A folder Task's name is often its path's last segment already, so the path
     // is only carried when it adds something.
     val queueEntries = remember(tasks) {
@@ -149,16 +165,32 @@ fun CatalogTaskPreviewScreen(
             MediaQueueEntry(
                 label = task.displayName,
                 detail = task.groupPath.takeIf { it.isNotBlank() && it != task.displayName },
-                pages = reviewPageEntries(task.assets, addOn = null)
-                    .takeIf { it.size > 1 }
-                    .orEmpty()
+                pages = reviewPageEntries(
+                    task.assets,
+                    addOn = null,
+                    content = task.payloadKind != null
+                ).takeIf { it.size > 1 }.orEmpty()
             )
         }
     }
     // A level holding one Task still has a counter worth opening when the Task holds several
-    // files: the counter then names the files, and this is that list. Nothing here can be marked,
-    // so an entry is only a file's name.
-    val assetEntries = remember(assets) { reviewPageEntries(assets, addOn = null) }
+    // pages: the counter then names the pages, and this is that list. Nothing here can be marked,
+    // so an entry is only a page's name.
+    val pageEntries = remember(assets, contentPage) {
+        reviewPageEntries(assets, addOn = null, content = contentPage)
+    }
+
+    // The Prompt body, for the Content page only. Read by Task id rather than carried, and read
+    // here rather than in the card so the card stays a pure renderer with no database behind it.
+    val payloadRow by remember(item.taskId) { observePayload(item.taskId) }
+        .collectAsStateWithLifecycle(initialValue = null)
+    val taskResources by remember(item.taskId) { observeResources(item.taskId) }
+        .collectAsStateWithLifecycle(initialValue = emptyList())
+    val prompt = remember(payloadRow) { payloadRow?.let { parseProfilePrompt(it.payload) } }
+    val photo = remember(prompt, taskResources) {
+        prompt?.photoResource?.let { key -> taskResources.firstOrNull { it.resourceKey == key } }
+    }
+    val photoMissing = prompt?.photoResource != null && (photo == null || photo.missing)
 
     MediaSystemBars(chromeVisible)
     BackHandler { onClose() }
@@ -168,41 +200,45 @@ fun CatalogTaskPreviewScreen(
         navigator = MediaNavigator(
             title = row.displayName,
             onBack = onClose,
-            subtitle = assets.getOrNull(currentAsset)?.name?.takeIf { hasAssetLevel },
-            // Where in the folder this is, and — inside it — which file of the Task. The same
+            subtitle = when {
+                !hasPageLevel -> null
+                onContentPage -> "Prompt"
+                else -> assets.getOrNull(currentAsset)?.name
+            },
+            // Where in the folder this is, and — inside it — which page of the Task. The same
             // reading the List's item viewer gives, because it is the same two levels.
             counter = when {
-                hasAssetLevel && hasTaskLevel ->
-                    "${taskIndex + 1}(${currentAsset + 1}/${assets.size})/${tasks.size}"
-                hasAssetLevel -> "${currentAsset + 1} / ${assets.size}"
+                hasPageLevel && hasTaskLevel ->
+                    "${taskIndex + 1}(${currentPage + 1}/${pageCount})/${tasks.size}"
+                hasPageLevel -> "${currentPage + 1} / ${pageCount}"
                 hasTaskLevel -> "${taskIndex + 1} / ${tasks.size}"
                 else -> null
             },
             // The guide follows the level the counter names: Tasks while there is a Task level, and
-            // the Task's files when the counter has fallen back to the file-only form. Inside a
-            // Task row are its files, and a row's own tap lands on the first of them. A Task level
-            // holding one row leaves the outer number with nothing to jump through, but its files
+            // the Task's pages when the counter has fallen back to the page-only form. Inside a
+            // Task row are its pages, and a row's own tap lands on the first of them. A Task level
+            // holding one row leaves the outer number with nothing to jump through, but its pages
             // are still a level, and a position that cannot be opened there is the same dead label
             // this control exists to replace.
             queueJump = when {
                 hasTaskLevel -> MediaQueueJump(
                     entries = queueEntries,
                     current = taskIndex,
-                    currentPage = currentAsset,
+                    currentPage = currentPage,
                     onJump = { entry, page ->
                         if (entry == taskIndex) {
-                            assetIndex = page ?: 0
+                            pageIndex = page ?: 0
                         } else {
-                            pendingAsset = page
+                            pendingPage = page
                             currentTaskId = tasks[entry].taskId
                         }
                     }
                 )
 
-                hasAssetLevel -> MediaQueueJump(
-                    entries = assetEntries,
-                    current = currentAsset,
-                    onJump = { asset, _ -> assetIndex = asset }
+                hasPageLevel -> MediaQueueJump(
+                    entries = pageEntries,
+                    current = currentPage,
+                    onJump = { page, _ -> pageIndex = page }
                 )
 
                 else -> null
@@ -217,34 +253,76 @@ fun CatalogTaskPreviewScreen(
             } else {
                 null
             },
-            onPreviousAsset = assetStep(assets.size, currentAsset, forward = false)?.let { page ->
-                { assetIndex = page }
+            onPreviousAsset = assetStep(pageCount, currentPage, forward = false)?.let { page ->
+                { pageIndex = page }
             },
-            onNextAsset = assetStep(assets.size, currentAsset, forward = true)?.let { page ->
-                { assetIndex = page }
+            onNextAsset = assetStep(pageCount, currentPage, forward = true)?.let { page ->
+                { pageIndex = page }
             },
-            hasAssetSteps = hasAssetLevel
+            hasAssetSteps = hasPageLevel
         ),
         chromeVisible = chromeVisible,
         media = {
-            AssetRun(
-                item = item,
-                selectedIndex = currentAsset,
-                player = player,
-                imageLoader = imageLoader,
-                settings = settings,
-                // Running off either end of a Task moves to the next Task rather than stopping,
-                // which is what makes a swipe the same gesture here as the arrows. At the ends of
-                // the *level* it simply stops: there is no Task to leave for and nothing to
-                // complete, because nothing here is being decided.
-                canLeaveForward = taskIndex < tasks.lastIndex,
-                canLeaveBack = taskIndex > 0,
-                onLeaveForward = { currentTaskId = tasks[taskIndex + 1].taskId },
-                onLeaveBack = { currentTaskId = tasks[taskIndex - 1].taskId },
-                onSelectAsset = { assetIndex = it },
-                onTap = { chromeVisible = !chromeVisible },
-                modifier = Modifier.fillMaxSize()
-            )
+            if (onContentPage) {
+                // The same page turn the List's item viewer gives a Prompt: read-only, so a swipe
+                // decides nothing. A multi-page Task turns to its first file; at the Task's edge
+                // the swipe moves to the next Task in the level.
+                ContentPageSwipe(
+                    canSwipeForward = currentPage < pageCount - 1 ||
+                        taskIndex < tasks.lastIndex,
+                    canSwipeBack = taskIndex > 0,
+                    onSwipeForward = {
+                        if (currentPage < pageCount - 1) {
+                            pageIndex = currentPage + 1
+                        } else if (taskIndex < tasks.lastIndex) {
+                            currentTaskId = tasks[taskIndex + 1].taskId
+                        }
+                    },
+                    onSwipeBack = {
+                        if (taskIndex > 0) currentTaskId = tasks[taskIndex - 1].taskId
+                    },
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    if (prompt != null) {
+                        ProfilePromptPage(
+                            prompt = prompt,
+                            photoUri = photo?.takeIf { !it.missing }?.uri,
+                            photoMissing = photoMissing,
+                            // A look says nothing: no pill is selected and none can be taken. The
+                            // same card as Review, so Preview and Review cannot disagree about what
+                            // the Prompt says.
+                            selectedOptionId = null,
+                            interactive = false,
+                            onSelect = {},
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        PromptNoticePage(
+                            "This Prompt cannot be shown.",
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                }
+            } else {
+                AssetRun(
+                    item = item,
+                    selectedIndex = currentAsset,
+                    player = player,
+                    imageLoader = imageLoader,
+                    settings = settings,
+                    // Running off either end of a Task moves to the next Task rather than stopping,
+                    // which is what makes a swipe the same gesture here as the arrows. At the ends of
+                    // the *level* it simply stops: there is no Task to leave for and nothing to
+                    // complete, because nothing here is being decided.
+                    canLeaveForward = taskIndex < tasks.lastIndex,
+                    canLeaveBack = taskIndex > 0,
+                    onLeaveForward = { currentTaskId = tasks[taskIndex + 1].taskId },
+                    onLeaveBack = { currentTaskId = tasks[taskIndex - 1].taskId },
+                    onSelectAsset = { pageIndex = it + contentOffset },
+                    onTap = { chromeVisible = !chromeVisible },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
         },
         // The one band the frame reserves for the item, left empty rather than removed: the
         // navigator still sits at the top and the media still stops above it.
@@ -283,5 +361,12 @@ internal fun CatalogRow.asPreviewItem(rootUri: String): ReviewItem = ReviewItem(
     // Carried for the same reason the decisions are: this screen draws no chip row today, but the
     // item it hands the renderer is the same shape every other surface hands it, and a control left
     // off here would be a second kind of item the moment this screen grows one.
-    assetControls = assetControls
+    assetControls = assetControls,
+    // The Prompt envelope, carried for the same reason: this screen renders a whole item, and an
+    // item with a body is one whose first page is its Content page.
+    packageKey = packageKey,
+    promptKey = promptKey,
+    payloadKind = payloadKind,
+    payloadSchema = payloadSchema,
+    payloadRevision = payloadRevision
 )

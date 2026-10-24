@@ -363,18 +363,17 @@ private fun AddOnCard(
 }
 
 /**
- * What a Task Review is, said as what it accepts rather than as a file scope.
+ * What a Task Review is, said as what it catches rather than as a file scope.
  *
  * A review governs no files, so the asset-control line has nothing to say about it; the thing a
  * user chooses between two reviews by is what each one catches. The empty set is not "nothing":
- * it is the Headless definition, which records the Task's own file decisions, and naming that
- * keeps it legible beside a review that samples a point.
+ * it is the default headless definition, which records the Task's own file decisions, and naming
+ * that keeps it legible beside a review that catches a single choice or a sampled point.
  */
 private fun reviewLine(version: TemplateVersionEntity): String {
     val definition = decodeTaskReviewDefinition(version.definition, version.definitionVersion)
-        ?: return "Task review · unreadable"
-    if (definition.accepts.isEmpty()) return "Review · file decisions"
-    return "Review · " + definition.accepts.sortedBy { it.key }.joinToString(", ") { it.key }
+        ?: return "Headless template · unreadable"
+    return reviewCatchLine(definition.accepts)
 }
 
 /**

@@ -26,6 +26,38 @@ data class PayloadTaskRow(
 )
 
 /**
+ * One Task's Prompt envelope, as the payload sees it.
+ *
+ * Null [kind] means no payload row: a media Task, or a manual item. Such a Task is never a v5
+ * `content` object and never makes a round call itself v5.
+ *
+ * [promptKey] is null for a payload Task that is not linked to a Package Prompt — the envelope is
+ * enough to say what kind of content it is, and the key is the Package's own name for it when there
+ * is one. [revision] is the revision the stored body was read at, which is the fact a receiver
+ * needs to interpret a choice whose labels may have moved since.
+ */
+data class PayloadPromptRow(
+    val taskId: String,
+    val packageKey: String?,
+    val promptKey: String?,
+    val kind: String?,
+    val schemaVersion: Int?,
+    val revision: Int?
+)
+
+/**
+ * The latest stored response for a Task, as text.
+ *
+ * Read as text for the same reason `observeLatestResponse` is: the column is a permanent record
+ * written by a build that may be newer than this one, and only `ReviewResponse.parse` may decide it
+ * is unreadable. The export reader does not guess at a row it cannot parse.
+ */
+data class PayloadReviewRow(
+    val taskId: String,
+    val response: String
+)
+
+/**
  * One Asset as the payload sees it: its name, where its file sits, and the pair's decisions.
  *
  * [relativePath] is the Asset's own stored path, relative to the Upstream's linked root. The payload

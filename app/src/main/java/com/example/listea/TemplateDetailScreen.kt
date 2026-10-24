@@ -422,7 +422,7 @@ private fun TemplateReviewPage(
     ) {
         Text(template.name, style = MaterialTheme.typography.titleLarge)
         Text(
-            "Task review · version ${current.version}",
+            "Headless template · version ${current.version}",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -437,7 +437,7 @@ private fun TemplateReviewPage(
             Text("Submitted by", style = MaterialTheme.typography.titleSmall)
             Text(
                 when (val commit = definition.commit) {
-                    is CommitPolicy.Explicit -> if (
+                    is CommitPolicy.ConfirmControl -> if (
                         commit.controlId == TASK_REVIEW_COMPLETE_CONTROL
                     ) {
                         "Completing the Task on the review surface."
@@ -449,17 +449,33 @@ private fun TemplateReviewPage(
                         "The “$label” button, which belongs to this template rather than to the " +
                             "viewer."
                     }
+
+                    is CommitPolicy.Immediate ->
+                        "The viewer's own “${commit.intent.key}” intent, as soon as it happens."
+
+                    is CommitPolicy.ConfirmIntent ->
+                        "A later “${commit.intent.key}” intent, after the answer is selected."
                 },
                 style = MaterialTheme.typography.bodyMedium
             )
+            Text(
+                if (definition.revisable) {
+                    "The answer may be changed; each commit appends a new event."
+                } else {
+                    "The first answer is final; later commits are refused."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
 
-            Text("Records", style = MaterialTheme.typography.titleSmall)
+            Text("Catches", style = MaterialTheme.typography.titleSmall)
             Text(
                 if (definition.accepts.isEmpty()) {
-                    "The file decisions the Task carries, as every review did before v0.8.1."
+                    "The file decisions the Task carries, as every review did before v0.8.1. " +
+                        "Nothing the Viewer reports is caught."
                 } else {
-                    "What the viewer reports after the reviewer's gesture: " +
-                        definition.accepts.joinToString(", ") { it.key } + "."
+                    "The answer the Viewer reports after the reviewer's gesture: " +
+                        viewerEventNouns(definition.accepts) + "."
                 },
                 style = MaterialTheme.typography.bodyMedium
             )

@@ -177,6 +177,8 @@ fun ListDetailScreen(
             listTitle = current.list.title,
             settings = settings,
             resolver = resolver,
+            observePayload = viewModel::observeTaskPayload,
+            observeResources = viewModel::observeTaskResources,
             onClose = { viewingItemId = null }
         )
         return

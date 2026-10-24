@@ -1675,12 +1675,38 @@ private fun ImportConfirmDialogBody(
         decodeTemplateAttachments(reviewAttachment).firstOrNull()
     }
 
+    // Whether the review radio has been answered by hand. Until it is, the default follows the
+    // grouping: a Package's Prompts are answered in a Viewer, so its matching pen is the headless
+    // single-choice template; a folder of files keeps the file-decisions template. Once the user
+    // picks a row, this stays true and no later change of grouping moves their answer.
+    var reviewTouched by rememberSaveable(runKey) { mutableStateOf(false) }
+
     /**
      * One Task Review chosen. A radio group with no clear gesture, because choosing the selected
      * row again is *the same answer twice* rather than *none* — every Task is judged by something.
      */
     fun setReview(choice: StoredTemplateVersion) {
+        reviewTouched = true
         reviewAttachment = encodeTemplateAttachments(listOf(choice.ref))
+    }
+
+    /**
+     * The review a grouping would start on, if the user has not chosen one yet.
+     *
+     * The matching is a default and not a gate: the picker still offers every review, and the
+     * warning under the radio says when the chosen one cannot catch what this run's Viewer will
+     * report. What it avoids is a Package import opening on the media review and leaving the user
+     * to find the single-choice pen in a list of three.
+     */
+    fun seedReviewFor(importer: ImporterKind) {
+        if (reviewTouched) return
+        val wanted = when (importer) {
+            ImporterKind.PACKAGE -> Templates.StructuredSingleChoice.ref
+            else -> Templates.MediaRapidReview.ref
+        }
+        request.taskReviews
+            .firstOrNull { it.ref.templateId == wanted.templateId }
+            ?.let { reviewAttachment = encodeTemplateAttachments(listOf(it.ref)) }
     }
 
     val method = decodeExportChoice(exportWord, inheritable = false)
@@ -1828,11 +1854,12 @@ private fun ImportConfirmDialogBody(
                             selected = importer,
                             onSelect = {
                                 importer = it
-                                // The box disappears for folder-as-Task, so it must not stay ticked
-                                // behind it: the stored value goes through normalizeKeepTree either
-                                // way, and this keeps what the user saw when they pressed Create the
-                                // same as what the Source ends up with.
-                                if (it == ImporterKind.FOLDER_AS_TASK) keepTree = false
+                                // The box disappears for the other two rules, so it must not stay
+                                // ticked behind one: the stored value goes through
+                                // normalizeKeepTree either way, and this keeps what the user saw
+                                // when they pressed Create the same as what the Source ends up with.
+                                if (it != ImporterKind.FILE_AS_TASK) keepTree = false
+                                seedReviewFor(it)
                             },
                             // Nested directly under *One Task per file*, because it is the one
                             // importer with a tree to keep: folder-as-Task's Tasks are one per
@@ -1901,6 +1928,7 @@ private fun ImportConfirmDialogBody(
                     TaskReviewAttach(
                         choices = request.taskReviews,
                         attached = attachedReview,
+                        importer = importer,
                         refresh = request.refresh,
                         heldVersion = seed.taskReview?.version,
                         onSelect = ::setReview
@@ -2163,6 +2191,7 @@ private fun groupingSummary(importer: ImporterKind, keepTree: Boolean): String =
     ImporterKind.FILE_AS_TASK ->
         if (keepTree) "One Task per file · keep the folder tree" else "One Task per file"
     ImporterKind.FOLDER_AS_TASK -> "One Task per folder"
+    ImporterKind.PACKAGE -> "One Task per Prompt in each Package"
 }
 
 private fun reviewSummary(policy: ContentPolicy, templates: Int): String {
@@ -2462,11 +2491,16 @@ private fun ImportAddOnAttach(
 }
 
 /**
- * The Task Review step: how every Task this run creates will be judged.
+ * The Task Review step: which **headless template** — the pen — judges every Task this run creates.
  *
  * **A radio group with no clear gesture.** Every Task has always been judged by something, and the
  * built-in is the answer a Todo that never chose one has; tapping the selected row again is the same
  * answer twice rather than *none*, because there is no none to reach.
+ *
+ * **A row says what it catches, not that it catches something.** A template that accepts no viewer
+ * events records the Task's own file decisions; one that accepts an event is the pen for that kind
+ * of answer. The two built-ins that do the latter are the single-choice and sampled-point templates,
+ * and a Package import is offered the first as its starting answer.
  *
  * **A row is a review, not a version.** The version is what a run stamps, and the one place it is
  * said out loud is the held line on a refresh — the run that is about to move the Todo.
@@ -2475,6 +2509,7 @@ private fun ImportAddOnAttach(
 private fun TaskReviewAttach(
     choices: List<StoredTemplateVersion>,
     attached: TemplateVersionRef?,
+    importer: ImporterKind,
     refresh: Boolean,
     heldVersion: Int?,
     onSelect: (StoredTemplateVersion) -> Unit
@@ -2482,9 +2517,9 @@ private fun TaskReviewAttach(
     Column {
         Text("Task review", style = MaterialTheme.typography.titleSmall)
         Text(
-            "Judges every Task this run creates and decides how the review surface commits one. " +
-                "A review that accepts viewer events records what the Task reported rather than " +
-                "a page's tags.",
+            "The pen for every Task this run creates. A headless template catches the answer its " +
+                "Viewer reports and files it; the file-decisions template records the Task's own " +
+                "page decisions instead.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -2510,11 +2545,8 @@ private fun TaskReviewAttach(
                 Column(Modifier.weight(1f)) {
                     Text(choice.name, style = MaterialTheme.typography.bodyMedium)
                     Text(
-                        if (choice.taskReview?.accepts.isNullOrEmpty()) {
-                            "Task review · records the Task's file decisions"
-                        } else {
-                            "Task review · records what the viewer reports"
-                        },
+                        choice.taskReview?.let { reviewCatchLine(it.accepts) }
+                            ?: "Headless template · unreadable",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -2530,6 +2562,21 @@ private fun TaskReviewAttach(
                     }
                 }
             }
+        }
+        // A Package's Prompts are answered in a Viewer. The file-decisions template is still a
+        // valid choice — a Package Todo may hold other Tasks — but it catches nothing a Prompt
+        // reports, and saying so here is cheaper than finding an unanswerable page in Review.
+        val chosenReview = choices.firstOrNull { it.ref.templateId == attached?.templateId }
+        if (importer == ImporterKind.PACKAGE &&
+            chosenReview?.taskReview?.accepts?.isEmpty() == true
+        ) {
+            Spacer(Modifier.height(ListeaDimens.RowGap))
+            Text(
+                "A Package's Prompts are answered in a Viewer. This template records file " +
+                    "decisions only, so a Prompt it judges will have no answer to catch.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
         if (attached != null && choices.none { it.ref.templateId == attached.templateId }) {
             Spacer(Modifier.height(ListeaDimens.RowGap))
@@ -2616,6 +2663,12 @@ private fun ImportImporterChoice(
                 "videos and PDFs",
             selected = selected == ImporterKind.FOLDER_AS_TASK,
             onSelect = { onSelect(ImporterKind.FOLDER_AS_TASK) }
+        )
+        ImportImporterRow(
+            label = "Package Prompts",
+            detail = "package · every .listea Package under this folder becomes one Task per Prompt",
+            selected = selected == ImporterKind.PACKAGE,
+            onSelect = { onSelect(ImporterKind.PACKAGE) }
         )
     }
 }
@@ -2932,6 +2985,39 @@ private fun ImportReportBody(current: ImportFolderRequest.Report) {
             if (result.conflicts.size > REPORT_CONFLICT_PREVIEW) {
                 Text(
                     "and " + (result.conflicts.size - REPORT_CONFLICT_PREVIEW) + " more",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        if (result.packagesWritten > 0 || result.packagesRejected > 0) {
+            Spacer(Modifier.height(ListeaDimens.RowGap))
+            if (result.packagesWritten > 0) {
+                Text(countLabel(result.packagesWritten, "Package") + " imported")
+            }
+            if (result.packagesRejected > 0) {
+                Text(
+                    countLabel(result.packagesRejected, "Package") +
+                        " could not be imported and wrote nothing.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        if (result.packageDiagnostics.isNotEmpty()) {
+            Spacer(Modifier.height(ListeaDimens.RowGap))
+            result.packageDiagnostics.take(REPORT_CONFLICT_PREVIEW).forEach { diagnostic ->
+                Text(
+                    "- " + diagnostic.message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (result.packageDiagnostics.size > REPORT_CONFLICT_PREVIEW) {
+                Text(
+                    "and " + (result.packageDiagnostics.size - REPORT_CONFLICT_PREVIEW) + " more",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
