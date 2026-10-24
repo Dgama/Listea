@@ -29,7 +29,9 @@ where the other pages link to rather than repeat.
 | Page | What it covers |
 |---|---|
 | [Architecture](ARCHITECTURE.md) | The normative boundaries: what a Task, Asset, Upstream and List are, what Core does and does not own, identity rules, and the invariants implementations must preserve. Source code cites this document by name. |
-| [v0.8 — framework (draft)](iterations/v0.8.md) | The v0.8.x arc: Package protocol, Task payload, Resources, Structured Viewer and Headless Review Template, the typed page model, ReviewSubmission, and ExportMapping. |
+| [v0.8 — framework (draft)](iterations/v0.8.md) | The v0.8.x arc: Package protocol, Prompt payloads, Resources, Structured Viewer and Headless Review Template, the typed page model, ReviewSubmission, and ExportMapping. |
+| [Package protocol](package-protocol.md) | `listea.package/1`: the Prompt vocabulary, manifest and member layout, response contracts, commit/revisability, reconciliation rules, limits, and the dating example. |
+| [v0.8.2 plan](iterations/v0.8.2-plan.md) | The v0.8.2 implementation plan: schema 32, Package import, the typed content page, the first Structured Viewer and Headless Template, and the dating acceptance walk. |
 | [Development](development.md) | Environment and dependencies, build and test commands, project layout, and the architectural notes worth knowing before changing anything. |
 | [Roadmap](roadmap.md) | The current system, the architectural direction away from media-only review, and the possible future workloads that direction is for. Nothing on that page is implemented. |
 
@@ -40,6 +42,8 @@ Documentation images live under [`assets/`](assets):
 - `assets/screenshots/` — screenshots of the app, used across these pages and the project README.
 - `assets/demos/` — animated demos. Empty for now; see [its README](assets/demos/README.md) for
   the naming convention.
+- `assets/fixtures/` — acceptance fixtures with their generators and READMEs, including the
+  sampled-point image and the [dating Package](assets/fixtures/dating/README.md).
 
 ### Screenshots still to take
 
@@ -70,8 +74,11 @@ Review rework; it should be re-shot or deleted.
 ## A note on what is current
 
 These pages describe **what Listea does today**, verified against the implementation. Product
-direction lives in [Roadmap](roadmap.md); the v0.8.x framework direction is recorded as explicitly
-planned in [Architecture](ARCHITECTURE.md#framework-evolution--v08x-planned) and
+direction lives in [Roadmap](roadmap.md). v0.8.1 and v0.8.2 are implemented on `main` and
+unreleased (schema 31 and 32); v0.8.2 passed device acceptance on 2026-10-24, with minor fixes
+deferred to v0.8.3. Its grammar is in [Package protocol](package-protocol.md) and its
+implementation in [v0.8.2 plan](iterations/v0.8.2-plan.md). The wider direction is recorded in
+[Architecture](ARCHITECTURE.md#framework-evolution--v08x-planned) and
 [v0.8 (draft)](iterations/v0.8.md). Planned material is labelled as planned.
 
 If a page disagrees with the app, the app is right and the page is a bug — please open an issue.

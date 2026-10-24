@@ -355,6 +355,19 @@ near-identical to each other is the point — none is a place where decisions ge
 a control that suggests otherwise. Save and Share are offered on the first four; the Info sheet on
 all but the Todo preview, which is the one that drops even that.
 
+**A Prompt's Content page turns on a swipe on the readers, and only there.** The page is a
+vertically scrolling card rather than a picture, so it never went through the media swipe. On the
+List item viewer and the Todo preview that left it feeling locked: the arrows worked, but the
+gesture every other page answers to did nothing. Both surfaces now take a **horizontal swipe as a
+page turn** — inside a multi-file Task it turns to the first file, and at the Task's edge it walks
+to the next Task in the level, exactly as the arrows do. Vertical drags still scroll the card.
+Nothing is decided by any of it; these are the surfaces with nothing they could decide.
+
+In Review the same card takes no swipe. There the judgment is the tap on an option — or a
+template's own Submit — and a forward swipe already means *advance one page, complete at the end* on
+the Task's file pages. The Prompt page leaves commitment to the control the Viewer drew, rather than
+letting a page turn become an answer.
+
 **Every row in the table has the queue guide**, including the Todo preview: the tappable position
 and its two levels are part of the navigator, which is the one band every surface keeps. Where the
 queue holds a single item, the guide starts at that item's pages instead, so the position is never

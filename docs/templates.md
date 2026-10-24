@@ -18,8 +18,10 @@ constant — something with a name you can change and a history you cannot.
 - [PDFs and passage tools](#pdfs-and-passage-tools)
 - [Editing appends a version](#editing-appends-a-version)
 - [Attaching one to a Todo](#attaching-one-to-a-todo)
+- [Task reviews, the pen](#task-reviews-the-pen)
 - [Which template governs a file](#which-template-governs-a-file)
 - [The built-in](#the-built-in)
+  - [The built-in Task Reviews](#the-built-in-task-reviews)
 - [Add-ons](#add-ons)
 - [Three layers, three vocabularies](#three-layers-three-vocabularies)
 
@@ -179,7 +181,9 @@ A version is **never edited**. There is no path in the app that changes what ver
 ## Attaching one to a Todo
 
 **Create Tasks** is where a template is attached. The dialog's last step lists the templates that
-exist and lets a run say which of them govern the files it is about to create Tasks over.
+exist and lets a run say which of them govern the files it is about to create Tasks over. The same
+step carries a second, separate choice — the **Task review** every Task this run creates will be
+judged by; see [Task reviews, the pen](#task-reviews-the-pen).
 
 **A run with nothing attached is refused**, and it is one of the dialog's two gates. Since v0.6.2 the
 **Create** button stays enabled and pressing it opens the **Review** section with the template
@@ -213,6 +217,42 @@ version on the next export, including those marked under the old one. If the edi
 buttons the wire values are unchanged; if it adds or removes buttons, marks on a removed button
 become invisible and are never sent, and a new button starts unmarked. Unticking the moved template
 withdraws both the write and the notice.
+
+## Task reviews, the pen
+
+Everything above governs a **file**: which chips a file draws and what those chips record. A **Task
+Review** is the other half of the stationery. It is a template in the same sense — a lineage with
+immutable versions, chosen in Create Tasks and stored on the Todo — but what it governs is the Task
+as a whole: whether the Task can be completed, how a completion is committed, and which answers a
+Viewer may hand back.
+
+The stationery analogy is worth keeping, because the two kinds are matched by declared capability
+rather than one to one. A file template is the pen and highlighter for the printed pages; a Task
+Review is the stationery that takes the answer back off the page — a single-choice sheet, a tool
+that catches a point on a picture, or the blank form that only records that the candidate worked
+through the file. Any Task Review can sit beside any file template: choosing a pen does not choose a
+question, and answering a question does not depend on which pen drew the marks.
+
+**A run chooses one Task Review, and the picker is a radio group rather than a set.** There is no
+scope to reconcile and nothing to order, because one page follows the Task and two questionnaires
+would have to share it. The chosen version is stamped on every Task the run creates or touches, and
+a refresh may move a Todo held at an older version to the version the picker offers — the same
+version discipline the file templates follow. A run whose picker has no readable review falls back
+to the built-in, because a Task judged by nothing is not a shape this model has.
+
+**What a review catches is declared, and every row says it in business terms.** A review that
+accepts a `choice.select` reads *catches a single choice*; one that accepts an `image.point` reads
+*catches a sampled point*; one that accepts nothing reads *records the Task's file decisions*. The
+last is still a useful pen — it is the "I read this and have nothing to write" answer — but it is
+not the matching pen for a Package, whose Prompts are answered through a Viewer. The dialog says so
+when that pairing is chosen, and a Package import starts on the single-choice review unless the user
+has already picked another.
+
+**Headless means the Viewer supplies the controls.** A headless Task Review has no chip row of its
+own and no question it draws: the Prompt's page is the questionnaire, and the template decides what
+an answer means — whether one tap is the commit, whether the answer may be revised, whether the
+Task completes and advances. "Headless" names that division of labour, not a missing part. The pen
+is real; it simply does not draw the question, because the Viewer is already holding it.
 
 ## Which template governs a file
 
@@ -257,8 +297,11 @@ A reference this build cannot read contributes nothing, as everywhere else in th
 
 ## The built-in
 
-Every install starts with one template: **Media Asset Control**, applying to images and videos,
-carrying three buttons:
+Every install starts with four templates: one file template, **Media Asset Control**, and three
+Task Reviews. They are seeded at install and at upgrade, and are otherwise ordinary templates:
+rename them, re-scope them, add to them or remove from them freely.
+
+**Media Asset Control** applies to images and videos and carries three buttons:
 
 | Button | Records | Value |
 |---|---|---|
@@ -266,8 +309,7 @@ carrying three buttons:
 | C1 | Tag | `cust1` |
 | C2 | Tag | `cust2` |
 
-It is seeded from code at upgrade and is otherwise an ordinary template: rename it, re-scope it, add
-to it or remove from it freely. The `favorite` value is the one thing fixed about it — a mark made
+The `favorite` value is the one thing fixed about it — a mark made
 before templates existed names the same button a mark made after them does, so `favorite` is a
 promise rather than a value.
 
@@ -275,6 +317,26 @@ An install that had configured its own tags before v0.5.4 gets more than one tem
 carries each Todo's own tag set across as a template named after that Todo, so nothing a user set up
 is lost — and so the templates they see were made by *their* configuration rather than by the app
 inventing a default.
+
+### The built-in Task Reviews
+
+| Name | Catches | How a completion is committed |
+|---|---|---|
+| **Headless Template for File Decisions** | nothing — records the Task's own page decisions | the completion checkbox |
+| **Headless Template for Sampling a Point** | `image.point` — a long press on a picture | its own **Submit** button |
+| **Headless Template for Single Choice** | `choice.select` — a tap on one of the Prompt's options | the tap itself |
+
+The first is the old rapid review and remains the starting answer for a run that creates Tasks from
+files. The other two are the pens for the kinds of Viewer answer that exist so far; the sampled-point
+one is the acceptance fixture for a template whose own button is its commit control, and the
+single-choice one is what a Package import starts on.
+
+**A built-in's name is data, and editing it is the owner's.** The rows are seeded under the names in
+the table and are never overwritten after that. The one exception is a repair on open: a row that
+still carries the name an earlier build seeded — *Rapid Review*, *Sample a point*, *Single Choice* —
+is moved to the headless name above, while a row somebody has renamed keeps their wording exactly.
+The definitions' own display names are different and deliberately do not move: those strings are
+inside a pinned content hash, and a hash is identity, not a label.
 
 ## Add-ons
 

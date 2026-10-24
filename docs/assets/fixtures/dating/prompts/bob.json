@@ -1,0 +1,13 @@
+{
+  "stem": "Bob, 31 — plays bass in a jazz quartet and cooks enthusiastically.",
+  "profile": {
+    "name": "Bob",
+    "age": 31,
+    "bio": "Plays bass in a jazz quartet. Cooks badly, enthusiastically."
+  },
+  "photo": "bob-photo",
+  "options": [
+    { "id": "like", "label": "Like" },
+    { "id": "dislike", "label": "Dislike" }
+  ]
+}

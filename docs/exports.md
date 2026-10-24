@@ -89,6 +89,23 @@ The full contract and an example body: [Webhooks → The Task's add-on, and why 
 4](webhooks.md#the-tasks-add-on-and-why-it-is-version-4). What an add-on is:
 [Templates → Add-ons](templates.md#add-ons).
 
+## Structured Prompts
+
+Since v0.8.2 a Task can be a **structured Prompt** — a question a Package supplied, answered in a
+structured Viewer. Its identity travels in a Task-level `content` object (`kind`, `schema`,
+`revision`, `promptKey`) and its answer in `result` (`completed`, and a `choice` with the option's
+`id` and `label`). **The body becomes version 5 only when at least one Task carries `content`**, so
+a media-only round is still byte for byte the body v0.7.1 sent.
+
+**The Prompt itself is deliberately not exported.** The stem, the profile fields, the photo and the
+Resource bytes stay on the device: an export is a record of decisions, and the Package is the only
+home of its content (D6 in the v0.8.2 plan). A receiver that needs the question asks for the
+Package at the revision `content.revision` names.
+
+Both methods consume one `ExportMapping`, so the webhook body and the txt file are the same bytes by
+construction rather than by convention. The full shape: [Webhooks → Structured Prompts, and why they
+are version 5](webhooks.md#structured-prompts-and-why-they-are-version-5).
+
 ## Where the choice lives
 
 **A Todo picks one method when it is created. A List can override it for everything it holds.** Both

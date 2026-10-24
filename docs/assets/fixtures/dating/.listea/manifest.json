@@ -1,0 +1,46 @@
+{
+  "protocol": "listea.package/1",
+  "packageKey": "dating-demo",
+  "revision": 1,
+  "title": "Dating demo",
+  "prompts": [
+    {
+      "promptKey": "alice",
+      "kind": "profile",
+      "schema": 1,
+      "response": "choice.single",
+      "title": "Alice, 28",
+      "description": "prompts/alice.json",
+      "resources": [
+        { "resourceKey": "alice-photo", "required": true }
+      ]
+    },
+    {
+      "promptKey": "bob",
+      "kind": "profile",
+      "schema": 1,
+      "response": "choice.single",
+      "title": "Bob, 31",
+      "description": "prompts/bob.json",
+      "resources": [
+        { "resourceKey": "bob-photo", "required": true }
+      ]
+    },
+    {
+      "promptKey": "carol",
+      "kind": "profile",
+      "schema": 1,
+      "response": "choice.single",
+      "title": "Carol, 26",
+      "description": "prompts/carol.json",
+      "resources": [
+        { "resourceKey": "carol-photo", "required": false }
+      ]
+    }
+  ],
+  "resources": [
+    { "resourceKey": "alice-photo", "kind": "image", "member": "media/alice.png" },
+    { "resourceKey": "bob-photo", "kind": "image", "member": "media/bob.png" },
+    { "resourceKey": "carol-photo", "kind": "image", "member": "media/carol.png" }
+  ]
+}

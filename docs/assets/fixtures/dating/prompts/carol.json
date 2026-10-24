@@ -1,0 +1,13 @@
+{
+  "stem": "Carol, 26 — runs a small bookshop and reads three books at once.",
+  "profile": {
+    "name": "Carol",
+    "age": 26,
+    "bio": "Runs a small bookshop. Currently reading three books at once."
+  },
+  "photo": "carol-photo",
+  "options": [
+    { "id": "like", "label": "Like" },
+    { "id": "dislike", "label": "Dislike" }
+  ]
+}

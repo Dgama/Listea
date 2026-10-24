@@ -120,20 +120,22 @@ Posted as `Content-Type: application/json; charset=utf-8`. Timestamps are epoch 
 2xx counts as success; every other status code and every network failure is a failure. The timeout
 is 10 seconds on both connect and read.
 
-**`version` is `2`, `3` or `4`, and the cut from the old body is hard.** The v0.1 body had no
+**`version` is `2`, `3`, `4` or `5`, and the cut from the old body is hard.** The v0.1 body had no
 version and no Tasks: it was one flat `items` array in which each entry was a file and the thing
 judged at the same time. A receiver built on it must be pointed at the new shape deliberately; a
 body never says `2` while meaning the old layout. **Version 3 adds only the `marks` array** — an
 Asset writes it only when it has passages to send, and a body with no such Asset says `2`. **Version
 4 adds only the Task's `addOn` object**, written only when at least one visible answer exists.
-Version 4 is a superset, not a combination code: a round carrying both marks and an add-on says `4`,
-and marks are still written under their own rule. Every image and video body with nothing to add is
-therefore byte for byte the one v0.6.2 sent. Stored history is not rewritten —
-[Resend](#results-and-notices) replays an old record's bytes exactly as they were.
+**Version 5 adds the Task's `content` and `result` objects**, written only on structured Prompt
+Tasks. Each version is a superset, not a combination code: a round carrying marks, an add-on and a
+structured answer says `5`, and each of the older keys is still written under its own rule. Every
+image and video body with nothing to add is therefore byte for byte the one v0.6.2 sent. Stored
+history is not rewritten — [Resend](#results-and-notices) replays an old record's bytes exactly as
+they were.
 
 | Field | Meaning |
 |---|---|
-| `version` | `2`; `3` when the body carries at least one `marks` array; `4` when it carries at least one `addOn` object. |
+| `version` | `2`; `3` when the body carries at least one `marks` array; `4` when it carries at least one `addOn` object; `5` when it carries at least one `content` object. |
 | `event` | One of the four above. |
 | `list.id` | The List's id, or **`0`** for a round with no List — Quick Review, which stands the folder in as the subject. |
 | `list.title` | The List's title, or the **folder's name** for a Quick Review round. |
@@ -144,6 +146,8 @@ therefore byte for byte the one v0.6.2 sent. Stored history is not rewritten —
 | `tasks[].templates[]` | The template versions the Task was imported under: `id`, `name`, `version`. |
 | `tasks[].assets[]` | Every file the Task presents, ordered as the Task holds them. `[]` for a Task with no file. |
 | `tasks[].addOn` | The Task's questionnaire: `id`, `name`, `version` and `answers[]`, written **after `assets`** and **only when at least one answer is visible**. See [the add-on](#the-tasks-add-on-and-why-it-is-version-4). |
+| `tasks[].content` | A structured Prompt's identity: `kind`, `schema`, `revision`, `promptKey`. Written **after `addOn`** and **only when the Task has a payload**. See [structured Prompts](#structured-prompts-and-why-they-are-version-5). |
+| `tasks[].result` | A structured Prompt's answer: `completed` and, for a choice, `choice` (`id`, `label`). Written **only with `content`**. |
 | `assets[].id` | The Asset's [public id](#task-and-asset-ids). Stable, never the database row number. |
 | `assets[].title` | The file name. |
 | `assets[].relativePath` | The file's **folder**, relative to the Upstream's linked folder, without the file name. |
@@ -281,11 +285,50 @@ are not about any one file.
 - **The txt method writes the same body**, so an answered round is a version 4 file and appears in
   History exactly like a webhook round.
 
-**Keys are always present — except `marks` and `addOn`.** `completedAt`, `relativePath` and a
-template's `name` may be `null`, and `assets` or `templates` may be `[]`; none of them is omitted.
-`marks` and `addOn` are the exceptions, present only where they have content, because an empty one
-on a file or a Task would be a shape older receivers have never seen. A receiver that needs to branch
-can read `version`; one that only reads `actions` sees no change at all.
+### Structured Prompts, and why they are version 5
+
+Since v0.8.2 a Task can be a **structured Prompt**: a Package question with stored content rather
+than files. Its identity travels in `content`, and the judgment made about it in `result`. Both sit
+after `addOn`, because both are about the Task and neither is a file.
+
+```json
+{
+  "id": "task-public-id",
+  "title": "alice",
+  "isCompleted": true,
+  "templates": [],
+  "assets": [],
+  "content": { "kind": "profile", "schema": 1, "revision": 3, "promptKey": "alice" },
+  "result": {
+    "completed": true,
+    "choice": { "id": "like", "label": "Like" }
+  }
+}
+```
+
+- **`content` is written for any Task with a stored payload envelope**, even one that was never
+  answered. `promptKey` is `null` when the Task is not linked to a Package Prompt; kind, schema and
+  revision are always present together, because a half-written identity is nothing a receiver can
+  use.
+- **`result` is written exactly when `content` is.** `completed` repeats the Task's own state so a
+  receiver can read `result` without joining two levels. `choice` is the newest `choice.select` on
+  record and is omitted when there is none — a Task completed without a structured event, or a
+  response this build cannot read.
+- **`choice.id` is identity; `choice.label` is the snapshot taken when the person chose.** A later
+  Package revision may rename the option, and the export still says what was on screen then.
+  `content.revision` names the body revision that answer was made against.
+- **The Prompt body is not exported.** The stem, the profile fields, the photo and every Resource
+  byte stay on the device. An export records decisions; a Package is the only home of its content.
+  A receiver that needs to read the question asks for the Package.
+- **The txt method writes the same body**, so a dated round is a version 5 file and appears in
+  History exactly like a webhook round. Both writers consume the same `ExportMapping`, so the two
+  outputs cannot disagree about the version or the key order.
+
+**Keys are always present — except `marks`, `addOn`, `content` and `result`.** `completedAt`,
+`relativePath` and a template's `name` may be `null`, and `assets` or `templates` may be `[]`; none
+of them is omitted. The four exceptions are present only where they have content, because an empty
+one on a file or a Task would be a shape older receivers have never seen. A receiver that needs to
+branch can read `version`; one that only reads `actions` sees no change at all.
 
 A round finished in Quick Review sends this same shape with the Upstream's folder standing in for
 the List, which keeps one payload format on the wire rather than inventing a second one. The

@@ -2,11 +2,10 @@
 
 > **Status:** Normative architectural direction  
 > **Scope:** Long-lived product and domain boundaries  
-> **Last updated:** 2026-10-23 (the v0.8.x framework direction is recorded in
-> [Framework evolution — v0.8.x](#framework-evolution--v08x-planned): Package protocol, Task payload,
-> Resources, Structured Viewer and Headless Review Template, the typed page model, the
-> ReviewSubmission service, and the ExportMapping seam. The shipped v0.7.1 Add-on model is retained
-> unchanged. The pre-v0.8 revision is archived at
+> **Last updated:** 2026-10-24 (the v0.8.2 Package protocol is recorded in
+> [Framework evolution — v0.8.x](#framework-evolution--v08x-planned), with the **Prompt** vocabulary
+> and the question-setter/decision-maker distinction in [Prompt and Task](#prompt-and-task). The
+> shipped v0.7.1 Add-on model is retained unchanged. The pre-v0.8 revision is archived at
 > [ARCHITECTURE-v0.7.1.md](ARCHITECTURE-v0.7.1.md).)
 > **Earlier revisions:** v0.7.0's PDF viewer, passage mark and renderer-neutral seam are recorded in
 > [Asset](#asset), [Asset Viewer Template](#asset-viewer-template) and
@@ -27,13 +26,11 @@ Iteration documents may narrow the work for a release, but they must not contrad
 The code and the architecture are not the same artefact. This table says where the implementation
 stands so a later reader does not mistake a planned boundary for a shipped one.
 
-| Release | State (2026-10-23) | Established |
+| Release | State (2026-10-24) | Established |
 |---|---|---|
 | v0.7.1 | shipped, not published | Add-ons as Task-owned current state; schema 29; export v4 |
-| current `main`, after v0.7.1 | implemented, unreleased | the position label opens a two-level queue guide |
-| v0.8.0 | planned | primary response contract, ReviewSubmission service, per-Asset provenance; no schema change |
-| v0.8.1 | planned | directory Package protocol, payload persistence, Package-scoped Resources |
-| v0.8.2 | planned | typed page model, structured content page, single-choice Headless Template, ExportMapping seam |
+| v0.8.1 | implemented, unreleased | stored Task Reviews, viewer events (`ImagePoint`), primary response envelope; schema 30 and the derived `review_event_answers` table (schema 31); the position label opens a two-level queue guide |
+| v0.8.2 | implemented, unreleased; accepted 2026-10-24, minor fixes deferred to v0.8.3 | Package protocol `listea.package/1`, Prompt payloads, schema 32, Package scope, typed content page, single-choice Viewer and Headless Template, ExportMapping and v5 |
 | v0.8.3 | planned | shared-Resource and reveal-card fixtures; contract freeze |
 
 The v0.8.x rows are commitments of direction, not descriptions of code. Each release's iteration
@@ -163,8 +160,64 @@ Headless Review Template ------- is a Task Review Template whose controls the Vi
 This is a semantic model, not a required physical schema.
 
 The v0.8.x additions do not put a Package in that model. A Package is import provenance inside a
-Todo's run — it declares Tasks and Resources but owns neither. See
+Todo's run — it declares Prompts and Resources but owns neither. See
 [Framework evolution — v0.8.x](#framework-evolution--v08x-planned).
+
+### Prompt and Task
+
+A **Prompt** is one question as the question-setter posed it: a statement (the stem), a response
+contract (what a legal answer looks like), and the materials the statement and the answer need.
+A Prompt is stored in a Package. It is not a Task, not a Todo, and not a judgment.
+
+A **Task** is the decision-maker's undertaking to make one judgment in one Todo. When the material
+is a Package, that judgment answers one Prompt; a media Task has no stored Prompt and still carries
+the intent to tag, check, or mark. The same Prompt may become two Tasks under two Todos, with
+independent state, history, and export. The pair is not symmetric, and the asymmetry is the point:
+
+```text
+Package (upstream; not a Core entity)
+  └── 1..N Prompt          the question, its legal answer shape, its materials
+          │
+          │ taken on by
+          v
+Todo ──── 0..N Task        one answer being given, with its own state and history
+```
+
+This distinction is why the word *Task* is not used for stored material. An image is not a Task;
+tagging the image is. A profile record is not a Task; deciding Like or Dislike on it is. In this
+codebase a Task is always verb-shaped — it carries the decision-maker's intent to answer — and
+`.listea` stores **Prompts**, not Tasks.
+
+The two intents must stay separate:
+
+- **Question-setter intent (upstream).** What is asked, which answers are legal, in what order they
+  are offered, and which materials are required. It lives in the Package and is opaque to Core
+  beyond `kind`, schema, and the response contract.
+- **Decision-maker intent.** Which Prompts this Todo takes on, in what scope and order, whether they
+  are answered one by one or as a group, which answer tool is attached, and whether an answer may
+  be revised. It lives in the Todo, the import configuration, and the Task Review Template.
+
+A List orders Tasks and owns neither intent: it is a review context, not a question setter and not a
+template. A media Task is the degenerate case **conceptually** — its Prompt is only material with a
+free-form response ("tag this image") — but v0.8.x stores no Prompt for it; the Task still carries
+the decision-maker's intent to tag it. Moving image tagging and PDF marks onto the Package protocol
+is not part of v0.8.x.
+
+> **Working analogy (not a rule).** An exam maps onto the model usefully: the upstream is the
+> question source; a Package is the exam paper (stem, options, required materials); import is the
+> print shop (the Todo chooses the printing convention — one Task per file, or one Task per folder;
+> the Viewer is the printer for that question type); a Template is the candidate's pen or eraser.
+> The analogy breaks in places and must not be extended into code: the print shop does not choose
+> the pen, a printer does not validate an answer, and re-importing a Package is not reprinting a
+> paper — Tasks keep their identity and history. Use the analogy to explain ownership, never to
+> derive a rule.
+
+**Compatibility is by capability, not one-to-one.** A Template is not tied to one Prompt kind: a tag
+Template may answer on an image or a video, and a single-choice Template may answer a dating
+profile or a vocabulary card. A Viewer is not tied to one Prompt kind either: a questionnaire
+Viewer may render a judgment Prompt correctly, just as an image browser reads JPG and PNG. Resolution
+compares the Viewer's declared kind/schema/response capability with what the Prompt declares; a kind
+with no compatible Viewer is unavailable, not vacuously presentable.
 
 ### Task
 
@@ -193,11 +246,12 @@ Nor may an implementation read anything about a Task's *lifetime* from its Asset
 Structured fields are content, not permission to put profession-specific columns into Core. A field may be named `candidate_name` by imported data or a user-facing template, but `Candidate` is not a Core subtype.
 
 **v0.8.x gives structured fields a storage seam without changing what a Task is.** A Task may carry
-at most one optional **payload**: a normalized content record with a `kind`, a schema version, a
-revision, and the payload itself. A payload is content, not identity, not a lifetime, and not a
-second Task. A Task may have a payload and no Assets; that is a complete Task, not a partial one.
-The payload's long prompt or question remains content, while the short label that names the Task in
-the queue is the existing import `displayName`, not a new title column. See
+at most one optional **payload**: the normalized description of the Prompt it answers — kind, schema
+version, revision, and the body (stem, options, material references). A payload is content, not
+identity, not a lifetime, and not a second Task. A Task may have a payload and no Assets; that is a
+complete Task whose Prompt needs no page beyond its content page, not a partial one. The Prompt's
+long stem remains payload content, while the short label that names the Task in the queue is the
+existing import `displayName`, not a new title column. See
 [Framework evolution — v0.8.x](#framework-evolution--v08x-planned).
 
 ### Asset
@@ -781,12 +835,12 @@ Therefore:
 - future non-file Tasks can appear in a catalog without pretending to be files.
 
 **v0.8.x adds a Package scope inside a Todo.** It is identified by Todo and Package provenance, lists
-the Package's normalized Task records, and does not fabricate a file path for a payload-only Task.
-Legacy `groupPath` containment remains for file imports. Selection uses Task IDs and reports
+the Package's Prompts as normalized Tasks, and does not fabricate a file path for a payload-only
+Task. Legacy `groupPath` containment remains for file imports. Selection uses Task IDs and reports
 Tasks/pages rather than requiring a file count. Quick Review over a Package scope selects its direct
-Task records; legacy folder Quick Review keeps its direct-child behaviour. The whole declared Task
-belongs to that Package scope (or an ancestor Todo scope), including all of its Asset references; a
-shared Resource does not split it. Runtime readiness additionally requires a readable supported payload, compatible
+Task records; legacy folder Quick Review keeps its direct-child behaviour. The whole Prompt a Task
+answers belongs to that Package scope (or an ancestor Todo scope), including all of its Asset
+references; a shared Resource does not split it. Runtime readiness additionally requires a readable supported payload, compatible
 composition, and all required dependencies. Optional missing Resources do not make the Task partial.
 
 ### Complete containment in a scope
@@ -874,7 +928,7 @@ And for reconciliation: a locator held by another Todo is not a collision, so a 
 
 ### Package reconciliation and checkpoints (v0.8.x, planned)
 
-Protocol-declared Tasks reconcile on `(todoId, packageKey, taskKey)`; Resources on
+Protocol-declared Prompts reconcile on `(todoId, packageKey, promptKey)`; Resources on
 `(todoId, packageKey, resourceKey)`. Domain IDs are still opaque and minted separately. Two Todos
 importing the same Package are independent. Duplicate keys within one Package/Todo are conflicts.
 Existing unkeyed Tasks keep path-based reconciliation under their existing importer; keys are never
@@ -890,8 +944,8 @@ Resource availability is still checked, and a template/Add-on attachment refresh
 existing refresh contract. A declared revision that contradicts observed normalized content is an
 import conflict. Changing importer or grouping remains a separate import or an explicitly designed
 migration, never a silent merge or split. Automatic learning rescheduling stays upstream: if a new
-review occurrence needs independent completion, the producer emits a **new Task key** rather than
-relying on a payload update to create a fresh review round.
+review occurrence needs independent completion, the producer emits a **new Prompt key** rather
+than relying on a payload update to create a fresh review round.
 
 Payload and Resource changes are new categories not named by the media Asset-set policies. v0.8.x
 uses the conservative rules below; it does not silently extend `reset`/`drop` to structured history.
@@ -924,10 +978,11 @@ Resource-role changes are never manufactured into Asset-set changes to trigger i
 
 ## Framework evolution — v0.8.x (planned)
 
-> **Status:** Direction, not shipped behavior. The released baseline is v0.7.1 (schema 29, export
-> v4); the current `main` also carries the two-level queue guide. The release sequence at the end of
-> this section is a set of bounded proposals; each iteration document remains the authority for what
-> a release actually does.
+> **Status:** Direction, not shipped behavior. v0.8.1 and v0.8.2 are implemented on `main` and
+> unreleased (schema 31 and 32; export v5 for structured rounds); the released baseline is v0.7.1
+> (schema 29, export v4). v0.8.2 passed its device acceptance on 2026-10-24, with minor issues
+> deferred to v0.8.3. The release sequence at the end of this section is a set of bounded proposals;
+> each iteration document remains the authority for what a release actually does.
 
 v0.8.x prepares the framework for v0.9.x vocabulary and primary-questionnaire work. It does not ship
 those products. Its job is to let structured content reach the same review engine as media without
@@ -946,10 +1001,13 @@ Headless Review Template; it is not the Add-on.
 | **External producer** | The upstream system or person preparing material. Its scheduling and business logic stay upstream. | A Listea entity, a reviewer, an exporter |
 | **Source** | External material in the plain-English sense; not stored and not a registered origin. `sources` is an internal table name holding Todos. | A new entity, a Task, a lifecycle |
 | **Upstream** | Registered material access: root locator, grant, name, provenance. | Work, completion, a Task owner |
-| **Todo** | Import intent and configuration: importer, scope, content policy, follow-up, templates, one Add-on, export choice. It owns the resulting catalog. | A review context, a List |
-| **Package** | A protocol envelope (manifest plus declarations) discovered under a Todo's selected scope. It declares Tasks, Assets, Resources, keys, and revisions. | A Task, a Todo, a List, a persisted owner, a review session |
+| **Todo** | The decision-maker's intent and configuration: importer, scope, content policy, follow-up, templates, one Add-on, export choice. It owns the resulting catalog. | A review context, a List, a question setter |
+| **Prompt** | One question as the question-setter posed it: statement, response contract, and materials. Stored in a Package; a Task answers it. | A Task, a Todo, a List membership, a judgment |
+| **Question-setter intent (upstream)** | What a Prompt asks, which answers are legal, and which materials are required. | The decision-maker's choice to answer, ordering, or template |
+| **Decision-maker intent** | The Todo's scope, order, printing convention, template and export; the Task is the act of answering one Prompt. | A second stored question set |
+| **Package** | A protocol envelope (manifest plus member descriptions) discovered under a Todo's selected scope. It declares Prompts, Assets, Resources, keys, and revisions. | A Task, a Todo, a List, a persisted owner, a review session |
 | **Importer** | A pure translator from a supported input representation to an import plan. | A renderer, a selector, a committer, an exporter |
-| **Task payload** | Optional normalized structured content carried by a Task: kind, schema version, payload, revision. | A Task kind, a second Task, an Asset |
+| **Task payload** | The optional normalized Prompt description carried by a Task: kind, schema version, body, revision. | A Task kind, a second Task, an Asset |
 | **Resource** | A declared supporting dependency of a Task page (audio, illustration, reference). | An Asset, a page, a judgment target |
 | **Viewer** | A renderer plus a versioned capability declaration that emits named intents. | A template that owns completion or navigation |
 | **Headless Review Template** | A Task Review Template Version whose primary controls are supplied by the Structured Viewer; it owns validation, commit, and completion policy. | A second response type, an Add-on |
@@ -963,12 +1021,15 @@ meaning.
 ### Package is a protocol, not an owner
 
 A Package is a directory containing a minimal `.listea` manifest and local members in v0.8.x. It
-declares protocol version, manifest filename, Package key, Task keys, kind/schema, short title,
-payload, ordered Asset references, Resource definitions and references, and diagnostics. It is not a
-domain entity: there is no `packages` table, no package ownership screen, no garbage-collection
-lifecycle, and no second Task owner. Package key, protocol version, revision/fingerprint, locator,
-and per-Package checkpoints are **import provenance** on the Todo/Task side. Exact byte grammar and
-limits are fixed by the protocol document in v0.8.1, before fixtures depend on them.
+declares protocol version, Package key, revision, Prompt keys, kind/schema, short title, member
+descriptions, ordered Asset references, Resource definitions and references, and diagnostics. The
+manifest carries the envelope; each Prompt body is a member JSON file, so the protocol can be
+upgraded without rewriting the envelope. It is not a domain entity: there is no `packages` table, no
+package ownership screen, no garbage-collection lifecycle, and no second Task owner. Package key,
+protocol version, revision/fingerprint, locator, and per-Package checkpoints are **import
+provenance** on the Todo/Task side. The exact byte grammar and limits are fixed by
+[`package-protocol.md`](package-protocol.md); a fixture may not depend on grammar that document does
+not state.
 
 A Todo may discover one or more Packages under its selected scope. Multi-Package runs report
 per-Package failures and commit only validated Package plans; a failed Package is never interpreted
@@ -1021,15 +1082,30 @@ A Headless Review Template is a Task Review Template Version that owns the respo
 without drawing a duplicate action bar. It declares:
 
 ```text
-commitOn: named intent(s)
+commit: immediate:<intent> | confirm:control:<id> | confirm:intent:<intent>
+revisable: true | false
 completesTask: explicit policy
 advanceAfterCommit: explicit policy
 ```
+
+**Commit modality and revisability are independent.** The first says how an answer becomes final:
+the intent commits as it is emitted, or the answer is pending until a named control or intent
+confirms it. The second says whether a committed answer may be replaced later. The three product
+cases are combinations, not a closed enum: one tap and no regret (a vocabulary card), one tap and
+overwrite (a dating judgment that may be reconsidered), and choose-then-confirm (a questionnaire
+with a Submit button), any of which may also be revisable. A non-revisable Template refuses a second
+primary commit at the write boundary and shows the committed answer as history; it never rewrites or
+deletes the earlier event.
 
 Completion is never inferred solely from a response value type, and the UI cannot always force
 `completed = true`. The media adapter preserves current semantics through an equivalent policy.
 Automatic advance happens only after a successful commit and remains a consequence of the review
 action, not navigation.
+
+A Viewer and a Task Review Template are matched by declared capability — supported kind, schema
+range, response contract, and emitted intents — not by a one-to-one id. The resolution builds in
+v0.8.2 and replaces a family of explicit id pairs; it is the same rule the Prompt and Task section
+states for Viewers generally.
 
 For upstream-defined choices, the ownership is:
 
@@ -1078,12 +1154,17 @@ Tasks remain unkeyed unless their actual protocol supplies a key; `groupPath` is
 an upstream identity, and `legacy_item_ids`/`legacy_task_ids` are reused rather than replaced by a
 second registration system.
 
-v0.8.0 needs no Room schema change: the new response envelope can live in the existing response text
-column. v0.8.1 allocates the next schema versions — 30 for the Task Review definition and its
+The v0.8 primary response envelope needed no Room schema change: it lives in the existing response
+text column. v0.8.1 allocates the next schema versions — 30 for the Task Review definition and its
 attachment, and 31 for the derived caught-event child table — each with its migration, exported
 schema JSON, migration test, and fixture subtraction helper. `MIGRATION_30_31` backfills by reading
 each stored response through the app's own domain reader (`ReviewResponse.parse`), so no second
-grammar exists; a response that build cannot read is skipped, never guessed at. Follow
+grammar exists; a response that build cannot read is skipped, never guessed at. v0.8.2 allocates
+schema 32 for Package provenance and Prompt payloads: `task_payloads`, `package_checkpoints`,
+`package_prompt_tasks`, `package_resources`, and `task_resources`, all additive, with their
+migration, exported schema JSON, migration test, and fixture subtraction. `MIGRATION_31_32` creates
+tables only; a populated v31 fixture must come through with every existing row byte-identical.
+Follow
 the minSdk 24 conventions: additive tables/nullable fields where possible, no dependence on
 `ALTER TABLE … DROP COLUMN`, no table rebuild solely for terminology cleanup. A schema-only
 migration must preserve populated state byte-for-byte where no conversion is specified. Add-on
@@ -1111,9 +1192,8 @@ Existing module/package conventions are kept where they already satisfy this bou
 
 | Release | Scope | Schema / export |
 |---|---|---|
-| **v0.8.0** | Primary response contract, content-kind/composition/submission-policy contracts, shared ReviewSubmission over the existing atomic transaction, per-Asset provenance for new events; existing media host routed through it | No schema change; existing response column |
-| **v0.8.1** | Directory Package protocol and limits, typed Package planning, payload persistence, multi-Package checkpoints, keyed reconciliation, scoped Resources; structured records may import as unavailable until a renderer exists | Next schema version if needed; export unchanged |
-| **v0.8.2** | Typed page list, Package catalog scope, structured DecisionTarget, selection/Quick Review, queue-label and guide integration; one Structured Viewer, Headless single-choice template, submission-time composition check; ExportMapping seam with v2/v3/v4 goldens and documented v5 | v5 only for structured rounds |
+| **v0.8.1** | Primary response contract, stored Task Reviews and viewer events, shared ReviewSubmission over the existing atomic transaction, per-Asset provenance for new events; sampled-point proof | Schema 30 (definition/attachment) and 31 (caught-event child table); export unchanged |
+| **v0.8.2** | Package protocol `listea.package/1` with member Prompt bodies; typed Package planning, payload persistence, per-Package checkpoints, keyed reconciliation, scoped Resources; typed page list, Package catalog scope, structured DecisionTarget, selection/Quick Review; one Structured Viewer, single-choice Headless Template with independent commit/revisable policy, submission-time checks; ExportMapping with v2/v3/v4 goldens and v5 for both Webhook and Txt | Schema 32; v5 only for structured rounds |
 | **v0.8.3** | Second fixture: prompt/reveal, declared grades, shared pronunciation Resource; optional/required diagnostics, compatible payload revisions, independent Todo identities; freeze protocol/capability contracts | v5 fixture; migration/regression docs |
 
 These are framework proofs, not the v0.9 product. Add-on restructuring is assigned to none of them.
