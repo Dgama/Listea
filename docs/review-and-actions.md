@@ -261,6 +261,7 @@ in landscape.
 | **List** | The owning List. Absent in a Quick Review, which came from no List — saying otherwise would be a claim about where the decision went. |
 | **Status** | *Checked* or *Not checked*. |
 | **Actions** | The actions on this item, or *None*. |
+| **Recorded** | The events the template caught on the latest submission: *None*, or *N event(s)* and then each point with its colour, position and the file it was taken on. Shown only when the template accepts events. History, not an editable value — a later submission adds its own record. |
 | **Source** | Only shown when there is something to say: *Manual item — no file*, or *Missing from the source folder*. |
 | **Type, Size, Modified** | Read from the storage provider when the sheet opens, so the sheet appears immediately and these rows fill in. |
 

@@ -192,13 +192,13 @@ in files with no Android imports. The table is a selection by subject rather tha
 | `CreateListFromTasksTest` | Making a List out of Tasks picked from a catalog |
 | `SharedTaskTest` | Two Todos over one folder: two Tasks, two decisions, the reads that had assumed one of each, and the claims that say which Todo holds a path as its own Task and which only covers it |
 | `ConsentGateViewModelTest`, `FolderListGateTest`, `ConsentTest` | The consent questions asked before an import or a List, driven through the ViewModel and through the DAO |
-| `MigrationChainTest`, `MigrationSmokeTest`, `MigrationV12ToV13Test`, `MigrationV13ToV14Test`, `MigrationV15ToV16Test`, `MigrationV16ToV17Test`, `MigrationV17ToV18Test`, `MigrationV18ToV19Test`, `MigrationV19ToV20Test`, `MigrationV20ToV21Test`, `MigrationV21ToV22Test`, `MigrationV22ToV23Test`, `MigrationV23ToV24Test`, `MigrationV24ToV25Test`, `MigrationV25ToV26Test`, `MigrationV26ToV27Test`, `MigrationV27ToV28Test` | Every migration, applied in order against a real database |
+| `MigrationChainTest`, `MigrationSmokeTest`, `MigrationV12ToV13Test`, `MigrationV13ToV14Test`, `MigrationV15ToV16Test`, `MigrationV16ToV17Test`, `MigrationV17ToV18Test`, `MigrationV18ToV19Test`, `MigrationV19ToV20Test`, `MigrationV20ToV21Test`, `MigrationV21ToV22Test`, `MigrationV22ToV23Test`, `MigrationV23ToV24Test`, `MigrationV24ToV25Test`, `MigrationV25ToV26Test`, `MigrationV26ToV27Test`, `MigrationV27ToV28Test`, `MigrationV28ToV29Test`, `MigrationV30ToV31Test` | Every migration, applied in order against a real database |
 | `TodoDissolutionTest`, `ListAfterDissolutionTest`, `HistoryRecoveryTest` | Deleting a Todo: what it takes, what it leaves, what a List says afterwards, and what a later Todo can load from what was left |
 | `ContentPolicyTest` | What a changed Task means: the three tiers, the "unchanged means no policy" rule, and every rule by which an Asset counts as changed, missing, or not news |
 | `ContentPolicyRunTest` | The same tiers as *shapes of outcome* through real SQL: which of a Task's id, its judgments and its List memberships survive each one |
 | `IdentityTest`, `ReviewResponseTest`, `TaskActionTest`, `ExportChoiceTest`, `TemplateRegistryTest`, `TemplateButtonTest`, `TemplateScopeTest` | The `domain/` model: that id types are not interchangeable and never derive from a path, that a response's stored form is canonical, that only one of the three actions is a submission, that an export choice is one value and never a set, and what a template version's content hash is built from |
 | `ListsDaoTest`, `TaskWriteTest`, `AssetStepTest`, `CurrentStateTest`, `EligibilityTest` | The DAO directly: what a write leaves behind, how Assets step, what "current state" resolves to, and which Tasks a List may take |
-| `ReviewSessionTest`, `ReviewSubmissionTest` | A review session's lifetime, and what submitting one records |
+| `ReviewSessionTest`, `ReviewSubmissionTest`, `RecordedEventRowsTest` | A review session's lifetime; what submitting one records, including the caught-event rows and the latest-submission read; and how the Info sheet names those events |
 | `LegacyItemIdTest`, `LegacyManualCleanupTest` | The two legacy paths: older public ids, and manual items with no file behind them |
 | `CheckedFileReaderTest` | Which files count as checked under an Upstream, and which are still on the device |
 | `WebhookBodyTest`, `WebhookCompatTest`, `ExportTaskAssemblyTest` | The payload's own shape, the compatibility rules it must not break, and the one assembly step that turns a round's rows into Tasks with their Assets, templates and per-file marks |
@@ -291,6 +291,7 @@ app/src/main/java/com/example/listea/
   data/ListsDao.kt         every query
   data/ListeaDatabase.kt   the database and its migrations
   data/ReviewAsset.kt      one Asset as the review surface reads it, and why it is missing
+  data/ReviewEventAnswerEntity.kt  Room entity: review_event_answers, the events one submission caught
   data/TaskEntities.kt     Room entities: tasks, assets, task_state, task_asset_state, review_events
   data/AssetMarkEntity.kt  Room entity: task_asset_marks, one passage mark on one Asset
   data/SchemaBackfillEntity.kt  Room entity: schema_backfills, the one-time bootstrap marker
@@ -577,6 +578,20 @@ marks with it, because a passage with no file under it is not a statement about 
 or tool is deliberately **not** referenced — removing one must hide marks, never delete them — so
 `authoredTemplateId` and `authoredTemplateVersion` are plain history columns. See the anchor section
 above and [v0.7.0](iterations/v0.7.0.md#storage).
+
+**29 → 30** gives `template_versions` a `kind`, a `definition` and a `definitionVersion`, and gives
+`sources` and `task_imports` a `taskReview` attachment — every column additive with a SQL default —
+then seeds the two built-in Task Review lineages with the same constants a fresh install uses, so an
+upgraded database and a new one hold the same five versions across three lineages.
+
+**30 → 31** adds `review_event_answers`, a derived child of `review_events` keyed
+`(reviewEventId, ordinal)` with `ON DELETE CASCADE` on its parent and a nullable, index-only
+`assetId`. Nothing existing moves. The step backfills by reading each stored response through the
+app's own `ReviewResponse.parse` and writing one row per event with the same value grammar the
+response line uses; a legacy judgment with no events, or a response this build cannot read, writes
+nothing and is left byte-for-byte. See
+[v0.8.1](iterations/v0.8.1-plan.md#3c-the-per-event-child-table-same-day) and
+[ARCHITECTURE → ReviewEvent](ARCHITECTURE.md#reviewevent-and-reviewresult).
 
 The schema is **not settled** — see [Project status](../README.md#project-status). Adding a
 migration is expected of any change to an entity.

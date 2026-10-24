@@ -150,6 +150,8 @@ List 1 -------- N ListEntry N -------- 1 Task
                                              +---- 0..1 current TaskState
                                              |
                                              +---- 0..N ReviewEvent
+                                             |             |
+                                             |             +---- 0..N caught event (review_event_answers, derived)
                                              |
                                              +---- 0..N add-on answer (task_review_answers)
 
@@ -335,6 +337,16 @@ A review event should be able to retain:
 - a timestamp;
 - semantic response/action data;
 - enough provenance to interpret the event later.
+
+**A caught event is stored where it belongs.** v0.8.1 adds `review_event_answers`, a child of a
+ReviewEvent keyed `(reviewEventId, ordinal)` and cascading from it: one row per event the viewer
+handed the template, in the order reported. It is **derived, not canonical** — the ReviewEvent's
+response is still the record, and the rows spell the value with the same grammar the response line
+uses (one encoder in `domain/`), so no reader has to learn a second format. `assetId` is provenance:
+the Asset a point was taken on, nullable and with **no foreign key**, because a file may be gone while
+the fact that a point was taken on it stands. This table records what happened; **whether a judgment
+can be revised is template policy, not a schema constraint**, and a future revisable-answer family
+would keep its current value in a separate row rather than rewrite history here.
 
 A **ReviewResult** is a current or completed structured outcome suitable for local use or export. It may be projected from TaskState and ReviewEvents; it must not be modeled as a webhook body or spreadsheet row.
 
@@ -1067,8 +1079,11 @@ an upstream identity, and `legacy_item_ids`/`legacy_task_ids` are reused rather 
 second registration system.
 
 v0.8.0 needs no Room schema change: the new response envelope can live in the existing response text
-column. v0.8.1 allocates the next schema version (30 if schema 29 is still the baseline) with
-`MIGRATION_29_30`, exported schema JSON, migration test, and the fixture subtraction helper. Follow
+column. v0.8.1 allocates the next schema versions — 30 for the Task Review definition and its
+attachment, and 31 for the derived caught-event child table — each with its migration, exported
+schema JSON, migration test, and fixture subtraction helper. `MIGRATION_30_31` backfills by reading
+each stored response through the app's own domain reader (`ReviewResponse.parse`), so no second
+grammar exists; a response that build cannot read is skipped, never guessed at. Follow
 the minSdk 24 conventions: additive tables/nullable fields where possible, no dependence on
 `ALTER TABLE … DROP COLUMN`, no table rebuild solely for terminology cleanup. A schema-only
 migration must preserve populated state byte-for-byte where no conversion is specified. Add-on
