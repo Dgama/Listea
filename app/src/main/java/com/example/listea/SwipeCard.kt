@@ -64,6 +64,12 @@ private const val RESIST_LIMIT = 80f
  * delayed waiting to see whether it was a tap, and a tap is cancelled the moment the drag
  * detector consumes movement.
  *
+ * [onLongPress] is the third gesture a viewing surface can offer: a press held in place on the
+ * media, reported with the card' zoom state and the press's position in card coordinates. It is
+ * null almost everywhere — the caller decides whether the thing on screen has anything to say about
+ * a point — and when present it is installed on the same tap node, so a long press consumed by a
+ * child (a video's own controls) never reaches it.
+ *
  * [content] is handed the zoom state so the renderer can apply [mediaZoom] to the picture itself
  * and report what shape it turned out to be.
  */
@@ -76,6 +82,7 @@ fun SwipeCard(
     onSwipeBack: () -> Unit,
     modifier: Modifier,
     onTap: (() -> Unit)? = null,
+    onLongPress: ((MediaZoomState, Offset) -> Unit)? = null,
     content: @Composable (MediaZoomState) -> Unit
 ) {
     val scope = rememberCoroutineScope()
@@ -88,6 +95,7 @@ fun SwipeCard(
     // Read through a holder so the detector is installed once: callers pass a fresh lambda every
     // recomposition, and re-keying pointerInput on it would tear the gesture down mid-touch.
     val currentOnTap by rememberUpdatedState(onTap)
+    val currentOnLongPress by rememberUpdatedState(onLongPress)
 
     BoxWithConstraints(
         modifier = modifier.clipToBounds(),
@@ -104,7 +112,10 @@ fun SwipeCard(
                 }
                 .graphicsLayer { translationX = offsetX.value }
                 .pointerInput(Unit) {
-                    detectTapGestures { currentOnTap?.invoke() }
+                    detectTapGestures(
+                        onLongPress = { position -> currentOnLongPress?.invoke(zoom, position) },
+                        onTap = { currentOnTap?.invoke() }
+                    )
                 }
                 .pointerInput(key, canSwipeForward, canSwipeBack) {
                     detectZoomPanGestures(

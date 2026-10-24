@@ -244,7 +244,10 @@ data class MediaNavigator(
 @Composable
 fun MediaShell(
     navigator: MediaNavigator,
-    taskBar: @Composable () -> Unit,
+    // Null for a surface whose Task has no decision of its own to draw there: a review template
+    // that commits from its own control leaves this slot empty rather than drawing a checkbox that
+    // would complete the Task without recording what the template asked for.
+    taskBar: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
     chromeVisible: Boolean = true,
     framePersists: Boolean = false,
@@ -295,7 +298,7 @@ fun MediaShell(
             visible = chromeVisible,
             persists = framePersists
         ) {
-            taskBar()
+            taskBar?.invoke()
         }
     }
 }

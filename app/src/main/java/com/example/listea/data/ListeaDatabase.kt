@@ -12,14 +12,21 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.execSQL
 import com.example.listea.domain.AssetKind
 import com.example.listea.domain.ButtonType
+import com.example.listea.domain.TASK_REVIEW_DEFINITION_VERSION
 import com.example.listea.domain.buttonsVersionFor
 import com.example.listea.domain.TemplateButton
 import com.example.listea.domain.TemplateId
 import com.example.listea.domain.TemplateScope
 import com.example.listea.domain.TemplateVersionRef
+import com.example.listea.domain.ReviewResponse
 import com.example.listea.domain.Templates
+import com.example.listea.domain.assetUri
+import com.example.listea.domain.encodeTaskReviewDefinition
 import com.example.listea.domain.encodeTemplateButtons
 import com.example.listea.domain.encodeTemplateScope
+import com.example.listea.domain.encodeValue
+import com.example.listea.domain.parse
+import com.example.listea.domain.viewerEvents
 import java.util.UUID
 
 @Database(
@@ -47,9 +54,10 @@ import java.util.UUID
         AssetMarkEntity::class,
         AddOnEntity::class,
         AddOnVersionEntity::class,
-        TaskReviewAnswerEntity::class
+        TaskReviewAnswerEntity::class,
+        ReviewEventAnswerEntity::class
     ],
-    version = 29,
+    version = 31,
     exportSchema = true
 )
 abstract class ListeaDatabase : RoomDatabase() {
@@ -1393,6 +1401,154 @@ abstract class ListeaDatabase : RoomDatabase() {
         }
 
         /**
+         * Puts the Task Review on the stored path, and gives the Todo and the Task a place to name
+         * one.
+         *
+         * Additive: three columns on `template_versions` describing what a version is, and two
+         * reference columns beside `assetControls`/`addOn` on `sources` and `task_imports`. Every
+         * existing row keeps its meaning — a template version written before this round is an
+         * `asset-control`, and an empty Task Review reference is *the built-in rapid review*, which
+         * is what every Todo and Task was implicitly using anyway.
+         *
+         * The two seeded lineages are the point of the step. Headless is now a stored definition
+         * like any other, so the fallback chain lands on a row even on an upgraded device; the
+         * `INSERT OR IGNORE` is what lets the creation callback and this migration share one
+         * description without either refusing the other's work.
+         */
+        internal val MIGRATION_29_30 = object : Migration(29, 30) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
+                    "ALTER TABLE `template_versions` ADD COLUMN `kind` TEXT NOT NULL " +
+                        "DEFAULT 'asset-control'"
+                )
+                connection.execSQL(
+                    "ALTER TABLE `template_versions` ADD COLUMN `definition` TEXT NOT NULL " +
+                        "DEFAULT ''"
+                )
+                connection.execSQL(
+                    "ALTER TABLE `template_versions` ADD COLUMN `definitionVersion` INTEGER NOT NULL " +
+                        "DEFAULT 0"
+                )
+                connection.execSQL(
+                    "ALTER TABLE `sources` ADD COLUMN `taskReview` TEXT NOT NULL DEFAULT ''"
+                )
+                connection.execSQL(
+                    "ALTER TABLE `task_imports` ADD COLUMN `taskReview` TEXT NOT NULL DEFAULT ''"
+                )
+                seedBuiltInTaskReviews(connection, System.currentTimeMillis())
+                Log.i("ListeaDatabase", "29 -> 30")
+            }
+        }
+
+        /**
+         * Splits the events of every readable submission into rows of their own.
+         *
+         * **Additive, and derived from what is already stored.** No existing column moves and no
+         * response is rewritten: `review_events.response` remains the permanent record, and this
+         * table is the queryable child the v0.8.1 template needed to *store* an event as an event.
+         * An upgrade therefore loses nothing and gains a listable record of what was caught.
+         *
+         * The backfill reads each response through the same domain reader the app uses — never a
+         * second parser written for the migration — so a response this build cannot read is left
+         * out rather than guessed at, and a later build may backfill it differently. Asset
+         * resolution matches the new write path: the event's path is a source URI, and a URI no
+         * Asset under that Task still carries leaves `assetId` null.
+         */
+        internal val MIGRATION_30_31 = object : Migration(30, 31) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `review_event_answers` (" +
+                        "`reviewEventId` TEXT NOT NULL, `ordinal` INTEGER NOT NULL, " +
+                        "`assetId` TEXT, `type` TEXT NOT NULL, `value` TEXT NOT NULL, " +
+                        "PRIMARY KEY(`reviewEventId`, `ordinal`), " +
+                        "FOREIGN KEY(`reviewEventId`) REFERENCES `review_events`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE )"
+                )
+                connection.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_review_event_answers_assetId` " +
+                        "ON `review_event_answers` (`assetId`)"
+                )
+                backfillReviewEventAnswers(connection)
+                Log.i("ListeaDatabase", "30 -> 31")
+            }
+        }
+
+        /** One row of [MIGRATION_30_31]'s backfill, held until every response has been read. */
+        private data class BackfilledEvent(
+            val reviewEventId: String,
+            val ordinal: Int,
+            val assetId: String?,
+            val type: String,
+            val value: String
+        )
+
+        /**
+         * Reads every stored response before writing anything, then writes the event rows.
+         *
+         * The same rule [backfillPublicIds] records: a cursor stepping over a table while that table
+         * is being updated is asking SQLite for an opinion nobody needs. Asset URIs are cached per
+         * Task because a Task's submissions all name the same few Assets.
+         */
+        private fun backfillReviewEventAnswers(connection: SQLiteConnection) {
+            val responses = mutableListOf<Triple<String, String, String>>()
+            connection.prepare(
+                "SELECT id, taskId, response FROM review_events ORDER BY at, id"
+            ).use { row ->
+                while (row.step()) {
+                    responses += Triple(row.getText(0), row.getText(1), row.getText(2))
+                }
+            }
+
+            val answers = mutableListOf<BackfilledEvent>()
+            val assetsByTask = mutableMapOf<String, Map<String, String>>()
+            for ((eventId, taskId, text) in responses) {
+                val response = ReviewResponse.parse(text) ?: continue
+                val events = response.viewerEvents
+                if (events.isEmpty()) continue
+                val byUri = assetsByTask.getOrPut(taskId) {
+                    val map = mutableMapOf<String, String>()
+                    connection.prepare(
+                        "SELECT id, sourceUri FROM assets WHERE taskId = ?"
+                    ).use { asset ->
+                        asset.bindText(1, taskId)
+                        while (asset.step()) {
+                            val uri = if (asset.isNull(1)) null else asset.getText(1)
+                            if (uri != null) map[uri] = asset.getText(0)
+                        }
+                    }
+                    map
+                }
+                events.forEachIndexed { ordinal, event ->
+                    answers += BackfilledEvent(
+                        reviewEventId = eventId,
+                        ordinal = ordinal,
+                        assetId = event.assetUri()?.let { byUri[it] },
+                        type = event.type.key,
+                        value = event.encodeValue()
+                    )
+                }
+            }
+            if (answers.isEmpty()) return
+
+            connection.prepare(
+                "INSERT INTO `review_event_answers` " +
+                    "(`reviewEventId`, `ordinal`, `assetId`, `type`, `value`) " +
+                    "VALUES (?, ?, ?, ?, ?)"
+            ).use { write ->
+                for (answer in answers) {
+                    write.bindText(1, answer.reviewEventId)
+                    write.bindLong(2, answer.ordinal.toLong())
+                    if (answer.assetId == null) write.bindNull(3)
+                    else write.bindText(3, answer.assetId)
+                    write.bindText(4, answer.type)
+                    write.bindText(5, answer.value)
+                    write.step()
+                    write.reset()
+                }
+            }
+        }
+
+        /**
          * Gives every Task and Asset its public id, reading everything before writing anything.
          *
          * The same rule [backfillSelections] records: a cursor stepping over a table while that
@@ -1494,6 +1650,20 @@ abstract class ListeaDatabase : RoomDatabase() {
          */
         private fun seedBuiltInAssetControl(connection: SQLiteConnection, now: Long) {
             for ((sql, args) in builtInAssetControlRows(now)) {
+                runStatement(connection, sql, args)
+            }
+        }
+
+        /**
+         * The two built-in Task Reviews, written the same way: one description, two callers.
+         *
+         * Shared by `MIGRATION_29_30` and the creation callback, so a fresh install and an upgrade
+         * cannot disagree about what `builtin.media.rapid-review@1` means. The asset-control seed is
+         * deliberately *not* re-run here: a 23 → 24 migration already wrote it, and a step should
+         * describe only what its own release added.
+         */
+        private fun seedBuiltInTaskReviews(connection: SQLiteConnection, now: Long) {
+            for ((sql, args) in builtInTaskReviewRows(now)) {
                 runStatement(connection, sql, args)
             }
         }
@@ -2072,6 +2242,38 @@ abstract class ListeaDatabase : RoomDatabase() {
         }
 
         /**
+         * The two built-in Task Reviews as statements and values, through the same encoders.
+         *
+         * A row is a row whichever kind it is: the lineage row plus one immutable version carrying
+         * `kind`, the definition payload and its version beside it. `INSERT OR IGNORE` for the
+         * reason [builtInAssetControlRows] gives — the migration and the creation callback must not
+         * refuse one another's work.
+         */
+        internal fun builtInTaskReviewRows(now: Long): List<Pair<String, List<Any?>>> =
+            Templates.StoredTaskReviews.flatMap { seed ->
+                val definition = seed.taskReview ?: return@flatMap emptyList()
+                listOf(
+                    "INSERT OR IGNORE INTO templates (id, name, createdAt) VALUES (?, ?, ?)" to
+                        listOf(seed.ref.templateId.value, seed.name, now),
+                    "INSERT OR IGNORE INTO template_versions " +
+                        "(templateId, version, scope, buttons, buttonsVersion, createdAt, " +
+                        "kind, definition, definitionVersion) " +
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)" to
+                        listOf(
+                            seed.ref.templateId.value,
+                            seed.ref.version,
+                            encodeTemplateScope(seed.scope),
+                            encodeTemplateButtons(seed.buttons),
+                            buttonsVersionFor(seed.buttons),
+                            now,
+                            StoredTemplateKind.TASK_REVIEW,
+                            encodeTaskReviewDefinition(definition),
+                            TASK_REVIEW_DEFINITION_VERSION
+                        )
+                )
+            }
+
+        /**
          * Keeps *every install has the built-in* true, rather than trusting two callers to make it so.
          *
          * There are two ways a database comes to exist at this version and only one of them is a
@@ -2106,7 +2308,9 @@ abstract class ListeaDatabase : RoomDatabase() {
                 }
 
                 private fun writeBuiltIn(db: SupportSQLiteDatabase) {
-                    for ((sql, args) in builtInAssetControlRows(System.currentTimeMillis())) {
+                    val now = System.currentTimeMillis()
+                    for ((sql, args) in
+                        builtInAssetControlRows(now) + builtInTaskReviewRows(now)) {
                         db.execSQL(sql, args.toTypedArray())
                     }
                 }
@@ -2154,7 +2358,9 @@ abstract class ListeaDatabase : RoomDatabase() {
                     MIGRATION_25_26,
                     MIGRATION_26_27,
                     MIGRATION_27_28,
-                    MIGRATION_28_29
+                    MIGRATION_28_29,
+                    MIGRATION_29_30,
+                    MIGRATION_30_31
                 )
                     .build()
                     .also { instance = it }

@@ -1,13 +1,17 @@
 package com.example.listea
 
 import androidx.compose.runtime.Immutable
+import com.example.listea.data.StoredTemplateKind
 import com.example.listea.data.TemplateEntity
 import com.example.listea.data.TemplateVersionEntity
 import com.example.listea.domain.AssetKind
 import com.example.listea.domain.StoredTemplateVersion
 import com.example.listea.domain.TemplateId
+import com.example.listea.domain.TemplateKind
 import com.example.listea.domain.TemplateScope
 import com.example.listea.domain.TemplateVersionRef
+import com.example.listea.domain.Templates
+import com.example.listea.domain.decodeTaskReviewDefinition
 import com.example.listea.domain.decodeTemplateButtons
 import com.example.listea.domain.decodeTemplateScope
 
@@ -223,7 +227,17 @@ class TemplateResolver(
      *
      * Ordered by name, then id, so the picker reads alphabetically and does not reshuffle.
      */
-    val attachable: List<StoredTemplateVersion> = emptyList()
+    val attachable: List<StoredTemplateVersion> = emptyList(),
+
+    /**
+     * Every Task Review lineage's current version, by name: what a Todo may judge its Tasks with.
+     *
+     * Split from [attachable] because the two pickers ask different questions — *what may govern
+     * this file* and *how are these Tasks judged* — and one list holding both would offer a Task
+     * Review in the asset-control step and an asset control in the review step. Ordered the same
+     * way, for the same reason.
+     */
+    val attachableReviews: List<StoredTemplateVersion> = emptyList()
 ) {
 
     /**
@@ -294,6 +308,39 @@ class TemplateResolver(
      */
     fun versionOf(ref: TemplateVersionRef): StoredTemplateVersion? = stored(ref)
 
+    /**
+     * The Task Review a stored attachment names, or null when this build cannot read it.
+     *
+     * The attachment column holds at most one reference, but it is decoded with the same encoder
+     * as everything else, so a row that somehow holds two resolves by the same first-readable
+     * rule. A reference to an asset control, an unknown version, or a task-review row whose
+     * definition this build could not decode is *not* a review: the caller's fallback chain moves
+     * to the next candidate rather than drawing a review with guessed policies.
+     */
+    fun reviewFor(attachment: String): StoredTemplateVersion? {
+        if (attachment.isBlank()) return null
+        return decodeTemplateAttachments(attachment).firstNotNullOfOrNull { reviewForRef(it) }
+    }
+
+    /**
+     * The same answer for a reference already in hand: a List's legacy review column, or the
+     * fallback chain reaching for the built-in.
+     *
+     * Separate from [reviewFor] because those callers have a [TemplateVersionRef] rather than an
+     * encoded attachment, and encoding one only to decode it again would make the fallback chain
+     * depend on a format that is not about it.
+     *
+     * **A built-in resolves even when its seed row is not in the tables.** The two shipped reviews
+     * exist in code as well as in rows, and that copy is what the review surface already falls back
+     * to when nothing else answers. Reading them here too keeps *the built-in rapid review is always
+     * nameable* true for a database the seed callback has not visited — an in-memory test database,
+     * or the moment before `onCreate` runs — instead of making a write path depend on the callback's
+     * timing. A user's own review gets no such fallback: its definition is only ever the row.
+     */
+    fun reviewForRef(ref: TemplateVersionRef): StoredTemplateVersion? =
+        (stored(ref) ?: Templates.StoredTaskReviews.firstOrNull { it.ref == ref })
+            ?.takeIf { it.kind == TemplateKind.TASK_REVIEW && it.taskReview != null }
+
     companion object {
         /** No templates at all, for a surface that has to be given something before the rows land. */
         val Empty = TemplateResolver()
@@ -320,25 +367,40 @@ class TemplateResolver(
                 val name = names[row.templateId] ?: return@mapNotNull null
                 val buttons = decodeTemplateButtons(row.buttons, row.buttonsVersion)
                     ?: return@mapNotNull null
+                val kind = StoredTemplateKind.toKind(row.kind) ?: return@mapNotNull null
+                // A task-review row is readable only when its payload decodes. Leaving it out is
+                // the same fail-closed answer an unreadable button list gets: a review whose
+                // commit policy had to be guessed is worse than one the surface reports missing.
+                val taskReview = if (kind == TemplateKind.TASK_REVIEW) {
+                    decodeTaskReviewDefinition(row.definition, row.definitionVersion)
+                        ?: return@mapNotNull null
+                } else {
+                    null
+                }
                 StoredTemplateVersion(
                     ref = TemplateVersionRef(TemplateId(row.templateId), row.version),
                     name = name,
                     scope = decodeTemplateScope(row.scope),
-                    buttons = buttons
+                    buttons = buttons,
+                    kind = kind,
+                    taskReview = taskReview
                 )
             }
 
+            // Highest version per lineage. `maxByOrNull` on the version number and not
+            // `lastOrNull` on the list, because the caller's order is the query's and a
+            // `lastOrNull` would quietly depend on it; the answer here is a number and should be
+            // read off the numbers.
+            fun current(list: List<StoredTemplateVersion>): List<StoredTemplateVersion> = list
+                .groupBy { it.ref.templateId }
+                .values
+                .mapNotNull { lineage -> lineage.maxByOrNull { it.ref.version } }
+                .sortedWith(compareBy({ it.name }, { it.ref.templateId.value }))
+
             return TemplateResolver(
                 versions = readable.associateBy { it.ref },
-                // Highest version per lineage. `maxByOrNull` on the version number and not
-                // `lastOrNull` on the list, because the caller's order is the query's and a
-                // `lastOrNull` would quietly depend on it; the answer here is a number and should be
-                // read off the numbers.
-                attachable = readable
-                    .groupBy { it.ref.templateId }
-                    .values
-                    .mapNotNull { lineage -> lineage.maxByOrNull { it.ref.version } }
-                    .sortedWith(compareBy({ it.name }, { it.ref.templateId.value }))
+                attachable = current(readable.filter { it.kind == TemplateKind.ASSET_CONTROL }),
+                attachableReviews = current(readable.filter { it.kind == TemplateKind.TASK_REVIEW })
             )
         }
     }

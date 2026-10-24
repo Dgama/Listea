@@ -93,7 +93,12 @@ class TemplateStore(private val database: ListeaDatabase) {
                     scope = encodeTemplateScope(seed.scope),
                     buttons = encodeTemplateButtons(seed.buttons),
                     buttonsVersion = buttonsVersionFor(seed.buttons),
-                    createdAt = System.currentTimeMillis()
+                    createdAt = System.currentTimeMillis(),
+                    // Settings still creates asset controls only; a Task Review is seeded, not
+                    // authored, in v0.8.1.
+                    kind = StoredTemplateKind.ASSET_CONTROL,
+                    definition = "",
+                    definitionVersion = 0
                 )
             )
         }
@@ -149,6 +154,13 @@ class TemplateStore(private val database: ListeaDatabase) {
             val buttonsText = encodeTemplateButtons(cleanButtons)
 
             if (lineage.name != cleanName) writes.renameTemplate(templateId, cleanName)
+
+            // A kind whose payload this page cannot edit is renamed and nothing more. A Task
+            // Review's meaning lives in `definition`, not in a scope or a button list; appending a
+            // version built from the asset-control editor's fields would replace its policy with
+            // an empty one. The page does not offer the editor, and this is the write-boundary
+            // half of the same rule.
+            if (latest.kind != StoredTemplateKind.ASSET_CONTROL) return@withTransaction
 
             // Compared as encoded text rather than as decoded values, and that is the stricter of
             // the two: the scope encoding is canonical, so it compares values, while the buttons

@@ -56,6 +56,10 @@ object ListeaDimens {
 
     val CardCorner = 12.dp
     val IconSize = 20.dp
+
+    /** A sampled colour drawn beside the line that names its hex value. */
+    val SwatchSize = 14.dp
+    val SwatchCorner = 3.dp
 }
 
 /**

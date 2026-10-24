@@ -1333,7 +1333,11 @@ internal fun CustomActionFields(
         Spacer(Modifier.height(ListeaDimens.RowGap))
         Text("Records", style = MaterialTheme.typography.bodySmall)
         ActionGroup {
-            ButtonType.entries.forEach { type ->
+            // An `ACTION` button is a Task review's commit control, not something an asset
+            // control can record: a file has no decision for it to stand for. It is excluded
+            // here rather than hidden lower down, so the picker cannot offer a button that
+            // would record nothing.
+            ButtonType.entries.filter { it != ButtonType.ACTION }.forEach { type ->
                 FilterChip(
                     selected = type == selected,
                     onClick = { onButtonTypeChange(type) },
@@ -1358,6 +1362,7 @@ private fun buttonTypeLabel(type: ButtonType): String = when (type) {
     ButtonType.BOOLEAN -> "On / off"
     ButtonType.TAG -> "Tag"
     ButtonType.COMMENT -> "Comment"
+    ButtonType.ACTION -> "Action"
 }
 
 private fun buttonTypeHelp(type: ButtonType): String = when (type) {
@@ -1369,6 +1374,9 @@ private fun buttonTypeHelp(type: ButtonType): String = when (type) {
     ButtonType.COMMENT ->
         "Free text attached to the passage the reviewer selected. It has no record value: the " +
             "reviewer's words are what leaves. On an image or video it has nothing to attach to."
+    ButtonType.ACTION ->
+        "A Task review's own commit control. It is not offered for asset controls, because a " +
+            "file has no judgment for it to record."
 }
 
 /** Two 150dp fields and the gap between them: below this a field stops showing enough to edit. */

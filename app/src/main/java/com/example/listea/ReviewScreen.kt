@@ -1,16 +1,19 @@
 package com.example.listea
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -29,11 +32,14 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -50,12 +56,22 @@ import com.example.listea.domain.ListId
 import com.example.listea.domain.MarkKind
 import com.example.listea.domain.QuoteAnchor
 import com.example.listea.domain.ReviewContext
+import com.example.listea.domain.ReviewResponse
+import com.example.listea.domain.parse
+import com.example.listea.domain.StoredTemplateVersion
+import com.example.listea.domain.TASK_REVIEW_COMPLETE_CONTROL
 import com.example.listea.domain.TaskAction
 import com.example.listea.domain.TemplateButton
 import com.example.listea.domain.TemplateId
 import com.example.listea.domain.TemplateVersionRef
+import com.example.listea.domain.Templates
+import com.example.listea.domain.ViewerEvent
+import com.example.listea.domain.ViewerEventType
+import com.example.listea.domain.CommitPolicy
 import com.example.listea.domain.markKind
+import java.util.Locale
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
 
 /**
  * The few strings that distinguish one review context from another. Everything else — the queue
@@ -558,6 +574,68 @@ fun ReviewSession(
     }
 
     val item = items[index]
+
+    // **The Task Review this Task is judged under**, and the whole of v0.8.1 on this surface.
+    // Resolved per Task and not per session: the Todo stamped a review on each one at import, and
+    // one round may walk Tasks from several Todos. The fallback chain is the Task's stamp, then
+    // the List's legacy column (passed in as [ReviewTerms.template]), then the built-in — which is
+    // what every Task was in fact judged by before this round existed.
+    val review: StoredTemplateVersion = remember(
+        item.taskId, item.taskReview, terms.template, resolver
+    ) {
+        resolver.reviewFor(item.taskReview)
+            ?: resolver.reviewForRef(terms.template)
+            ?: Templates.MediaRapidReviewStored
+    }
+    val reviewDefinition = review.taskReview
+    val definitionAcceptsEvents = !reviewDefinition?.accepts.isNullOrEmpty()
+    val commitControlId = when (val commit = reviewDefinition?.commit) {
+        is CommitPolicy.Explicit -> commit.controlId
+        null -> TASK_REVIEW_COMPLETE_CONTROL
+    }
+    // A template that does not commit from the completion checkbox draws its own control and the
+    // checkbox goes away: two controls that both complete the Task would be two answers to what
+    // the template already said.
+    val commitIsCompletion = commitControlId == TASK_REVIEW_COMPLETE_CONTROL
+    val commitLabel = review.buttons.firstOrNull { it.id == commitControlId }?.name ?: "Submit"
+    val acceptsPoint = reviewDefinition?.accepts?.contains(ViewerEventType.IMAGE_POINT) == true
+
+    // What the viewer has reported and the template will catch. Held encoded so it survives a
+    // rotation, exactly as the import dialog's drafts are. Keyed by Task *and* page because a point
+    // is an answer about one picture: advancing to another Task or paging to another file of the
+    // same one clears it rather than leaving a stale colour to be submitted under the wrong page.
+    var pendingSample by rememberSaveable(item.taskId, pageIndex) { mutableStateOf<String?>(null) }
+    var sampling by remember(item.taskId, pageIndex) { mutableStateOf(false) }
+    val sample = remember(pendingSample) { decodeSample(pendingSample) }
+    val sampleScope = rememberCoroutineScope()
+
+    // What is on record for this Task, so a committed point is not write-only. Read as text and
+    // parsed through the domain reader: the column holds two grammars, and a row from a later build
+    // is unreadable rather than something this screen gets to guess at.
+    val recordedText by remember(item.taskId) { viewModel.observeLatestResponse(item.taskId) }
+        .collectAsStateWithLifecycle(initialValue = null)
+    val recorded = remember(recordedText) { recordedText?.let { ReviewResponse.parse(it) } }
+    // The latest recorded point, when the record is one this build can read and it carries one.
+    // A legacy MediaReview has no point to show and displays exactly as it did before v0.8.1.
+    val recordedPoint = remember(recorded) {
+        (recorded as? ReviewResponse.PrimaryReview)
+            ?.events?.filterIsInstance<ViewerEvent.ImagePoint>()?.lastOrNull()
+    }
+    // The same submission's events as rows of their own. Read from `review_event_answers` rather
+    // than filtered out of the response above: that table is where a caught event is addressed as
+    // an event, and it is what the Info sheet's Recorded section lists. A template that catches no
+    // events keeps its flow empty and its sheet exactly as it was.
+    val recordedEvents by remember(item.taskId, acceptsPoint) {
+        if (acceptsPoint) viewModel.observeLatestEventAnswers(item.taskId) else flowOf(emptyList())
+    }.collectAsStateWithLifecycle(initialValue = emptyList())
+    // Which file each recorded point came from, so a Task of several pictures says so instead of
+    // naming a content URI. Keyed by the source URI the event carries, as the write path is.
+    val recordedSourceNames = remember(item.assets) {
+        item.assets.mapNotNull { asset ->
+            asset.sourceUri.takeIf { it.isNotEmpty() }?.let { it to asset.name }
+        }.toMap()
+    }
+
     // The queue as the guide names it, each Task carrying its pages: its Assets, then its add-on
     // page when this build can resolve the one it was stamped with. Rebuilt only when the round's
     // items or the add-on tables change, so stepping or paging never re-maps the whole queue for a
@@ -588,21 +666,42 @@ fun ReviewSession(
     // Task-level operation. Nothing below it knows what a swipe means — the Asset run spends the
     // gesture on pages and only reports a leave at a run's end — and nothing here learns which
     // gesture produced the action, so the arrows and the swipe cannot drift apart.
+    /**
+     * A committed judgment: write it, then move on when the template says to.
+     *
+     * The write is the same call every route uses, so the completion transition, the round
+     * bookkeeping and the webhook cannot differ between a checkbox, a swipe and a template's own
+     * button. [events] is what the viewer reported; the headless definition gets an empty list and
+     * records the fold of the pairs, exactly as it always has.
+     */
+    fun commit(events: List<ViewerEvent>) {
+        viewModel.submitItemReview(item, terms, review, events)
+        if (reviewDefinition?.advanceAfterCommit == false) return
+        if (index == items.lastIndex) {
+            finished = true
+            // Announced after the check above, so the delivery it may lead to sees
+            // the item that was just swiped as checked.
+            onQueueFinished?.invoke(items)
+        } else {
+            goTo(items[index + 1])
+        }
+    }
+
     fun dispatch(action: TaskAction) {
         when (action) {
             TaskAction.CompleteTask -> {
-                // A submission, because a review surface's completion is a judgment. Everything
-                // downstream of the write — the completion transition, the round bookkeeping, the
-                // webhook — is the same path a checkbox takes, so a list that becomes complete
-                // here still fires exactly as it always did.
-                viewModel.submitItemReview(item, terms)
-                if (index == items.lastIndex) {
-                    finished = true
-                    // Announced after the check above, so the delivery it may lead to sees
-                    // the item that was just swiped as checked.
-                    onQueueFinished?.invoke(items)
+                // A presentation that accepts viewer events is committed with one, or not at all.
+                // Swiping forward without the point would leave the card uncompleted while the
+                // round moved past it; refusing the move is the honest answer, and the template's
+                // own button is the control that says what is missing.
+                if (definitionAcceptsEvents) {
+                    sample?.let { commit(listOf(it)) }
                 } else {
-                    goTo(items[index + 1])
+                    // A submission, because a review surface's completion is a judgment. Everything
+                    // downstream of the write — the completion transition, the round bookkeeping,
+                    // the webhook — is the same path a checkbox takes, so a list that becomes
+                    // complete here still fires exactly as it always did.
+                    commit(emptyList())
                 }
             }
 
@@ -697,14 +796,45 @@ fun ReviewSession(
                 { MediaInfoBar(contentDescription = "PDF info") { infoOpen = true } }
             } else {
                 {
-                    ReviewAssetControls(
-                        decisions = current.decisions,
-                        control = control,
-                        onToggleAction = { action, enabled ->
-                            viewModel.setItemAction(item, current, action, enabled)
-                        },
-                        onInfo = { infoOpen = true }
-                    )
+                    Column {
+                        // The template's own commit control, drawn where the completion checkbox
+                        // would be. It is the button the template names, and pressing it is the
+                        // only thing that records the sample — which is the compatibility case
+                        // this round exists to prove: a template, not the viewer, owns submission.
+                        if (!commitIsCompletion) {
+                            ReviewTemplateControl(
+                                label = commitLabel,
+                                enabled = sample != null && !sampling,
+                                status = when {
+                                    sampling -> "Reading the picture…"
+                                    sample != null -> "Point ready: ${pointSummary(sample)}"
+                                    recordedPoint != null ->
+                                        "Recorded: ${pointSummary(recordedPoint)}"
+                                    // A record this build cannot read is still a record: saying so
+                                    // is honest about what is stored without pretending to show
+                                    // a value the reader refused to guess at.
+                                    recordedText != null && recorded == null ->
+                                        "Recorded: this build cannot read the answer."
+                                    acceptsPoint -> "Long-press the picture to choose a point."
+                                    else -> null
+                                },
+                                swatchColor = when {
+                                    sample != null -> sample.color
+                                    recordedPoint != null -> recordedPoint.color
+                                    else -> null
+                                },
+                                onClick = { sample?.let { commit(listOf(it)) } }
+                            )
+                        }
+                        ReviewAssetControls(
+                            decisions = current.decisions,
+                            control = control,
+                            onToggleAction = { action, enabled ->
+                                viewModel.setItemAction(item, current, action, enabled)
+                            },
+                            onInfo = { infoOpen = true }
+                        )
+                    }
                 }
             }
         }
@@ -833,22 +963,30 @@ fun ReviewSession(
         // one thing a review is for, and a round cannot be finished by a tap that hid the control
         // that finishes it.
         framePersists = true,
-        taskBar = {
-            TaskCompletionBar(
-                item = item,
-                reviewBlocked = item.reviewBlocked,
-                onToggleCompleted = { completed ->
-                    if (completed) {
-                        // The frame's own control, so checking it here is a judgment and
-                        // unchecking it is not: §5 records what somebody committed, and there is
-                        // no retraction for a template to record. The uncheck still has to
-                        // happen — it just moves state.
-                        viewModel.submitItemReview(item, terms)
-                    } else {
-                        viewModel.setItemCompleted(item, false)
+        // The completion checkbox exists only when the review commits from it. A template that
+        // names its own control draws that control in the band instead, and this frame's slot is
+        // empty: a checkbox here would complete the Task without recording what the template is
+        // waiting for.
+        taskBar = if (commitIsCompletion) {
+            {
+                TaskCompletionBar(
+                    item = item,
+                    reviewBlocked = item.reviewBlocked,
+                    onToggleCompleted = { completed ->
+                        if (completed) {
+                            // The frame's own control, so checking it here is a judgment and
+                            // unchecking it is not: §5 records what somebody committed, and there
+                            // is no retraction for a template to record. The uncheck still has to
+                            // happen — it just moves state.
+                            viewModel.submitItemReview(item, terms, review)
+                        } else {
+                            viewModel.setItemCompleted(item, false)
+                        }
                     }
-                }
-            )
+                )
+            }
+        } else {
+            null
         },
         assetControls = assetBand,
     ) {
@@ -861,8 +999,15 @@ fun ReviewSession(
             // A blocked Task cannot be swiped forward into a judgment; the end of the queue is
             // already this exact state, so it is the same inert forward edge, not a special one.
             // Its untouchable content is still browsable, which is why this gates only the end of
-            // the run and not the run itself.
-            canLeaveForward = item.reviewBlocked == null,
+            // the run and not the run itself. A template that accepts viewer events is the second
+            // closed gate: with no event reported, forward is nowhere to go either — and the
+            // gesture has to know that before it slides, or a leave the dispatch refuses parks
+            // the card off-screen as a black surface.
+            canLeaveForward = canLeaveTaskForward(
+                reviewBlocked = item.reviewBlocked != null,
+                acceptsEvents = definitionAcceptsEvents,
+                hasPendingEvent = sample != null
+            ),
             canLeaveBack = navigation.canGoPrevious,
             pdfTools = pdfTools,
             pdfMarks = pdfMarks,
@@ -880,6 +1025,30 @@ fun ReviewSession(
             onLeaveBack = { dispatch(TaskAction.PreviousTask) },
             onSelectAsset = { pageIndex = it },
             onTap = { chromeVisible = !chromeVisible },
+            // The viewer's third gesture, offered only when the template in force accepts it and
+            // the page on screen is a picture. The point is resolved through the card's own zoom
+            // and letterbox geometry, then the picture itself is read — nothing here invents an
+            // answer the image does not carry.
+            onLongPress = if (acceptsPoint && page != null && kind == AssetKind.IMAGE) {
+                { zoom, position ->
+                    val point = zoom.imagePointAt(position.x, position.y)
+                    val uri = page.sourceUri
+                    if (point != null) {
+                        sampling = true
+                        sampleScope.launch {
+                            val color = sampleImageColor(context, uri, point)
+                            sampling = false
+                            if (color != null) {
+                                pendingSample = encodeSample(
+                                    ViewerEvent.ImagePoint(point.x, point.y, color, uri)
+                                )
+                            }
+                        }
+                    }
+                }
+            } else {
+                null
+            },
             // The page after the last Asset. Its presence is what makes the page count one more
             // than the files, and its absence is what leaves every other Task exactly as it was.
             addOnPage = storedAddOn?.let { addOn ->
@@ -919,6 +1088,10 @@ fun ReviewSession(
             // What this Task's questionnaire asked and what the reviewer said, including answers
             // its current version no longer asks. Drawn on every page of a Task that has one.
             addOnInfo = addOnInfoOf(storedAddOn, answers, addOnResolver),
+            // What the latest submission's template caught. Null for a template that accepts no
+            // events, so its sheet does not gain a section that could only ever say "None".
+            recordedEvents = recordedEvents.takeIf { acceptsPoint },
+            recordedSourceNames = recordedSourceNames,
             onDismiss = { infoOpen = false }
         )
     }
@@ -966,6 +1139,8 @@ fun AssetRun(
     onSelectAsset: (Int) -> Unit,
     onTap: () -> Unit,
     modifier: Modifier,
+    /** A press held on the page, for a template that reads a point out of what is on screen. */
+    onLongPress: ((MediaZoomState, androidx.compose.ui.geometry.Offset) -> Unit)? = null,
     /**
      * The Task's questionnaire, drawn as the page after its last Asset.
      *
@@ -997,7 +1172,8 @@ fun AssetRun(
             onSwipeForward = onLeaveForward,
             onSwipeBack = onLeaveBack,
             modifier = modifier,
-            onTap = onTap
+            onTap = onTap,
+            onLongPress = onLongPress
         ) { zoom ->
             LaunchedEffect(zoom) { zoom.contentAspect = null }
             PreviewPlaceholder(Modifier.fillMaxSize().mediaZoom(zoom), "Manual item", item.title)
@@ -1022,7 +1198,8 @@ fun AssetRun(
         onSwipeForward = { if (forward != null) onSelectAsset(forward) else onLeaveForward() },
         onSwipeBack = { if (back != null) onSelectAsset(back) else onLeaveBack() },
         modifier = modifier,
-        onTap = onTap
+        onTap = onTap,
+        onLongPress = onLongPress
     ) { zoom ->
         if (onAddOnPage) {
             // The questionnaire is not a file: there is nothing to fit, so the card carries no
@@ -1091,6 +1268,30 @@ internal fun pageStep(pageCount: Int, index: Int, forward: Boolean): Int? {
 }
 
 /**
+ * Whether a swipe forward off a Task's last page may leave it as a judgment.
+ *
+ * Two gates. A [Task whose content cannot be judged][reviewBlocked] closes the first, exactly as
+ * it did before there was a second. The second is v0.8.1's: a template that accepts viewer events
+ * can only be committed with one, so a Task with nothing reported has nowhere forward to go.
+ *
+ * The gate belongs to the gesture and not only to the dispatch. [SwipeCard] animates the card
+ * off-screen *before* it reports the leave, and a leave the dispatch then refuses leaves the card
+ * parked at `-width` with nothing behind it — the black surface the acceptance walk found by
+ * swiping a one-Asset Task whose template had no point yet. An inert forward edge rubber-bands
+ * instead, which is what "nowhere to go" already looks like on a blocked Task and at the end of
+ * the queue.
+ *
+ * [hasPendingEvent] is the reported event for the page on screen. The caller resolves it because
+ * only the caller knows both the viewer that produced one and the template version that accepts
+ * it; a page's event does not carry over to the next page, because it is an answer about one file.
+ */
+internal fun canLeaveTaskForward(
+    reviewBlocked: Boolean,
+    acceptsEvents: Boolean,
+    hasPendingEvent: Boolean
+): Boolean = !reviewBlocked && (!acceptsEvents || hasPendingEvent)
+
+/**
  * Everything the media surface stopped saying about the file in front of the user.
  *
  * The queue-side facts are already in memory on the [ReviewItem], so [reviewItemInfo] costs
@@ -1124,7 +1325,9 @@ fun ReviewItemInfoSheet(
     asset: ReviewAsset?,
     onDismiss: () -> Unit,
     marks: List<PdfMarkInfo>? = null,
-    addOnInfo: AddOnInfo? = null
+    addOnInfo: AddOnInfo? = null,
+    recordedEvents: List<ViewerEvent>? = null,
+    recordedSourceNames: Map<String, String> = emptyMap()
 ) {
     val context = LocalContext.current
     val sourceUri = asset?.sourceUri?.takeIf { it.isNotEmpty() } ?: info.sourceUri
@@ -1155,6 +1358,10 @@ fun ReviewItemInfoSheet(
             // whose passage is no longer in it. Null means the caller has no resolution to report
             // (a read-only viewer, or a file that is not a PDF), not that the file is unmarked.
             marks?.let { addAll(pdfMarkRows(it)) }
+            // What this Task's template caught in its latest submission — beside the marks it
+            // already carries, because both are committed facts about the content rather than
+            // current state. Null when no template accepted events; see [recordedEventRows].
+            recordedEvents?.let { addAll(recordedEventRows(it, recordedSourceNames)) }
             addAll(mediaFactRows(facts, title))
             // The Task's questionnaire, after the file's own facts: the answers are about the
             // whole Task, so they sit below whatever page happens to be on screen — and are drawn
@@ -1201,6 +1408,40 @@ fun pdfMarkRows(marks: List<PdfMarkInfo>): List<InfoField> = buildList {
                 value = "“${mark.quote}”\n${mark.value}"
             )
         )
+    }
+}
+
+/**
+ * The Recorded section of a Task's Info sheet: what its latest submission's template caught.
+ *
+ * **Committed facts, not current state** — the same shelf as [pdfMarkRows], and deliberately not
+ * the actions row beside it. Tags live on the Asset and can be toggled after the fact; a caught
+ * event was committed under one template version and is never edited. The sheet says so by listing
+ * the events rather than by implying they are still adjustable.
+ *
+ * The summary row is always present when the surface has a template that accepts events, because
+ * *nothing caught yet* is itself the answer a reviewer needs before a Submit control looks inert.
+ * [sourceNames] maps the event's recorded source URI to the file's name so a Task of several
+ * pictures names the right one; an event whose file the Task no longer holds keeps just the point.
+ *
+ * Pure and separate from the sheet so the wording can be pinned without a Compose test.
+ */
+fun recordedEventRows(
+    events: List<ViewerEvent>,
+    sourceNames: Map<String, String> = emptyMap()
+): List<InfoField> = buildList {
+    add(InfoField("Recorded", if (events.isEmpty()) "None" else countLabel(events.size, "event")))
+    events.forEachIndexed { index, event ->
+        val label = when (event) {
+            is ViewerEvent.ImagePoint ->
+                if (events.size == 1) "Image point" else "Point ${index + 1}"
+        }
+        val summary = when (event) {
+            is ViewerEvent.ImagePoint -> pointSummary(event)
+        }
+        val source = (event as? ViewerEvent.ImagePoint)
+            ?.assetPath?.let { sourceNames[it] }
+        add(InfoField(label, if (source.isNullOrEmpty()) summary else "$summary\n$source"))
     }
 }
 
@@ -1367,5 +1608,97 @@ fun ItemPreview(
         onPdfDeleteMark = onPdfDeleteMark,
         onPdfRelocateMark = onPdfRelocateMark,
         onPdfMarksResolved = onPdfMarksResolved
+    )
+}
+
+/**
+ * The template's own commit control, above the file's chips.
+ *
+ * Drawn only when the review in force does not commit from the completion checkbox, which is the
+ * compatibility this round proves: the button belongs to the template, the gesture that fills it
+ * belongs to the viewer, and neither can submit without the other.
+ *
+ * [status] is one line under the button and says what the template is still waiting for. It is
+ * copy rather than a disabled state, because a disabled Submit with no sentence is a control the
+ * user cannot learn from.
+ */
+@Composable
+private fun ReviewTemplateControl(
+    label: String,
+    enabled: Boolean,
+    status: String?,
+    swatchColor: String? = null,
+    onClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = ListeaDimens.PagePadding, vertical = ListeaDimens.CompactGap),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Button(onClick = onClick, enabled = enabled) { Text(label) }
+        if (status != null) {
+            Spacer(Modifier.height(ListeaDimens.CompactGap))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(ListeaDimens.CompactGap)
+            ) {
+                // The colour as a swatch as well as a number: the one thing this template records
+                // is what the picture looked like at a point, and a hex string is not that.
+                val color = swatchColor?.let(::parseSwatch)
+                if (color != null) {
+                    Box(
+                        Modifier
+                            .size(ListeaDimens.SwatchSize)
+                            .clip(RoundedCornerShape(ListeaDimens.SwatchCorner))
+                            .background(color)
+                    )
+                }
+                Text(status, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+}
+
+/**
+ * The point as a person reads it: position to two decimals and the sampled colour.
+ *
+ * The stored response keeps four decimals because it is a record; this is a line under a button and
+ * two is as much as anybody can compare against a picture.
+ */
+private fun pointSummary(point: ViewerEvent.ImagePoint): String =
+    String.format(Locale.ROOT, "(%.2f, %.2f) · %s", point.x, point.y, point.color)
+
+/** A stored `#RRGGBB`, or null when it is not one this build can draw. */
+private fun parseSwatch(value: String): Color? =
+    runCatching { Color(android.graphics.Color.parseColor(value)) }.getOrNull()
+
+/**
+ * A sample held between the long press and Submit, in the one text shape a bundle can hold.
+ *
+ * The same five-field line the response's event uses, minus the type word: there is one event kind
+ * this build produces from a gesture, and storing the word again would be storing a constant.
+ */
+private fun encodeSample(event: ViewerEvent.ImagePoint): String =
+    listOf(
+        String.format(Locale.ROOT, "%.6f", event.x),
+        String.format(Locale.ROOT, "%.6f", event.y),
+        event.color,
+        event.assetPath
+    ).joinToString("\t")
+
+/** The inverse of [encodeSample]; null for the empty draft and for anything that does not parse. */
+private fun decodeSample(text: String?): ViewerEvent.ImagePoint? {
+    if (text.isNullOrBlank()) return null
+    val fields = text.split('\t')
+    if (fields.size < 3) return null
+    val x = fields[0].toDoubleOrNull() ?: return null
+    val y = fields[1].toDoubleOrNull() ?: return null
+    if (x !in 0.0..1.0 || y !in 0.0..1.0) return null
+    return ViewerEvent.ImagePoint(
+        x = x,
+        y = y,
+        color = fields[2],
+        assetPath = fields.getOrElse(3) { "" }
     )
 }

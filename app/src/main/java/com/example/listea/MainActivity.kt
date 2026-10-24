@@ -1538,6 +1538,7 @@ internal fun importRunIdentity(request: ImportFolderRequest.Confirm): String {
         seed.followUpstream,
         seed.keepStateOnDelete,
         encodeTemplateAttachments(seed.templates),
+        encodeTemplateAttachments(seed.taskReview?.let { listOf(it) } ?: emptyList()),
         request.histories.joinToString(",") { it.sourceId }
     ).joinToString("\u0000")
 }
@@ -1662,6 +1663,26 @@ private fun ImportConfirmDialogBody(
 
     var newAddOnTapped by rememberSaveable(runKey) { mutableStateOf(false) }
 
+    // The Task Review draft, held encoded for the same bundle-shaped reason as the other two.
+    // Unlike the add-on there is no *none*: a radio row is always chosen, and a run with no answer
+    // from the dialog judges with the built-in, which the seeded reference already names.
+    var reviewAttachment by rememberSaveable(runKey) {
+        mutableStateOf(
+            encodeTemplateAttachments(seed.taskReview?.let { listOf(it) } ?: emptyList())
+        )
+    }
+    val attachedReview = remember(reviewAttachment) {
+        decodeTemplateAttachments(reviewAttachment).firstOrNull()
+    }
+
+    /**
+     * One Task Review chosen. A radio group with no clear gesture, because choosing the selected
+     * row again is *the same answer twice* rather than *none* — every Task is judged by something.
+     */
+    fun setReview(choice: StoredTemplateVersion) {
+        reviewAttachment = encodeTemplateAttachments(listOf(choice.ref))
+    }
+
     val method = decodeExportChoice(exportWord, inheritable = false)
     val address = when (addressMode) {
         ADDRESS_KEEP -> seed.webhookUrl.trim()
@@ -1729,6 +1750,10 @@ private fun ImportConfirmDialogBody(
                 // Not part of the gate: an add-on is optional, so an empty page is a valid run.
                 addOn = attachedAddOn,
                 upgradeAddOn = seed.upgradeAddOn,
+                // The review the picker shows. A dialog whose offered list was somehow empty
+                // still passes the seeded reference, so a run never loses the built-in.
+                taskReview = attachedReview ?: seed.taskReview,
+                upgradeTaskReview = seed.upgradeTaskReview,
                 followUpstream = followUpstream,
                 keepStateOnDelete = keepStateOnDelete,
                 webhookUrl = address,
@@ -1869,6 +1894,17 @@ private fun ImportConfirmDialogBody(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
+                    // The Task-level judgment, under the file-level attachment it sits beside:
+                    // every Task this run makes is judged by one of these, and a Task Review is
+                    // what decides how the review surface commits a judgment.
+                    Spacer(Modifier.height(ListeaDimens.RowGap))
+                    TaskReviewAttach(
+                        choices = request.taskReviews,
+                        attached = attachedReview,
+                        refresh = request.refresh,
+                        heldVersion = seed.taskReview?.version,
+                        onSelect = ::setReview
+                    )
                 }
                 // The Task-level question, beside the file-level ones rather than among them: an
                 // add-on asks about the whole Task, so it gets its own section and its own page.
@@ -2418,6 +2454,88 @@ private fun ImportAddOnAttach(
             Text(
                 "The add-on this Todo currently holds is not in this list, so this build cannot " +
                     "read it. Choosing another replaces it; leaving the section alone keeps it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+/**
+ * The Task Review step: how every Task this run creates will be judged.
+ *
+ * **A radio group with no clear gesture.** Every Task has always been judged by something, and the
+ * built-in is the answer a Todo that never chose one has; tapping the selected row again is the same
+ * answer twice rather than *none*, because there is no none to reach.
+ *
+ * **A row is a review, not a version.** The version is what a run stamps, and the one place it is
+ * said out loud is the held line on a refresh — the run that is about to move the Todo.
+ */
+@Composable
+private fun TaskReviewAttach(
+    choices: List<StoredTemplateVersion>,
+    attached: TemplateVersionRef?,
+    refresh: Boolean,
+    heldVersion: Int?,
+    onSelect: (StoredTemplateVersion) -> Unit
+) {
+    Column {
+        Text("Task review", style = MaterialTheme.typography.titleSmall)
+        Text(
+            "Judges every Task this run creates and decides how the review surface commits one. " +
+                "A review that accepts viewer events records what the Task reported rather than " +
+                "a page's tags.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        if (choices.isEmpty()) {
+            Spacer(Modifier.height(ListeaDimens.RowGap))
+            Text(
+                "No Task review in this build can be read, so this run will use the built-in.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        choices.forEach { choice ->
+            val selected = attached?.templateId == choice.ref.templateId
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onSelect(choice) }
+                    .padding(vertical = ListeaDimens.CompactGap),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                RadioButton(selected = selected, onClick = { onSelect(choice) })
+                Spacer(Modifier.width(ListeaDimens.RowGap))
+                Column(Modifier.weight(1f)) {
+                    Text(choice.name, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        if (choice.taskReview?.accepts.isNullOrEmpty()) {
+                            "Task review · records the Task's file decisions"
+                        } else {
+                            "Task review · records what the viewer reports"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (refresh && selected && heldVersion != null &&
+                        heldVersion != choice.ref.version
+                    ) {
+                        Text(
+                            "This Todo holds version $heldVersion; confirming moves it to " +
+                                "${choice.ref.version}.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+        if (attached != null && choices.none { it.ref.templateId == attached.templateId }) {
+            Spacer(Modifier.height(ListeaDimens.RowGap))
+            Text(
+                "The Task review this Todo currently holds is not in this list, so this build " +
+                    "cannot read it. Choosing another replaces it; leaving the section alone keeps it.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

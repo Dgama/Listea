@@ -1,5 +1,6 @@
 package com.example.listea.data
 
+import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Entity
 import androidx.room.ForeignKey
@@ -7,6 +8,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
 import androidx.room.Query
+import com.example.listea.domain.TemplateKind
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -65,8 +67,60 @@ data class TemplateVersionEntity(
     val scope: String,
     val buttons: String,
     val buttonsVersion: Int,
-    val createdAt: Long
+    val createdAt: Long,
+
+    /**
+     * Which kind of payload this version carries: an asset control's scope/buttons, or a Task
+     * Review's definition.
+     *
+     * A column rather than a fourth table, because both kinds share the lifecycle this table
+     * exists for — lineage, immutable versions, a reference forever. The default is what every row
+     * written before v0.8.1 was, so the upgrade reads them as what they already were.
+     */
+    @ColumnInfo(defaultValue = "'asset-control'")
+    val kind: String = StoredTemplateKind.ASSET_CONTROL,
+
+    /** The [com.example.listea.domain.TaskReviewDefinition] payload, empty for other kinds. */
+    @ColumnInfo(defaultValue = "''")
+    val definition: String = "",
+
+    /** The encoding version of [definition]; 0 when there is none. */
+    @ColumnInfo(defaultValue = "0")
+    val definitionVersion: Int = 0
 )
+
+/**
+ * The stored vocabulary for [TemplateVersionEntity.kind].
+ *
+ * Strings rather than [TemplateKind]'s names, for the same reason every other stored key is: a
+ * later release may reorder or rename the enum, and a column written by this build must keep being
+ * readable by one that has never heard of it. An unknown key is skipped by the resolver rather
+ * than guessed into the nearest kind.
+ */
+object StoredTemplateKind {
+
+    const val ASSET_CONTROL = "asset-control"
+    const val TASK_REVIEW = "task-review"
+
+    /** The word this build writes for [kind]. */
+    fun of(kind: TemplateKind): String = when (kind) {
+        TemplateKind.ASSET_CONTROL -> ASSET_CONTROL
+        TemplateKind.TASK_REVIEW -> TASK_REVIEW
+        TemplateKind.ASSET_VIEWER -> "asset-viewer"
+    }
+
+    /**
+     * The kind a stored [key] names, or null for one this build has never written.
+     *
+     * Only the two kinds this build stores are decodable. An asset viewer stays code-defined in
+     * v0.8.1, so a stored row claiming to be one is not something to draw from.
+     */
+    fun toKind(key: String?): TemplateKind? = when (key) {
+        ASSET_CONTROL -> TemplateKind.ASSET_CONTROL
+        TASK_REVIEW -> TemplateKind.TASK_REVIEW
+        else -> null
+    }
+}
 
 /**
  * Reading templates, and only reading them.

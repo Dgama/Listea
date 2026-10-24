@@ -39,6 +39,26 @@ sealed interface ReviewResponse {
         val completed: Boolean,
         val selections: Set<String>
     ) : ReviewResponse
+
+    /**
+     * A review committed under a template that catches viewer events.
+     *
+     * The Task-level counterpart of [MediaReview]: it says whether the Task is complete and carries
+     * the events the viewer reported before the commit. It is a separate response rather than a
+     * field on [MediaReview] because the two have different vocabularies and different readers —
+     * a media review's selections are button ids, an event is a fact about content — and because a
+     * legacy row must keep decoding as exactly the thing it was written as.
+     *
+     * Empty [events] is a legal value of the type and is refused by a template whose definition
+     * accepts events; the refusal lives at the write boundary, so a caller that bypassed the UI
+     * cannot record an empty commit under a template that promised otherwise.
+     */
+    data class PrimaryReview(
+        val completed: Boolean,
+        val events: List<ViewerEvent>
+    ) : ReviewResponse
+
+    companion object
 }
 
 /**
@@ -55,10 +75,9 @@ sealed interface ReviewResponse {
  * not typed, so nothing here depends on a locale's idea of alphabetical.
  *
  * **The field names changed in v0.5.4 and no migration was written for them.** This column holds
- * `completed=…;selections=…` now, and older rows hold `completed=…;favorite=…;actions=…`. Nothing
- * reads either back — see the paragraph below on why there is no decoder — so the two shapes never
- * meet: a reader that arrives would have to tell them apart by which keys are present, and until
- * one does, saying so here is the whole of the compatibility story.
+ * `completed=…;selections=…` now, and older rows hold `completed=…;favorite=…;actions=…`. The
+ * reader added in v0.8.1 tells them apart by which keys are present and recovers only what the
+ * two spellings agree on; the older mark keys are not guessed back into a selection set.
  *
  * Hand-written rather than JSON, for two reasons that both matter. `org.json` is an Android class
  * and this package does not depend on Android; and the wire format's own encoder escapes a solidus
@@ -66,16 +85,134 @@ sealed interface ReviewResponse {
  * Formatting this like the payload would be the first step back toward the two being the same
  * thing.
  *
- * There is no decoder yet, and its absence is deliberate rather than an oversight: nothing in v0.2
- * reads a response back — review count is `COUNT(*)`, and §5.4 rules out a history screen — so a
- * parser would have no caller but its own test. The format is held to its meaning by the golden
- * encoding test instead, which is the same footing the webhook body stands on.
+ * **v0.8.1 adds a reader.** A review surface now shows the latest committed result beside the
+ * control that can replace it, so [parse] exists and has a caller. The legacy grammar is read as
+ * far as it goes — `completed` is required, `selections` is read when present, and any other key
+ * an older writer used is ignored rather than treated as corruption, because its meaning is not
+ * recoverable as selections. The primary grammar is read fail-closed; see [parse].
  */
 fun ReviewResponse.encode(): String = when (this) {
     is ReviewResponse.MediaReview -> listOf(
         "completed=$completed",
         "selections=${selections.filter { it.isNotBlank() }.sorted().joinToString(",")}"
     ).joinToString(";")
+
+    is ReviewResponse.PrimaryReview -> buildList {
+        add("primary=$PRIMARY_RESPONSE_VERSION")
+        add("completed=$completed")
+        for (event in events) add("event=${event.encodeLine()}")
+    }.joinToString("\n")
+}
+
+/** The envelope version [ReviewResponse.PrimaryReview] writes. */
+const val PRIMARY_RESPONSE_VERSION = 2
+
+private const val PRIMARY_TAG = "primary"
+private const val COMPLETED_TAG = "completed"
+private const val SELECTIONS_TAG = "selections"
+private const val EVENT_TAG = "event"
+
+/**
+ * A stored response read back, or null when this build cannot read it.
+ *
+ * The first line decides the grammar: `primary=…` is a [ReviewResponse.PrimaryReview], anything
+ * else is the legacy semicolon form. A response whose grammar is primary and whose version is not
+ * [PRIMARY_RESPONSE_VERSION] is *unreadable* rather than read as an older shape — reading a later
+ * envelope with today's keys is exactly the guess the version gate exists to refuse, and a
+ * response is a permanent record of somebody's judgment.
+ *
+ * The primary reader is strict: an unknown line, a duplicate flag, an unknown event type, a point
+ * outside 0..1, or a malformed colour makes the whole response null. Dropping an event would
+ * silently change what a person recorded. The legacy reader is deliberately more forgiving —
+ * unknown keys are ignored — because that grammar was never versioned and the keys beside
+ * `completed` are older spellings of marks that this reader does not claim to recover.
+ */
+fun ReviewResponse.Companion.parse(text: String): ReviewResponse? {
+    val first = text.substringBefore('\n')
+    return if (first.startsWith("$PRIMARY_TAG=")) parsePrimary(text) else parseLegacy(text)
+}
+
+private fun parsePrimary(text: String): ReviewResponse.PrimaryReview? {
+    val lines = text.split('\n')
+    if (lines.firstOrNull() != "$PRIMARY_TAG=$PRIMARY_RESPONSE_VERSION") return null
+
+    var completed: Boolean? = null
+    val events = mutableListOf<ViewerEvent>()
+    for (line in lines.drop(1)) {
+        if (line.isBlank()) continue
+        val index = line.indexOf('=')
+        if (index <= 0) return null
+        when (line.substring(0, index)) {
+            COMPLETED_TAG -> {
+                if (completed != null) return null
+                completed = when (line.substring(index + 1)) {
+                    "true" -> true
+                    "false" -> false
+                    else -> return null
+                }
+            }
+
+            EVENT_TAG -> events += parseEvent(line.substring(index + 1)) ?: return null
+
+            else -> return null
+        }
+    }
+    return completed?.let { ReviewResponse.PrimaryReview(it, events) }
+}
+
+private fun parseLegacy(text: String): ReviewResponse.MediaReview? {
+    var completed: Boolean? = null
+    var selections: Set<String>? = null
+    for (field in text.split(';')) {
+        if (field.isBlank()) continue
+        val index = field.indexOf('=')
+        if (index <= 0) return null
+        val value = field.substring(index + 1)
+        when (field.substring(0, index)) {
+            COMPLETED_TAG -> completed = when (value) {
+                "true" -> true
+                "false" -> false
+                else -> return null
+            }
+
+            SELECTIONS_TAG -> selections =
+                value.split(',').filter { it.isNotBlank() }.toSet()
+        }
+    }
+    return completed?.let {
+        ReviewResponse.MediaReview(
+            completed = it,
+            selections = selections.orEmpty()
+        )
+    }
+}
+
+/**
+ * One event on its response line: its type key, a tab, and [ViewerEvent.encodeValue].
+ *
+ * The value grammar is shared with `review_event_answers` rather than restated here, so the
+ * permanent record and the queryable row cannot spell the same event two ways.
+ */
+private fun ViewerEvent.encodeLine(): String = "${type.key}\t${encodeValue()}"
+
+private fun parseEvent(value: String): ViewerEvent? {
+    val tab = value.indexOf('\t')
+    if (tab <= 0) return null
+    val type = ViewerEventType.fromKey(value.substring(0, tab)) ?: return null
+    return parseEventValue(type, value.substring(tab + 1))
+}
+
+/**
+ * The viewer events a response carries, in the order they were reported.
+ *
+ * Empty for a [ReviewResponse.MediaReview], which is not a failure to read: the legacy answer is a
+ * judgment with no events, and a writer that stores a submission's events as rows uses this to
+ * decide there is nothing to store. Exhaustive for the reason [completesTask] is — a response type
+ * that arrives without being classified would silently drop its events from the table.
+ */
+val ReviewResponse.viewerEvents: List<ViewerEvent> get() = when (this) {
+    is ReviewResponse.MediaReview -> emptyList()
+    is ReviewResponse.PrimaryReview -> events
 }
 
 /**
@@ -94,4 +231,5 @@ fun ReviewResponse.encode(): String = when (this) {
  */
 val ReviewResponse.completesTask: Boolean get() = when (this) {
     is ReviewResponse.MediaReview -> completed
+    is ReviewResponse.PrimaryReview -> completed
 }

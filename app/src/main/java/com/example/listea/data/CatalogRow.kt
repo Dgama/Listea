@@ -21,6 +21,7 @@ data class CatalogProjection(
     val isCompleted: Boolean,
     val assetControls: String,
     val addOn: String,
+    val taskReview: String,
     val assetCount: Int,
     val missingAssets: Int,
     val sizeBytes: Long?,
@@ -31,15 +32,17 @@ data class CatalogProjection(
  * One Task's recorded attachments, for the queries that need them beside something else rather than
  * on a row of its own. Query result, not a table — see `ListsDao.observeAssetControlsForList`.
  *
- * [addOn] is the Task's stamped questionnaire reference, raw as `task_imports.addOn` holds it. It
- * travels with the asset controls because both are facts about the same import and are read by the
- * same review surface; they are still separate columns, because one is a list of file templates and
- * the other is a single Task-level add-on.
+ * [addOn] and [taskReview] are the Task's stamped questionnaire and review references, raw as
+ * `task_imports` holds them. They travel with the asset controls because all three are facts about
+ * the same import and are read by the same review surface; they are still separate columns, because
+ * one is a list of file templates, one is a single Task-level add-on and one is the Task Review the
+ * Task was judged under.
  */
 data class TaskAssetControls(
     val taskId: String,
     val assetControls: String,
-    val addOn: String = ""
+    val addOn: String = "",
+    val taskReview: String = ""
 )
 
 /**
@@ -102,6 +105,18 @@ data class CatalogRow(
      * [AddOnResolver] where the page is drawn. `""` means no add-on and therefore no extra page.
      */
     val addOn: String = "",
+
+    /**
+     * The Task Review this Task was imported under, as `task_imports.taskReview` holds it.
+     *
+     * Here for the same reason [addOn] is, and the same device walk made it plain: a queue built
+     * from catalog rows is a review surface, and a queue that dropped this stamp resolved every
+     * Task through the List's legacy fallback — so a Task imported under a review with its own
+     * Submit control opened with the built-in's completion checkbox instead. Raw and per Task,
+     * resolved where the session draws its commit control. `""` means a Task imported before
+     * v0.8.1, which is read as the built-in rapid review.
+     */
+    val taskReview: String = "",
 
     /** True when at least one required Asset has no viewer in this build — e.g. a text file. */
     val hasUnviewableAsset: Boolean,

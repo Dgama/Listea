@@ -28,7 +28,17 @@ enum class ButtonType(val key: String) {
      * word configured on the template. On a PDF it is a passage tool; a file-level chip row has no
      * use for it, which is why the review surface does not draw one for a PDF.
      */
-    COMMENT("comment");
+    COMMENT("comment"),
+
+    /**
+     * A control that invokes a Task Review action rather than recording a mark.
+     *
+     * The first type that belongs to the *Task* rather than to a file: `Submit` is the review
+     * template's commit control, drawn on the review surface and named by the definition's
+     * `commitOn`. It records no value of its own — [TemplateButton.recordValue] is empty — and it
+     * never enters an [com.example.listea.data.AssetDecisions] set.
+     */
+    ACTION("action");
 
     companion object {
         /** The type a stored [key] names, or null for one this build has never written. */
@@ -77,6 +87,14 @@ const val TEMPLATE_BUTTONS_VERSION = 1
 const val TEMPLATE_BUTTONS_COMMENT_VERSION = 2
 
 /**
+ * The version that can name a [ButtonType.ACTION].
+ *
+ * A build that predates this vocabulary must not draw a Submit control it has no commit path for.
+ * The row shape is unchanged, as it was for a comment, so only the vocabulary moves.
+ */
+const val TEMPLATE_BUTTONS_ACTION_VERSION = 3
+
+/**
  * Every version this build can decode and edit.
  *
  * `TemplateStore` refuses to append a version after an unreadable one, so this is also the set of
@@ -85,21 +103,20 @@ const val TEMPLATE_BUTTONS_COMMENT_VERSION = 2
  * strand it.
  */
 val SUPPORTED_TEMPLATE_BUTTON_VERSIONS: IntRange =
-    TEMPLATE_BUTTONS_VERSION..TEMPLATE_BUTTONS_COMMENT_VERSION
+    TEMPLATE_BUTTONS_VERSION..TEMPLATE_BUTTONS_ACTION_VERSION
 
 /**
- * The encoding version [buttons] needs: 2 when a comment is present, 1 otherwise.
+ * The encoding version [buttons] needs: 3 for an action, 2 for a comment, 1 otherwise.
  *
  * Chosen from the content rather than from a build-wide constant so the two promises hold at once:
  * a new build can write a comment, and appending a version to a comment-free template does not make
  * every earlier build treat the whole template as unreadable.
  */
-fun buttonsVersionFor(buttons: List<TemplateButton>): Int =
-    if (buttons.any { it.type == ButtonType.COMMENT }) {
-        TEMPLATE_BUTTONS_COMMENT_VERSION
-    } else {
-        TEMPLATE_BUTTONS_VERSION
-    }
+fun buttonsVersionFor(buttons: List<TemplateButton>): Int = when {
+    buttons.any { it.type == ButtonType.ACTION } -> TEMPLATE_BUTTONS_ACTION_VERSION
+    buttons.any { it.type == ButtonType.COMMENT } -> TEMPLATE_BUTTONS_COMMENT_VERSION
+    else -> TEMPLATE_BUTTONS_VERSION
+}
 
 /**
  * The vocabulary an editor must read its **draft** with, which is not always the one on the row.
@@ -151,7 +168,8 @@ fun encodeTemplateButtons(buttons: List<TemplateButton>): String =
  * A `comment` line inside version 1 is dropped as well, because version 1 could not have written
  * one: a row like that was hand-edited or corrupted, and offering free-text collection from a
  * payload that never promised it is the same guess the version gate exists to refuse. Version 2
- * reads all three types.
+ * reads comments, version 3 reads actions, and each gate refuses the vocabulary of a later
+ * version.
  *
  * Below that the tolerance is this codebase's usual one: a line this build cannot read costs its own
  * line and never the whole payload. A button with no id, an id carrying a comma — the separator the
@@ -170,6 +188,9 @@ fun decodeTemplateButtons(text: String, version: Int): List<TemplateButton>? {
         if (id.isEmpty() || id.contains(',')) return@mapNotNull null
         val type = ButtonType.fromKey(fields.getOrNull(2)?.trim()) ?: return@mapNotNull null
         if (type == ButtonType.COMMENT && version < TEMPLATE_BUTTONS_COMMENT_VERSION) {
+            return@mapNotNull null
+        }
+        if (type == ButtonType.ACTION && version < TEMPLATE_BUTTONS_ACTION_VERSION) {
             return@mapNotNull null
         }
         TemplateButton(

@@ -64,6 +64,19 @@ sealed interface TaskAction {
     data object CompleteTask : TaskAction {
         override val key = "complete"
     }
+
+    companion object {
+        /**
+         * The action a stored [key] names, or null for one this build has never written.
+         *
+         * No stored definition carries actions in v0.8.1 — navigation is the viewer's, and the
+         * template declares only its commit — but the vocabulary is decoded wherever it is written
+         * down, and a key this build cannot read must fail closed rather than become a neighbour.
+         */
+        fun fromKey(key: String?): TaskAction? = entries().firstOrNull { it.key == key }
+
+        private fun entries(): List<TaskAction> = listOf(PreviousTask, NextTask, CompleteTask)
+    }
 }
 
 /**

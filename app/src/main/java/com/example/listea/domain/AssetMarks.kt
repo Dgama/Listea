@@ -32,6 +32,8 @@ fun ButtonType.markKind(): MarkKind? = when (this) {
     ButtonType.COMMENT -> MarkKind.COMMENT
     ButtonType.TAG -> MarkKind.TAG
     ButtonType.BOOLEAN -> null
+    // A commit control is a Task review's, and a passage mark is a PDF tool's: the two never meet.
+    ButtonType.ACTION -> null
 }
 
 /**

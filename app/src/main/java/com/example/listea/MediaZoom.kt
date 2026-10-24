@@ -63,6 +63,28 @@ class MediaZoomState {
     /** Whether the media is showing at anything other than its fitted size. */
     val isZoomedIn: Boolean get() = scale > 1f + ScaleTolerance
 
+    /**
+     * Where a press at a card-local pixel landed on the picture itself, or null for the letterbox
+     * and for a card that does not yet know what shape it is showing.
+     *
+     * The geometry lives in `domain/ImageSampling.kt`, where it can be tested without a device; this
+     * is only the state handover. The aspect is reported by the renderer, so a press before the
+     * first frame resolves had nothing to be measured against.
+     */
+    fun imagePointAt(tapX: Float, tapY: Float): com.example.listea.domain.ImagePoint? {
+        val aspect = contentAspect ?: return null
+        return com.example.listea.domain.imagePointAt(
+            tapX = tapX,
+            tapY = tapY,
+            viewportWidth = viewportSize.width,
+            viewportHeight = viewportSize.height,
+            contentAspect = aspect,
+            scale = scale,
+            translationX = offset.x,
+            translationY = offset.y
+        )
+    }
+
     /** Back to fit, centred. What every card change and every completed page turn lands on. */
     fun reset() {
         scale = 1f

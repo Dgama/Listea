@@ -717,7 +717,17 @@ data class ReviewItem(
      * questionnaire is drawn. `""` means no add-on and therefore no extra page. A Task no Todo owns
      * has no import row and defaults to empty, which is the honest reading.
      */
-    val addOn: String = ""
+    val addOn: String = "",
+
+    /**
+     * The Task Review this Task was imported under, as `task_imports.taskReview` holds it.
+     *
+     * Raw and undecoded, like [assetControls]: the reference is a fact about the import, and the
+     * definition it names is resolved once the session opens. `""` means the review was never
+     * stamped — every Task imported before v0.8.1 — and reads as the built-in rapid review, which
+     * is what those Tasks were in fact judged by.
+     */
+    val taskReview: String = ""
 )
 
 /**
@@ -749,7 +759,8 @@ val ReviewItem.taskDecisions: AssetDecisions
 fun ListItemEntity.toReviewItem(
     rootUri: String?,
     assetControls: String = "",
-    addOn: String = ""
+    addOn: String = "",
+    taskReview: String = ""
 ): ReviewItem = ReviewItem(
     id = id,
     // The row's own column, not a projection: `list_items.taskId` is where membership records
@@ -778,7 +789,10 @@ fun ListItemEntity.toReviewItem(
     assetControls = assetControls,
     // The same parameter contract, for the same reason: the add-on is the Task's and reaches this
     // entity only from `task_imports`.
-    addOn = addOn
+    addOn = addOn,
+    // And the same again for the review: a Task is judged by the template its own import stamped,
+    // not by whatever the Todo or the List says today.
+    taskReview = taskReview
 )
 
 /**

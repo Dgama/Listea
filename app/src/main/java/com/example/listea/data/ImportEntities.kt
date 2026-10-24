@@ -169,6 +169,26 @@ data class SourceEntity(
     val addOn: String = "",
 
     /**
+     * The Task Review this Todo's Tasks will be judged with, as `encodeAddOnAttachment`-shaped
+     * `templateId \t version`, or `""` for the built-in rapid review.
+     *
+     * **The Todo owns the review, as of v0.8.1.** The List used to name one in two columns; a List
+     * organizes Tasks and does not judge them, and one review session can walk Tasks from several
+     * Todos. This is what the Todo *asked for*; [TaskImportEntity.taskReview] is what a Task got.
+     *
+     * Unlike an add-on, `""` here is not "none": every Task has always been judged by something,
+     * and the fallback is the stored `builtin.media.rapid-review@1`. The empty value is what a row
+     * written before this round holds, so the behavior-preserving direction is to read it as the
+     * built-in.
+     *
+     * The stored default is the empty string, as it is for [addOn]: `MIGRATION_29_30` appends this
+     * column with `DEFAULT ''`, so a row written by a build that predates the column — and a fixture
+     * that writes one through today's schema without naming it — arrives meaning the built-in.
+     */
+    @ColumnInfo(defaultValue = "''")
+    val taskReview: String = "",
+
+    /**
      * How this Todo's decisions leave the app, as `domain/Exports.kt` encodes it.
      *
      * **The Todo's own answer, and the reason the plural case exists at all.** A List may hold Tasks
@@ -288,7 +308,22 @@ data class TaskImportEntity(
      * `""` reads as no add-on, which is the state of every Task imported before v0.7.1 and of every
      * run that chose none.
      */
-    val addOn: String = ""
+    val addOn: String = "",
+
+    /**
+     * The Task Review this Task was imported under, as `templateId \t version`, or `""` for the
+     * built-in.
+     *
+     * **This is the copy review reads**, for the same reason [assetControls] and [addOn] are: a
+     * Task must be able to say how it is judged without walking back to its Todo, and a later
+     * change to the Todo must not silently re-label Tasks already imported and possibly judged.
+     * Re-stamped by every run from the answer that run was given.
+     *
+     * The stored default is the empty string, matching the `ALTER` that added it; see
+     * [SourceEntity.taskReview].
+     */
+    @ColumnInfo(defaultValue = "''")
+    val taskReview: String = ""
 )
 
 /**

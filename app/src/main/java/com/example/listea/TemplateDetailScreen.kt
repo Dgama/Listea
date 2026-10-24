@@ -36,11 +36,15 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.listea.data.StoredTemplateKind
 import com.example.listea.data.TemplateEntity
 import com.example.listea.data.TemplateVersionEntity
 import com.example.listea.domain.AssetKind
 import com.example.listea.domain.ButtonType
+import com.example.listea.domain.CommitPolicy
+import com.example.listea.domain.TASK_REVIEW_COMPLETE_CONTROL
 import com.example.listea.domain.TemplateButton
+import com.example.listea.domain.decodeTaskReviewDefinition
 import com.example.listea.domain.decodeTemplateButtons
 import com.example.listea.domain.decodeTemplateScope
 import com.example.listea.domain.encodeTemplateButtons
@@ -121,6 +125,17 @@ fun TemplateDetailScreen(
             // empty bar is a choice somebody made, and this is a full one nothing here can see.
             // Editing is refused rather than offered empty, because an Update from here would
             // replace a newer version's answer with this build's idea of nothing.
+            // A Task review's meaning lives in its definition, not in a scope or a button editor.
+            // Its page says what it does and offers no editor: renaming is the only write this
+            // build has for one, and the store refuses anything else.
+            current.kind == StoredTemplateKind.TASK_REVIEW ->
+                TemplateReviewPage(
+                    modifier = bodyModifier,
+                    template = template,
+                    current = current,
+                    onBack = onBack
+                )
+
             decodeTemplateButtons(current.buttons, current.buttonsVersion) == null ->
                 TemplateUnavailable(
                     modifier = bodyModifier,
@@ -381,6 +396,87 @@ private fun TemplateSaveBar(
  * mean opposite things: one is a row that is gone, and the other is a row this build is too old to
  * read and must not write over.
  */
+/**
+ * One Task Review, read-only.
+ *
+ * **It has no editor because there is nothing here to edit.** A review's meaning is the definition
+ * it carries — what it accepts and what commits it — and those are the terms its Tasks were judged
+ * under; a page that let a user rewrite them in place would rewrite the past. The build seeds the
+ * reviews; this page says what the one on screen does and leaves the write it does not have alone.
+ */
+@Composable
+private fun TemplateReviewPage(
+    modifier: Modifier,
+    template: TemplateEntity,
+    current: TemplateVersionEntity,
+    onBack: () -> Unit
+) {
+    BackHandler(onBack = onBack)
+    val definition = decodeTaskReviewDefinition(current.definition, current.definitionVersion)
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(ListeaDimens.PagePadding),
+        verticalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)
+    ) {
+        Text(template.name, style = MaterialTheme.typography.titleLarge)
+        Text(
+            "Task review · version ${current.version}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        if (definition == null) {
+            Text(
+                "This version was written by a newer build. Its definition cannot be read here, " +
+                    "so this page says nothing about what it does.",
+                style = MaterialTheme.typography.bodyMedium
+            )
+        } else {
+            Text("Submitted by", style = MaterialTheme.typography.titleSmall)
+            Text(
+                when (val commit = definition.commit) {
+                    is CommitPolicy.Explicit -> if (
+                        commit.controlId == TASK_REVIEW_COMPLETE_CONTROL
+                    ) {
+                        "Completing the Task on the review surface."
+                    } else {
+                        val label = decodeTemplateButtons(current.buttons, current.buttonsVersion)
+                            ?.firstOrNull { it.id == commit.controlId }
+                            ?.name
+                            ?: commit.controlId
+                        "The “$label” button, which belongs to this template rather than to the " +
+                            "viewer."
+                    }
+                },
+                style = MaterialTheme.typography.bodyMedium
+            )
+
+            Text("Records", style = MaterialTheme.typography.titleSmall)
+            Text(
+                if (definition.accepts.isEmpty()) {
+                    "The file decisions the Task carries, as every review did before v0.8.1."
+                } else {
+                    "What the viewer reports after the reviewer's gesture: " +
+                        definition.accepts.joinToString(", ") { it.key } + "."
+                },
+                style = MaterialTheme.typography.bodyMedium
+            )
+
+            Text(
+                "This build seeds its Task reviews. The name can be changed; what they accept and " +
+                    "commit is fixed, because every Task already judged under this version was " +
+                    "judged by these terms.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        TextButton(onClick = onBack) { Text("Back") }
+    }
+}
+
 @Composable
 private fun TemplateUnavailable(modifier: Modifier, title: String, detail: String) {
     Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

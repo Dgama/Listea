@@ -115,6 +115,28 @@ data class ImportOptions(
     val upgradeAddOn: Boolean = false,
 
     /**
+     * The Task Review this run judges its Tasks with, or null for the built-in rapid review.
+     *
+     * A reference rather than a copy of the definition, exactly as [templates] and [addOn] are: the
+     * policy behind it is whatever version the reference names, read at the moment somebody looks.
+     * Null is *no answer from the dialog*, and because every Task has always been judged by
+     * something, it reads as the built-in `builtin.media.rapid-review@1` rather than as none.
+     *
+     * The dialog's choice for this run and, once the run succeeds, the Todo's standing answer — the
+     * Tasks are stamped with it and `sources.taskReview` records it for the next run.
+     */
+    val taskReview: TemplateVersionRef? = null,
+
+    /**
+     * Whether this run adopts the offered current version of the Task Review the Todo holds.
+     *
+     * **True for Refresh Import, false everywhere else**, for the same reason [upgradeTemplates] is:
+     * a refresh carries the held reference forward to what the picker offered, while Create submits
+     * what it was given and a sync re-stamps what the Todo already names.
+     */
+    val upgradeTaskReview: Boolean = false,
+
+    /**
      * Whether this run leaves the Todo following its upstream: scanning it on entry and importing
      * what appeared, without asking.
      *

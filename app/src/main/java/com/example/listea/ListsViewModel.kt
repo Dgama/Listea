@@ -29,6 +29,7 @@ import com.example.listea.data.AddOnEntity
 import com.example.listea.data.AddOnStore
 import com.example.listea.data.AddOnVersionEntity
 import com.example.listea.data.toAddOnAnswer
+import com.example.listea.data.toViewerEvent
 import com.example.listea.data.AssetDecisions
 import com.example.listea.data.CatalogRow
 import com.example.listea.data.toAssetMark
@@ -94,6 +95,7 @@ import com.example.listea.domain.TemplateButton
 import com.example.listea.domain.TemplateScope
 import com.example.listea.domain.TemplateVersionRef
 import com.example.listea.domain.Templates
+import com.example.listea.domain.ViewerEvent
 import java.util.UUID
 
 /** What the Folder screen should be showing about a pending "create list from folder" action. */
@@ -228,7 +230,18 @@ sealed interface ImportFolderRequest {
          * dialog chose: [ImportOptions.addOn] is the choice, and a reference the offered list does
          * not know is a state worth showing rather than reading back off the choices.
          */
-        val addOns: List<StoredAddOnVersion> = emptyList()
+        val addOns: List<StoredAddOnVersion> = emptyList(),
+
+        /**
+         * Every Task Review there is to choose from, one row per lineage at its current version.
+         *
+         * Carried on the request for the same two reasons [templates] is, and it is not what the
+         * dialog chose: [ImportOptions.taskReview] is the choice, and a reference the offered list
+         * does not know is a state worth showing rather than reading back off the choices. Unlike
+         * the other two pickers this one always has at least the built-in, because every Task has
+         * always been judged by something.
+         */
+        val taskReviews: List<StoredTemplateVersion> = emptyList()
     ) : ImportFolderRequest
 
     /** The run is writing. */
@@ -1014,6 +1027,10 @@ class ListsViewModel @JvmOverloads constructor(
                 // The same rule for the questionnaire: a Task with no import row has no add-on, and
                 // the item's default `""` is the right answer for it.
                 val addOnByTask = controls.associate { it.taskId to it.addOn }
+                // And for the review: the Task was judged under the template its own import
+                // stamped, and an empty stamp is a Task from before v0.8.1 that was in fact
+                // judged by the built-in.
+                val reviewByTask = controls.associate { it.taskId to it.taskReview }
                 ListDetail(
                     owner,
                     items.map { item ->
@@ -1023,7 +1040,8 @@ class ListsViewModel @JvmOverloads constructor(
                         item.toReviewItem(
                             rootUri = owner.sourceRootUri,
                             assetControls = controlByTask[item.taskId].orEmpty(),
-                            addOn = addOnByTask[item.taskId].orEmpty()
+                            addOn = addOnByTask[item.taskId].orEmpty(),
+                            taskReview = reviewByTask[item.taskId].orEmpty()
                         ).copy(
                             assets = resolved,
                             reviewBlocked = reviewBlockFor(resolved)
@@ -1188,6 +1206,27 @@ class ListsViewModel @JvmOverloads constructor(
      */
     fun observeAssetMarks(assetId: String): Flow<List<AssetMark>> =
         dao.observeMarksForAsset(assetId).map { rows -> rows.mapNotNull { it.toAssetMark() } }
+
+    /**
+     * The text of the latest response committed for one Task, or null when it has none.
+     *
+     * The review surface parses this through the domain reader rather than here, because the same
+     * column holds two grammars and only that reader knows which of them a row is.
+     */
+    fun observeLatestResponse(taskId: String): Flow<String?> = dao.observeLatestResponse(taskId)
+
+    /**
+     * The events of that same latest submission, as the domain events the sheet lists.
+     *
+     * Decoded here rather than in the sheet because a row this build cannot read is dropped by the
+     * same fail-closed rule every stored vocabulary follows. An empty list is the ordinary answer
+     * for a legacy media review and for a Task never reviewed; it means *nothing caught*, not
+     * *nothing readable*. A row of an unknown type is the latter and is skipped in silence, the same
+     * way [observeAssetMarks] skips one.
+     */
+    fun observeLatestEventAnswers(taskId: String): Flow<List<ViewerEvent>> =
+        dao.observeLatestEventAnswers(taskId)
+            .map { rows -> rows.mapNotNull { it.toViewerEvent() } }
 
     /**
      * Writes one mark authored by [tool] under [authored], and answers its id.
@@ -1619,14 +1658,34 @@ class ListsViewModel @JvmOverloads constructor(
      * the round bookkeeping and the completion transition are the same whether the completion came
      * from a judgment or an edit, so a List completes and fires its webhook identically either way.
      */
-    fun submitItemReview(item: ReviewItem, terms: ReviewTerms) = launchDb {
-        val decisions = item.taskDecisions
-        val response = ReviewResponse.MediaReview(
-            completed = true,
-            selections = decisions.selections
-        )
+    fun submitItemReview(
+        item: ReviewItem,
+        terms: ReviewTerms,
+        review: StoredTemplateVersion? = null,
+        events: List<ViewerEvent> = emptyList()
+    ) = launchDb {
+        // A template that accepts viewer events is submitted *with* them or not at all. Writing a
+        // completion whose response holds nothing the definition accepts would record a judgment
+        // nobody made, and the surface has no way to say so afterwards. The refusal is here rather
+        // than in the button, because the button is one caller and this is the boundary every
+        // caller crosses.
+        val definition = review?.taskReview
+        if (definition != null && definition.accepts.isNotEmpty() && events.isEmpty()) {
+            return@launchDb
+        }
+        val response: ReviewResponse = if (definition != null && definition.accepts.isNotEmpty()) {
+            ReviewResponse.PrimaryReview(completed = true, events = events)
+        } else {
+            // The headless definition and every template written before v0.8.1 record the fold of
+            // the pairs, exactly as they always did.
+            ReviewResponse.MediaReview(
+                completed = true,
+                selections = item.taskDecisions.selections
+            )
+        }
+        val ref = review?.ref ?: terms.template
         val (transitioned, scopes) = writeOrder.withLock {
-            val ids = dao.submitReview(item.taskId, response, terms.template, terms.context, now())
+            val ids = dao.submitReview(item.taskId, response, ref, terms.context, now())
             ids to ids.associateWith { scopeOf(it) }
         }
         transitioned.forEach { onCompletionTransition(it, true, scopes.getValue(it)) }
@@ -1788,6 +1847,13 @@ class ListsViewModel @JvmOverloads constructor(
         // it: what a new Todo starts on is the built-in *as it stands now*, and that is a row.
         val attachable = attachableTemplates()
         val attachableAddOns = addOnResolverNow().attachable
+        // What a new Todo judges with: the built-in as it stands now, for the same reason the
+        // attach step seeds from the current asset control — the reference moves with the rows.
+        val attachableReviews = resolverNow().attachableReviews
+        val seededReview = attachableReviews
+            .firstOrNull { it.ref.templateId == Templates.MediaRapidReview.ref.templateId }
+            ?.ref
+            ?: Templates.MediaRapidReview.ref
         val options = ImportOptions(
             importer = ImporterKind.FILE_AS_TASK,
             displayName = label,
@@ -1795,6 +1861,9 @@ class ListsViewModel @JvmOverloads constructor(
             // the answer the user usually gives, offered here so they do not have to give it again.
             contentPolicy = settings.value.defaultContentPolicy,
             templates = listOf(seededAttachment(attachable)),
+            // Every Todo has always been judged by something; the built-in is the answer a new one
+            // starts on, offered as a choice rather than applied out of sight.
+            taskReview = seededReview,
             // The standing answer a new Todo is born with, offered as the switch it is rather than
             // applied silently after registration. A new Todo keeps its decisions on delete, the
             // behaviour every Todo had before that switch existed.
@@ -1818,7 +1887,8 @@ class ListsViewModel @JvmOverloads constructor(
             existingTodos = dao.sourcesAt(rootUri, folderPath).map { it.displayName },
             histories = dao.dissolvedHistoriesAt(rootUri, folderPath),
             templates = attachable,
-            addOns = attachableAddOns
+            addOns = attachableAddOns,
+            taskReviews = attachableReviews
         )
     }
 
@@ -1873,6 +1943,12 @@ class ListsViewModel @JvmOverloads constructor(
             // so before confirming — see [refreshAddOnNotice].
             addOn = decodeAddOnAttachment(source.addOn),
             upgradeAddOn = true,
+            // The Todo's own review, opened on what the row names, and carried forward to the
+            // offered version exactly as the templates above are. A row written before v0.8.1
+            // holds nothing here, and the built-in is what its Tasks were in fact judged by.
+            taskReview = decodeTemplateAttachments(source.taskReview).firstOrNull()
+                ?: Templates.MediaRapidReview.ref,
+            upgradeTaskReview = true,
             // The Todo's standing answers, offered here so a refresh can change them without a
             // second trip to the Todo's card. The address opens on what the row holds and on
             // whether that value was a default copy; the dialog preselected *Keep this Todo's
@@ -1895,7 +1971,8 @@ class ListsViewModel @JvmOverloads constructor(
             refresh = true,
             options = options,
             templates = attachableTemplates(),
-            addOns = addOnResolverNow().attachable
+            addOns = addOnResolverNow().attachable,
+            taskReviews = resolverNow().attachableReviews
             // Deliberately no histories: a refresh runs over a Todo that is still here, and a
             // recovery overwrites a Task's judgment. Loading a history into a live Todo would take
             // the decisions made since and quietly replace them with older ones. Recovery is for a
@@ -2059,6 +2136,30 @@ class ListsViewModel @JvmOverloads constructor(
         }
         val addOn = encodeAddOnAttachment(addOnRef)
 
+        // The Task Review, resolved by the same rule and against the same tables the dialog drew
+        // its picker from. Null means the built-in, and the built-in's reference is written down
+        // rather than left blank, so every Task made by this build says which review judged it.
+        val reviewTables = resolverNow()
+        val offeredReview = options.taskReview?.let { ref ->
+            if (options.upgradeTaskReview) {
+                upgradeAttachments(listOf(ref), reviewTables.attachableReviews).firstOrNull() ?: ref
+            } else {
+                ref
+            }
+        } ?: Templates.MediaRapidReview.ref
+        // A Create must not stamp a review this build cannot read. A refresh or a sync is allowed
+        // to carry an unreadable held reference forward, for the same reason the add-on check
+        // allows it: the row already names one, and refusing the whole run would turn a review the
+        // next build can read into an import outage.
+        if (pending.sourceId == null && reviewTables.reviewForRef(offeredReview) == null) {
+            _importFolderRequest.value = ImportFolderRequest.Error(
+                "This Task review cannot be read by this build, so it cannot be attached. " +
+                    "Nothing was changed."
+            )
+            return
+        }
+        val taskReview = encodeTemplateAttachments(listOf(offeredReview))
+
         // The address is resolved by the dialog (*Use default* copies the live default at Confirm;
         // *Custom* is what was typed) and arrives here final. A Todo whose method is Webhook must
         // have a usable one **before anything is written**: *Use default* over an empty default is
@@ -2089,6 +2190,7 @@ class ListsViewModel @JvmOverloads constructor(
                 contentPolicy = options.contentPolicy,
                 assetControls = assetControls,
                 addOn = addOn,
+                taskReview = taskReview,
                 exportKind = encodeExportChoice(options.exportChoice),
                 followUpstream = options.followUpstream,
                 keepStateOnDelete = options.keepStateOnDelete,
@@ -2120,7 +2222,8 @@ class ListsViewModel @JvmOverloads constructor(
                 // Same rule, same reason: the Tasks this run produces are stamped from this string,
                 // so it has to be what the user just chose rather than what the Todo holds.
                 assetControls = assetControls,
-                addOn = addOn
+                addOn = addOn,
+                taskReview = taskReview
             )
         }.getOrNull()
 
@@ -2140,6 +2243,10 @@ class ListsViewModel @JvmOverloads constructor(
             // One questionnaire per Todo, written back with the rest of the configuration. The
             // Tasks got [addOn] above; this is what the next run opens on.
             addOn = addOn,
+            // The Tasks got [taskReview] above; this is what the next run opens on. An absent
+            // picker answer arrives here as the built-in's reference, which is what those Tasks
+            // were in fact judged by.
+            taskReview = taskReview,
             // The dialog's answer, written back here rather than in `runImport` above, for the
             // same reason `contentPolicy` is: the run is about this folder's Tasks, and the
             // choice is a standing answer about the Todo that outlives it.
@@ -2208,6 +2315,10 @@ class ListsViewModel @JvmOverloads constructor(
             // nobody and must not move a questionnaire on its own, exactly as it must not move a
             // template.
             addOn = decodeAddOnAttachment(source.addOn),
+            // The review the Todo names, re-stamped on every Task below. No upgrade: a sync asked
+            // nobody and must not move a review on its own.
+            taskReview = decodeTemplateAttachments(source.taskReview).firstOrNull()
+                ?: Templates.MediaRapidReview.ref,
             // The same rule for every standing answer the dialog now carries. A sync has no dialog
             // and asked nobody, so it writes back exactly what it read — including the address,
             // which it also may not refuse over: see [ImportOptions.validateWebhookAddress].

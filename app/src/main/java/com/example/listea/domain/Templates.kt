@@ -271,6 +271,65 @@ object Templates {
         }
     )
 
+    /**
+     * The built-in rapid review as a **stored** template.
+     *
+     * Headless stops being special here: this is the same lineage, name and reference as
+     * [MediaRapidReview], but it is a row with a version, seeded on install and upgrade like an
+     * asset control. It names the completion checkbox as its commit control and accepts no viewer
+     * events, which is exactly the behaviour the code-defined version has always had.
+     */
+    val MediaRapidReviewStored: StoredTemplateVersion = StoredTemplateVersion(
+        ref = MediaRapidReview.ref,
+        name = MediaRapidReview.displayName,
+        scope = TemplateScope(emptyList()),
+        buttons = emptyList(),
+        kind = TemplateKind.TASK_REVIEW,
+        taskReview = TaskReviewDefinition(
+            viewer = MediaViewer.ref,
+            accepts = emptySet(),
+            commit = CommitPolicy.Explicit(TASK_REVIEW_COMPLETE_CONTROL),
+            completesTask = true,
+            advanceAfterCommit = true
+        )
+    )
+
+    /** The id of the sample review's own Submit control; see [ImageSampleReview]. */
+    const val IMAGE_SAMPLE_SUBMIT_ID = "submit"
+
+    /**
+     * The acceptance fixture's Task Review: catches a long press on an image and commits it.
+     *
+     * Its Submit button belongs to the template and is drawn instead of the completion checkbox —
+     * the compatibility test for Headless and a custom control. A commit records the sampled
+     * [ViewerEvent.ImagePoint] and completes the Task, exactly as the rapid review does.
+     */
+    val ImageSampleReview: StoredTemplateVersion = StoredTemplateVersion(
+        ref = TemplateVersionRef(TemplateId("builtin.image.sample-review"), 1),
+        name = "Sample a point",
+        scope = TemplateScope(emptyList()),
+        buttons = listOf(
+            TemplateButton(
+                id = IMAGE_SAMPLE_SUBMIT_ID,
+                name = "Submit",
+                type = ButtonType.ACTION,
+                recordValue = ""
+            )
+        ),
+        kind = TemplateKind.TASK_REVIEW,
+        taskReview = TaskReviewDefinition(
+            viewer = MediaViewer.ref,
+            accepts = setOf(ViewerEventType.IMAGE_POINT),
+            commit = CommitPolicy.Explicit(IMAGE_SAMPLE_SUBMIT_ID),
+            completesTask = true,
+            advanceAfterCommit = true
+        )
+    )
+
+    /** The Task Reviews every install starts with, in picker order. */
+    val StoredTaskReviews: List<StoredTemplateVersion> =
+        listOf(MediaRapidReviewStored, ImageSampleReview)
+
     /** Every defined version, viewer first because the review template composes it. */
     val all: List<TemplateVersion> =
         listOf(MediaViewer, MediaRapidReview, MediaAssetControl)
@@ -304,7 +363,26 @@ data class StoredTemplateVersion(
     val ref: TemplateVersionRef,
     val name: String,
     val scope: TemplateScope,
-    val buttons: List<TemplateButton>
+    val buttons: List<TemplateButton>,
+
+    /**
+     * Which kind of payload this version carries.
+     *
+     * Asset Control is the default because that is the only kind this class held before v0.8.1,
+     * so every existing construction names what it always was. A Task Review's scope is empty and
+     * its buttons are ACTION controls; its meaning lives in [taskReview].
+     */
+    val kind: TemplateKind = TemplateKind.ASSET_CONTROL,
+
+    /**
+     * The stored Task Review definition, present exactly when [kind] is
+     * [TemplateKind.TASK_REVIEW] and the payload was readable.
+     *
+     * Null on a task-review row means this build could not decode the stored definition; readers
+     * treat the reference as unreadable and fall back, rather than drawing a review with guessed
+     * policies.
+     */
+    val taskReview: TaskReviewDefinition? = null
 )
 
 /**

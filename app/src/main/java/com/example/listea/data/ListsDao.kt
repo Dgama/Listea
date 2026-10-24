@@ -23,8 +23,11 @@ import com.example.listea.domain.ReviewEventId
 import com.example.listea.domain.ReviewEventKind
 import com.example.listea.domain.ReviewResponse
 import com.example.listea.domain.TemplateVersionRef
+import com.example.listea.domain.ViewerEvent
+import com.example.listea.domain.assetUri
 import com.example.listea.domain.completesTask
 import com.example.listea.domain.encode
+import com.example.listea.domain.viewerEvents
 import java.util.UUID
 import kotlinx.coroutines.flow.Flow
 
@@ -182,7 +185,8 @@ abstract class ListsDao {
      */
     @Query(
         """
-        SELECT ti.taskId AS taskId, ti.assetControls AS assetControls, ti.addOn AS addOn
+        SELECT ti.taskId AS taskId, ti.assetControls AS assetControls, ti.addOn AS addOn,
+               ti.taskReview AS taskReview
         FROM task_imports ti
         JOIN list_items i ON i.taskId = ti.taskId
         WHERE i.listId = :listId
@@ -190,10 +194,60 @@ abstract class ListsDao {
     )
     abstract fun observeAssetControlsForList(listId: Long): Flow<List<TaskAssetControls>>
 
+    /**
+     * The most recent response committed for one Task, or null when it has never been judged.
+     *
+     * Read by the review surface to show what is on record beside the control that can replace it —
+     * the point a template with a commit control records is otherwise write-only, since the file's
+     * chips are state and an event is history. Ordered by the write's timestamp with the id as a
+     * tie-break so two submissions in one millisecond still have one latest.
+     *
+     * The text is returned as stored rather than decoded here: `review_events.response` is a
+     * permanent record written by a build that may be newer than this one, and only the reader in
+     * `domain/ReviewResponse` is allowed to decide it is unreadable.
+     */
+    @Query(
+        """
+        SELECT response FROM review_events
+        WHERE taskId = :taskId
+        ORDER BY at DESC, id DESC
+        LIMIT 1
+        """
+    )
+    abstract fun observeLatestResponse(taskId: String): Flow<String?>
+
+    /**
+     * The events of that same latest submission, split out of its response and in reported order.
+     *
+     * This is the read the Info sheet's *Recorded* section uses. It is deliberately a child read
+     * rather than a second parse of `observeLatestResponse`: the table is the place a caught event
+     * is addressed as an event, and an asset reference or a later event kind belongs there rather
+     * than inside a text line. The subquery matches [observeLatestResponse]'s ordering exactly, so
+     * the band and the sheet can never name two different submissions as *the latest*.
+     *
+     * A Task with no event-bearing submission — never reviewed, reviewed by the legacy media
+     * template, or reviewed by an event template that caught nothing because the write was refused —
+     * answers an empty list.
+     */
+    @Query(
+        """
+        SELECT a.* FROM review_event_answers a
+        WHERE a.reviewEventId = (
+            SELECT id FROM review_events
+            WHERE taskId = :taskId
+            ORDER BY at DESC, id DESC
+            LIMIT 1
+        )
+        ORDER BY a.ordinal
+        """
+    )
+    abstract fun observeLatestEventAnswers(taskId: String): Flow<List<ReviewEventAnswerEntity>>
+
     /** The same, once, for the two paths that build a payload rather than drive a screen. */
     @Query(
         """
-        SELECT ti.taskId AS taskId, ti.assetControls AS assetControls, ti.addOn AS addOn
+        SELECT ti.taskId AS taskId, ti.assetControls AS assetControls, ti.addOn AS addOn,
+               ti.taskReview AS taskReview
         FROM task_imports ti
         JOIN list_items i ON i.taskId = ti.taskId
         WHERE i.listId = :listId
@@ -236,7 +290,8 @@ abstract class ListsDao {
      */
     @Query(
         """
-        SELECT taskId AS taskId, assetControls AS assetControls, addOn AS addOn
+        SELECT taskId AS taskId, assetControls AS assetControls, addOn AS addOn,
+               taskReview AS taskReview
         FROM task_imports
         WHERE taskId IN (:taskIds)
         """
@@ -437,9 +492,10 @@ abstract class ListsDao {
         // judgment filed against nothing.
         if (written != null) {
             val (kind, ref) = reviewContextColumns(context)
+            val eventId = ReviewEventId.new().value
             insertReviewEvent(
                 ReviewEventEntity(
-                    id = ReviewEventId.new().value,
+                    id = eventId,
                     taskId = taskId,
                     at = now,
                     kind = ReviewEventKind.SUBMITTED.key,
@@ -450,9 +506,45 @@ abstract class ListsDao {
                     contextRef = ref
                 )
             )
+            // The events are split into rows in the same transaction, so a submission is either
+            // wholly on record — the response and the events it can be asked about — or not on
+            // record at all. A child row that could outlive a failed write would be an event whose
+            // submission nobody made.
+            writeReviewEventAnswers(eventId, taskId, response.viewerEvents)
         }
 
         return refreshAffected(affected, wasComplete, now)
+    }
+
+    /**
+     * The events of a just-written submission, one row each, with their Assets resolved.
+     *
+     * The event's asset path is its source URI — what the viewer was showing when the gesture
+     * happened — so resolution is a lookup over the Task's own Assets and nothing else. A path that
+     * names no Asset the Task still holds leaves `assetId` null: the event stays a true record of
+     * what was caught, and a missing file is never a reason to drop it. Two Assets under one Task
+     * cannot carry the same source URI (the import merge keys on that pair), so the map is not
+     * ambiguous; if one ever did, the first in sort order would be named rather than the row
+     * invented twice.
+     */
+    private suspend fun writeReviewEventAnswers(
+        reviewEventId: String,
+        taskId: String,
+        events: List<ViewerEvent>
+    ) {
+        if (events.isEmpty()) return
+        val assetsByUri = assetsForTask(taskId)
+            .mapNotNull { asset -> asset.sourceUri?.let { uri -> uri to asset.id } }
+            .toMap()
+        events.forEachIndexed { ordinal, event ->
+            insertReviewEventAnswer(
+                event.toReviewEventAnswer(
+                    reviewEventId = reviewEventId,
+                    ordinal = ordinal,
+                    assetId = event.assetUri()?.let { assetsByUri[it] }
+                )
+            )
+        }
     }
 
     /**
@@ -1554,6 +1646,9 @@ abstract class ListsDao {
     @Insert
     protected abstract suspend fun insertReviewEvent(event: ReviewEventEntity)
 
+    @Insert
+    protected abstract suspend fun insertReviewEventAnswer(answer: ReviewEventAnswerEntity)
+
     // --- the manual-item cleanup path --------------------------------------------------------------
     //
     // Manual items are the one kind of Task whose life is tied to a membership: there is no file
@@ -2520,6 +2615,7 @@ abstract class ListsDao {
         now: Long,
         assetControls: String = "",
         addOn: String = "",
+        taskReview: String = "",
         exportKind: String = EXPORT_CHOICE_NONE,
         keepStateOnDelete: Boolean = false,
         webhookUrl: String = "",
@@ -2539,6 +2635,7 @@ abstract class ListsDao {
             keepStateOnDelete = keepStateOnDelete,
             assetControls = assetControls,
             addOn = addOn,
+            taskReview = taskReview,
             exportKind = exportKind,
             webhookUrl = webhookUrl,
             webhookFromDefault = webhookFromDefault
@@ -2587,6 +2684,7 @@ abstract class ListsDao {
         contentPolicy: ContentPolicy = ContentPolicy.Default,
         assetControls: String = "",
         addOn: String = "",
+        taskReview: String = "",
         exportKind: String = EXPORT_CHOICE_NONE,
         followUpstream: Boolean = false,
         keepStateOnDelete: Boolean = false,
@@ -2600,6 +2698,7 @@ abstract class ListsDao {
         contentPolicy.key,
         assetControls,
         addOn,
+        taskReview,
         exportKind,
         followUpstream,
         keepStateOnDelete,
@@ -2729,7 +2828,8 @@ abstract class ListsDao {
         recoverFrom: String? = null,
         contentPolicy: ContentPolicy? = null,
         assetControls: String = "",
-        addOn: String = ""
+        addOn: String = "",
+        taskReview: String = ""
     ): ImportResult = runImportInternal(
         sourceId,
         coverage,
@@ -2738,7 +2838,8 @@ abstract class ListsDao {
         recoverFrom,
         contentPolicy,
         assetControls,
-        addOn
+        addOn,
+        taskReview
     )
 
     /**
@@ -2766,7 +2867,8 @@ abstract class ListsDao {
         recoverFrom: String? = null,
         contentPolicy: ContentPolicy? = null,
         assetControls: String = "",
-        addOn: String = ""
+        addOn: String = "",
+        taskReview: String = ""
     ): ImportResult {
         val source = getSource(sourceId) ?: return ImportResult(outcome = ImportOutcome.FAILED)
         val importer = ImporterKind.fromKey(source.importerKind)
@@ -2829,11 +2931,15 @@ abstract class ListsDao {
             val existing = owned[task.groupPath]
             if (existing != null) {
                 reconciled++
-                val delta = reconcileTask(source, existing.taskId, task, now, assetControls, addOn)
+                val delta = reconcileTask(
+                    source, existing.taskId, task, now, assetControls, addOn, taskReview
+                )
                 assetsCreated += delta.created
                 assetsUpdated += delta.updated
             } else {
-                val delta = resolveNewTask(source, importer, task, now, assetControls, addOn)
+                val delta = resolveNewTask(
+                    source, importer, task, now, assetControls, addOn, taskReview
+                )
                 if (delta.conflict != null) {
                     conflicts += delta.conflict
                 } else {
@@ -2961,13 +3067,14 @@ abstract class ListsDao {
      */
     @Query(
         "UPDATE task_imports SET lastSeenAt = :lastSeenAt, assetControls = :assetControls, " +
-            "addOn = :addOn WHERE taskId = :taskId"
+            "addOn = :addOn, taskReview = :taskReview WHERE taskId = :taskId"
     )
     protected abstract suspend fun touchTaskImport(
         taskId: String,
         lastSeenAt: Long,
         assetControls: String,
-        addOn: String
+        addOn: String,
+        taskReview: String
     )
 
     @Query("DELETE FROM legacy_source_tasks WHERE taskId = :taskId")
@@ -3033,7 +3140,8 @@ abstract class ListsDao {
     @Query(
         "UPDATE sources SET displayName = :displayName, importerKind = :importerKind, " +
             "keepTree = :keepTree, contentPolicy = :contentPolicy, " +
-            "assetControls = :assetControls, addOn = :addOn, exportKind = :exportKind, " +
+            "assetControls = :assetControls, addOn = :addOn, taskReview = :taskReview, " +
+            "exportKind = :exportKind, " +
             "followUpstream = :followUpstream, keepStateOnDelete = :keepStateOnDelete, " +
             "webhookUrl = :webhookUrl, webhookFromDefault = :webhookFromDefault WHERE id = :id"
     )
@@ -3045,6 +3153,7 @@ abstract class ListsDao {
         contentPolicy: String,
         assetControls: String,
         addOn: String,
+        taskReview: String,
         exportKind: String,
         followUpstream: Boolean,
         keepStateOnDelete: Boolean,
@@ -3070,6 +3179,7 @@ abstract class ListsDao {
                ts.isCompleted AS isCompleted,
                ti.assetControls AS assetControls,
                ti.addOn AS addOn,
+               ti.taskReview AS taskReview,
                COUNT(a.id) AS assetCount,
                COALESCE(SUM(a.sourceMissing), 0) AS missingAssets,
                SUM(a.sizeBytes) AS sizeBytes,
@@ -3105,6 +3215,7 @@ abstract class ListsDao {
                 isCompleted = projection.isCompleted,
                 assetControls = projection.assetControls,
                 addOn = projection.addOn,
+                taskReview = projection.taskReview,
                 assetCount = projection.assetCount,
                 missingAssets = projection.missingAssets,
                 sizeBytes = projection.sizeBytes,
@@ -3161,7 +3272,8 @@ abstract class ListsDao {
         task: PlannedTask,
         now: Long,
         assetControls: String,
-        addOn: String
+        addOn: String,
+        taskReview: String
     ): ReconcileDelta {
         val existing = assetsForTask(taskId).associateBy { it.relativePath }
         var created = 0
@@ -3194,7 +3306,7 @@ abstract class ListsDao {
             }
         }
 
-        touchTaskImport(taskId, now, assetControls, addOn)
+        touchTaskImport(taskId, now, assetControls, addOn, taskReview)
         return ReconcileDelta(created, updated)
     }
 
@@ -3226,7 +3338,8 @@ abstract class ListsDao {
         task: PlannedTask,
         now: Long,
         assetControls: String,
-        addOn: String
+        addOn: String,
+        taskReview: String
     ): NewTaskDelta {
         var adoptTaskId: String? = null
         for (asset in task.assets) {
@@ -3270,7 +3383,8 @@ abstract class ListsDao {
                     importedAt = now,
                     lastSeenAt = now,
                     assetControls = assetControls,
-                    addOn = addOn
+                    addOn = addOn,
+                    taskReview = taskReview
                 )
             )
             deleteLegacyClaim(adoptTaskId)
@@ -3299,7 +3413,8 @@ abstract class ListsDao {
                 importedAt = now,
                 lastSeenAt = now,
                 assetControls = assetControls,
-                addOn = addOn
+                addOn = addOn,
+                taskReview = taskReview
             )
         )
         for (asset in task.assets) {

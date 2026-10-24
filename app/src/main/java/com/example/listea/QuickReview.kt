@@ -297,5 +297,10 @@ private fun reviewItemFor(
     // And the Task's own add-on beside them, because the page that draws it is built from this item
     // and not from the catalog: a queue that dropped the stamp reviewed Tasks as if no questionnaire
     // were attached, while their rows said otherwise.
-    addOn = row.addOn
+    addOn = row.addOn,
+    // And the Task's own Task Review, for the same reason and with a sharper consequence: a queue
+    // that dropped it would judge every Task by the List's legacy fallback, and a Task imported
+    // under *Sample a point* would open with the built-in's completion checkbox instead of the
+    // template's own Submit.
+    taskReview = row.taskReview
 )

@@ -28,9 +28,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.listea.data.AddOnEntity
 import com.example.listea.data.AddOnVersionEntity
+import com.example.listea.data.StoredTemplateKind
 import com.example.listea.data.TemplateEntity
 import com.example.listea.data.TemplateVersionEntity
 import com.example.listea.domain.decodeAddOnQuestions
+import com.example.listea.domain.decodeTaskReviewDefinition
 import com.example.listea.domain.decodeTemplateButtons
 import com.example.listea.domain.decodeTemplateScope
 
@@ -307,9 +309,15 @@ private fun TemplateCard(
             // so a payload a later build wrote still describes itself as far as this one can tell —
             // and a rule this build cannot evaluate comes out as "applies to nothing", which is
             // what it does.
+            // A Task review governs no files: its line says what it is instead of "applies to
+            // nothing", which for a review would read as a broken template rather than as one
+            // whose subject is a Task.
             StatusLine(
-                current?.let { templateScopeLabel(decodeTemplateScope(it.scope)) }
-                    ?: "No version yet"
+                when {
+                    current == null -> "No version yet"
+                    current.kind == StoredTemplateKind.TASK_REVIEW -> reviewLine(current)
+                    else -> templateScopeLabel(decodeTemplateScope(current.scope))
+                }
             )
             StatusLine(templateVersionLine(current))
         }
@@ -355,6 +363,21 @@ private fun AddOnCard(
 }
 
 /**
+ * What a Task Review is, said as what it accepts rather than as a file scope.
+ *
+ * A review governs no files, so the asset-control line has nothing to say about it; the thing a
+ * user chooses between two reviews by is what each one catches. The empty set is not "nothing":
+ * it is the Headless definition, which records the Task's own file decisions, and naming that
+ * keeps it legible beside a review that samples a point.
+ */
+private fun reviewLine(version: TemplateVersionEntity): String {
+    val definition = decodeTaskReviewDefinition(version.definition, version.definitionVersion)
+        ?: return "Task review · unreadable"
+    if (definition.accepts.isEmpty()) return "Review · file decisions"
+    return "Review · " + definition.accepts.sortedBy { it.key }.joinToString(", ") { it.key }
+}
+
+/**
  * One template's buttons and version as a single line, or what is wrong with them.
  *
  * A version this build cannot read is named as such rather than counted as zero buttons, because
@@ -363,6 +386,15 @@ private fun AddOnCard(
  */
 private fun templateVersionLine(version: TemplateVersionEntity?): String {
     if (version == null) return "This template has no version, so it cannot be attached"
+
+    // A Task review offers its commit control rather than a bar, so counting buttons would
+    // call a one-control template "1 button" and say nothing about what it is for. Its line above
+    // already says what it catches, so this one only has to name the version.
+    if (version.kind == StoredTemplateKind.TASK_REVIEW) {
+        decodeTaskReviewDefinition(version.definition, version.definitionVersion)
+            ?: return "Version ${version.version} · written by a newer build"
+        return "Version ${version.version}"
+    }
 
     val buttons = decodeTemplateButtons(version.buttons, version.buttonsVersion)
         ?: return "Version ${version.version} · written by a newer build"
