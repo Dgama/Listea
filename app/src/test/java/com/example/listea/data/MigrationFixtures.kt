@@ -50,7 +50,16 @@ internal val TablesFromLaterSteps = listOf(
     "index_task_review_answers_taskId",
     // The v0.8.1 event rows: a submission's events, split out for the Info sheet.
     "review_event_answers",
-    "index_review_event_answers_assetId"
+    "index_review_event_answers_assetId",
+    // The v0.8.2 Package: a Prompt payload, a Todo's checkpoint, and the links between them.
+    "task_payloads",
+    "package_checkpoints",
+    "package_prompt_tasks",
+    "index_package_prompt_tasks_sourceId_packageKey_promptKey",
+    "package_resources",
+    "index_package_resources_sourceId_packageKey_resourceKey",
+    "task_resources",
+    "index_task_resources_resourceId"
 )
 
 /**
@@ -450,7 +459,25 @@ internal fun ListeaDatabase.subtractV28Additions() {
  * decoration — a v22 fixture has never had the table at all.
  */
 internal fun ListeaDatabase.subtractV31Additions() {
+    // The step above this one, first: a database left at v32 would still hold the Package tables.
+    subtractV32Additions()
+
     exec("DROP TABLE IF EXISTS review_event_answers")
+}
+
+/**
+ * Takes everything `MIGRATION_31_32` adds back off, leaving a database in v31's shape.
+ *
+ * Five new tables and nothing else: the step writes no existing column and backfills nothing,
+ * because a pre-Package database has no Prompt to backfill. Children are dropped before parents so
+ * the order is valid with foreign keys on, though every table is empty in a fixture.
+ */
+internal fun ListeaDatabase.subtractV32Additions() {
+    exec("DROP TABLE IF EXISTS task_resources")
+    exec("DROP TABLE IF EXISTS package_prompt_tasks")
+    exec("DROP TABLE IF EXISTS package_resources")
+    exec("DROP TABLE IF EXISTS package_checkpoints")
+    exec("DROP TABLE IF EXISTS task_payloads")
 }
 
 /**

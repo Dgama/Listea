@@ -33,7 +33,8 @@ class TemplateResolverReviewTest {
     private val definition = TaskReviewDefinition(
         viewer = Templates.MediaViewer.ref,
         accepts = setOf(ViewerEventType.IMAGE_POINT),
-        commit = CommitPolicy.Explicit(TASK_REVIEW_COMPLETE_CONTROL),
+        commit = CommitPolicy.ConfirmControl(TASK_REVIEW_COMPLETE_CONTROL),
+        revisable = true,
         completesTask = true,
         advanceAfterCommit = true
     )

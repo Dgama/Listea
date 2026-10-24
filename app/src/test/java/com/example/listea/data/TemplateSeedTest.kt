@@ -59,8 +59,9 @@ class TemplateSeedTest {
         open()
 
         val templates = database.templateDao().observeTemplates().first()
-        // The Asset Control and, since v0.8.1, the two built-in Task Reviews.
-        assertEquals(3, templates.size)
+        // The Asset Control and the built-in Task Reviews. Read from the same list the seed writes,
+        // so a fourth built-in is a row here rather than a number to remember to edit.
+        assertEquals(1 + Templates.StoredTaskReviews.size, templates.size)
         val seedRow = templates.single { it.id == seedId }
         assertEquals(Templates.AssetControlSeed.name, seedRow.name)
         assertEquals(
@@ -69,7 +70,7 @@ class TemplateSeedTest {
         )
 
         val versions = database.templateDao().observeVersions().first()
-        assertEquals(3, versions.size)
+        assertEquals(1 + Templates.StoredTaskReviews.size, versions.size)
 
         val seed = Templates.AssetControlSeed
         val seedVersion = versions.single {
@@ -106,6 +107,41 @@ class TemplateSeedTest {
     }
 
     @Test
+    fun `an untouched built-in is moved to the headless vocabulary on open`() = runTest {
+        open()
+        val choiceId = Templates.StructuredSingleChoice.ref.templateId.value
+        assertEquals(
+            Templates.StructuredSingleChoice.name,
+            database.templateDao().template(choiceId)?.name
+        )
+
+        // The name an earlier build seeded. A device that upgraded from it still holds this row,
+        // and the open is where it learns what the template is called now.
+        database.templateWriteDao().renameTemplate(choiceId, "Single Choice")
+        database.close()
+
+        open()
+        assertEquals(
+            Templates.StructuredSingleChoice.name,
+            database.templateDao().template(choiceId)?.name
+        )
+    }
+
+    @Test
+    fun `a built-in renamed by its owner keeps that name`() = runTest {
+        open()
+        val sampleId = Templates.ImageSampleReview.ref.templateId.value
+        database.templateWriteDao().renameTemplate(sampleId, "Colour picker")
+        database.close()
+
+        open()
+        assertEquals(
+            "Colour picker",
+            database.templateDao().template(sampleId)?.name
+        )
+    }
+
+    @Test
     fun `a database that has the tables and no templates at all is given the built-in`() = runTest {
         // The state this was written for, and the one that was found on a real device: v24, both
         // tables present, nothing in them. No migration will visit this database again and no
@@ -125,7 +161,10 @@ class TemplateSeedTest {
 
         open()
 
-        assertEquals(3, database.templateDao().observeTemplates().first().size)
+        assertEquals(
+            1 + Templates.StoredTaskReviews.size,
+            database.templateDao().observeTemplates().first().size
+        )
         assertTrue(
             database.templateDao().observeVersions().first()
                 .any { it.templateId == seedId }

@@ -50,7 +50,9 @@ class MigrationChainTest {
         writeV7Fixture()
 
         val database = Room.databaseBuilder(context, ListeaDatabase::class.java, V7_DB)
-            .addMigrations(*CHAIN_FROM_7)
+            .addMigrations(*CHAIN_FROM_7,
+ListeaDatabase.MIGRATION_31_32
+)
             .build()
 
         // --- V8: every source-backed item learned the path a decision is stored against -----------
@@ -219,7 +221,9 @@ class MigrationChainTest {
         writeV9Fixture()
 
         val database = Room.databaseBuilder(context, ListeaDatabase::class.java, V9_DB)
-            .addMigrations(*CHAIN_FROM_9)
+            .addMigrations(*CHAIN_FROM_9,
+ListeaDatabase.MIGRATION_31_32
+)
             .build()
 
         // The two rows are about the same file, so their ids fingerprint identically — and they
@@ -502,7 +506,8 @@ class MigrationChainTest {
             ListeaDatabase.MIGRATION_27_28,
         ListeaDatabase.MIGRATION_28_29,
         ListeaDatabase.MIGRATION_29_30,
-        ListeaDatabase.MIGRATION_30_31
+        ListeaDatabase.MIGRATION_30_31,
+        ListeaDatabase.MIGRATION_31_32
     )
 
         val CHAIN_FROM_9 = arrayOf(
@@ -527,7 +532,8 @@ class MigrationChainTest {
             ListeaDatabase.MIGRATION_27_28,
         ListeaDatabase.MIGRATION_28_29,
         ListeaDatabase.MIGRATION_29_30,
-        ListeaDatabase.MIGRATION_30_31
+        ListeaDatabase.MIGRATION_30_31,
+        ListeaDatabase.MIGRATION_31_32
     )
     }
 }
