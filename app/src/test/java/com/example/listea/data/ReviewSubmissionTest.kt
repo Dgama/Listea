@@ -7,6 +7,8 @@ import com.example.listea.domain.ListId
 import com.example.listea.domain.ReviewContext
 import com.example.listea.domain.ReviewResponse
 import com.example.listea.domain.Templates
+import com.example.listea.domain.ViewerEvent
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -319,6 +321,113 @@ class ReviewSubmissionTest {
         assertEquals(emptyList<Long>(), second)
     }
 
+    // --- the events a template caught ---------------------------------------------------------------
+
+    @Test
+    fun `a submission with events writes one row each, in order, naming its file`() = runTest {
+        val listId = folderList(folderPath = "", files = listOf("a.jpg"))
+        registerFiles("a.jpg")
+        val taskId = dao.getItems(listId).single().taskId
+        val assetId = fileAsset("a.jpg")
+        val assetUri = rawString("SELECT sourceUri FROM assets WHERE id = '$assetId'")
+
+        dao.submitReview(
+            taskId = taskId,
+            response = primary(
+                ViewerEvent.ImagePoint(0.10, 0.20, "#43A047", assetUri),
+                ViewerEvent.ImagePoint(0.30, 0.40, "#E53935", "$ROOT//gone.jpg")
+            ),
+            template = Templates.ImageSampleReview.ref,
+            context = ReviewContext.InFolder(ROOT, ""),
+            now = 2000
+        )
+
+        // The response stays the whole record...
+        assertEquals(1, rawInt("SELECT COUNT(*) FROM review_events"))
+        // ...and the events are also addressable rows, in the order they were reported.
+        assertEquals(2, rawInt("SELECT COUNT(*) FROM review_event_answers"))
+        assertEquals("0:image.point", rawString(
+            "SELECT ordinal || ':' || type FROM review_event_answers ORDER BY ordinal LIMIT 1"
+        ))
+        assertEquals(
+            "the event's Asset is resolved from the source URI the viewer recorded",
+            assetId,
+            rawString(
+                "SELECT assetId FROM review_event_answers WHERE ordinal = 0"
+            )
+        )
+        // A file the Task no longer holds leaves the reference null rather than dropping the fact.
+        assertEquals(
+            1,
+            rawInt(
+                "SELECT COUNT(*) FROM review_event_answers WHERE ordinal = 1 AND assetId IS NULL"
+            )
+        )
+        // One grammar: the row's value is exactly the response line's event half.
+        assertEquals(
+            "0.1000\t0.2000\t#43A047\t$assetUri",
+            rawString("SELECT value FROM review_event_answers WHERE ordinal = 0")
+        )
+    }
+
+    @Test
+    fun `a judgment without events writes no event rows`() = runTest {
+        val listId = folderList(folderPath = "", files = listOf("a.jpg"))
+        registerFiles("a.jpg")
+        val taskId = dao.getItems(listId).single().taskId
+
+        dao.submitReview(
+            taskId = taskId,
+            response = media(completed = true),
+            template = Templates.MediaRapidReview.ref,
+            context = ReviewContext.InFolder(ROOT, ""),
+            now = 2000
+        )
+
+        assertEquals(1, rawInt("SELECT COUNT(*) FROM review_events"))
+        assertEquals(0, rawInt("SELECT COUNT(*) FROM review_event_answers"))
+    }
+
+    @Test
+    fun `the answers read is the latest submission's, not the union of every one`() = runTest {
+        val listId = folderList(folderPath = "", files = listOf("a.jpg"))
+        registerFiles("a.jpg")
+        val taskId = dao.getItems(listId).single().taskId
+        val assetId = fileAsset("a.jpg")
+        val assetUri = rawString("SELECT sourceUri FROM assets WHERE id = '$assetId'")
+
+        dao.submitReview(
+            taskId = taskId,
+            response = primary(ViewerEvent.ImagePoint(0.1, 0.2, "#43A047", assetUri)),
+            template = Templates.ImageSampleReview.ref,
+            context = ReviewContext.InFolder(ROOT, ""),
+            now = 2000
+        )
+        dao.submitReview(
+            taskId = taskId,
+            response = primary(
+                ViewerEvent.ImagePoint(0.7, 0.8, "#1E88E5", assetUri),
+                ViewerEvent.ImagePoint(0.9, 0.6, "#FDD835", assetUri)
+            ),
+            template = Templates.ImageSampleReview.ref,
+            context = ReviewContext.InFolder(ROOT, ""),
+            now = 3000
+        )
+
+        val latest = dao.observeLatestEventAnswers(taskId).first()
+
+        assertEquals(2, latest.size)
+        assertEquals(listOf(0, 1), latest.map { it.ordinal })
+        assertEquals(
+            listOf("#1E88E5", "#FDD835"),
+            latest.mapNotNull { (it.toViewerEvent() as? ViewerEvent.ImagePoint)?.color }
+        )
+        assertEquals("both name the file the points came from", listOf(assetId, assetId), latest.map { it.assetId })
+        // Both submissions' rows remain, each under its own parent.
+        assertEquals(3, rawInt("SELECT COUNT(*) FROM review_event_answers"))
+        assertEquals(2, rawInt("SELECT COUNT(DISTINCT reviewEventId) FROM review_event_answers"))
+    }
+
     // --- the write cannot half-happen ---------------------------------------------------------------
 
     @Test
@@ -388,6 +497,9 @@ class ReviewSubmissionTest {
         completed: Boolean,
         selections: Set<String> = emptySet()
     ) = ReviewResponse.MediaReview(completed = completed, selections = selections)
+
+    private fun primary(vararg events: ViewerEvent) =
+        ReviewResponse.PrimaryReview(completed = true, events = events.toList())
 
     private suspend fun folderList(
         folderPath: String,

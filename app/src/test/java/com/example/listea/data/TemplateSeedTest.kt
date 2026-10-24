@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -58,26 +59,32 @@ class TemplateSeedTest {
         open()
 
         val templates = database.templateDao().observeTemplates().first()
-        assertEquals(1, templates.size)
-        assertEquals(seedId, templates.single().id)
-        assertEquals(Templates.AssetControlSeed.name, templates.single().name)
+        // The Asset Control and, since v0.8.1, the two built-in Task Reviews.
+        assertEquals(3, templates.size)
+        val seedRow = templates.single { it.id == seedId }
+        assertEquals(Templates.AssetControlSeed.name, seedRow.name)
+        assertEquals(
+            Templates.StoredTaskReviews.map { it.ref.templateId.value }.toSet(),
+            templates.map { it.id }.toSet() - seedId
+        )
 
         val versions = database.templateDao().observeVersions().first()
-        assertEquals(1, versions.size)
+        assertEquals(3, versions.size)
 
         val seed = Templates.AssetControlSeed
-        assertEquals(seedId, versions.single().templateId)
-        assertEquals(seed.ref.version, versions.single().version)
-        assertEquals(encodeTemplateScope(seed.scope), versions.single().scope)
-        assertEquals(encodeTemplateButtons(seed.buttons), versions.single().buttons)
-        assertEquals(TEMPLATE_BUTTONS_VERSION, versions.single().buttonsVersion)
+        val seedVersion = versions.single {
+            it.templateId == seedId && it.version == seed.ref.version
+        }
+        assertEquals(encodeTemplateScope(seed.scope), seedVersion.scope)
+        assertEquals(encodeTemplateButtons(seed.buttons), seedVersion.buttons)
+        assertEquals(TEMPLATE_BUTTONS_VERSION, seedVersion.buttonsVersion)
 
         // The same two strings `MigrationV23ToV24Test` pins, because a device that installed this
         // release and a device that upgraded into it have to hold one template between them.
-        assertEquals("kind:image,video", versions.single().scope)
+        assertEquals("kind:image,video", seedVersion.scope)
         assertEquals(
             "favorite\t★\tboolean\tfavorite\ncustom1\tC1\ttag\tcust1\ncustom2\tC2\ttag\tcust2",
-            versions.single().buttons
+            seedVersion.buttons
         )
     }
 
@@ -118,8 +125,11 @@ class TemplateSeedTest {
 
         open()
 
-        assertEquals(1, database.templateDao().observeTemplates().first().size)
-        assertEquals(seedId, database.templateDao().observeVersions().first().single().templateId)
+        assertEquals(3, database.templateDao().observeTemplates().first().size)
+        assertTrue(
+            database.templateDao().observeVersions().first()
+                .any { it.templateId == seedId }
+        )
     }
 
     /** Opens the database the way the app opens it, seeding and all. */

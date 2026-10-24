@@ -22,6 +22,7 @@ class TemplateButtonTest {
     private val c1 = TemplateButton("custom1", "C1", ButtonType.TAG, "cust1")
     private val star = TemplateButton("favorite", "★", ButtonType.BOOLEAN, "favorite")
     private val note = TemplateButton("note1", "Comment", ButtonType.COMMENT, "")
+    private val submit = TemplateButton("submit", "Submit", ButtonType.ACTION, "")
 
     private fun decode(text: String) = decodeTemplateButtons(text, TEMPLATE_BUTTONS_VERSION)
 
@@ -84,7 +85,7 @@ class TemplateButtonTest {
     }
 
     @Test
-    fun `a draft that became a comment is read back at version 2`() {
+    fun `a draft that became a comment is read back at the newest version`() {
         // The editor's whole sequence: a version-1 row is opened, one of its buttons is changed to
         // Comment, and the draft is re-encoded. Reading that draft back at the stored version drops
         // the comment line — it is version-2 vocabulary — so the button vanishes from the page and
@@ -99,7 +100,9 @@ class TemplateButtonTest {
             decodeTemplateButtons(draft, TEMPLATE_BUTTONS_VERSION)
         )
         assertEquals(
-            TEMPLATE_BUTTONS_COMMENT_VERSION,
+            // The newest vocabulary this build has, not the one the edit happened to need: the
+            // draft is read with the decoder that cannot drop anything.
+            TEMPLATE_BUTTONS_ACTION_VERSION,
             templateDraftVersion(stored, TEMPLATE_BUTTONS_VERSION, draft)
         )
         assertEquals(
@@ -123,14 +126,62 @@ class TemplateButtonTest {
             templateDraftVersion(stored, TEMPLATE_BUTTONS_VERSION, stored)
         )
         assertEquals(
-            TEMPLATE_BUTTONS_COMMENT_VERSION,
+            TEMPLATE_BUTTONS_ACTION_VERSION,
             templateDraftVersion(stored, TEMPLATE_BUTTONS_VERSION, "$stored\nfavorite\t★\tboolean\tfavorite")
         )
     }
 
+    // --- v0.8.1's action vocabulary -------------------------------------------------------------
+
+    @Test
+    fun `an action round-trips at version 3`() {
+        val text = encodeTemplateButtons(listOf(submit, c1))
+
+        assertEquals(
+            "submit\tSubmit\taction\t\ncustom1\tC1\ttag\tcust1",
+            text
+        )
+        assertEquals(
+            listOf(submit, c1),
+            decodeTemplateButtons(text, TEMPLATE_BUTTONS_ACTION_VERSION)
+        )
+    }
+
+    @Test
+    fun `an action is dropped at version 2, and everything else survives`() {
+        val text = encodeTemplateButtons(listOf(c1, note, submit))
+
+        // The row shape never changed, so the version is the whole of the promise: a build that
+        // predates actions must not draw a Submit it has no commit path for.
+        assertEquals(
+            listOf(c1, note),
+            decodeTemplateButtons(text, TEMPLATE_BUTTONS_COMMENT_VERSION)
+        )
+        assertEquals(listOf(c1), decodeTemplateButtons(text, TEMPLATE_BUTTONS_VERSION))
+    }
+
+    @Test
+    fun `an action moves the whole bar to version 3`() {
+        assertEquals(
+            TEMPLATE_BUTTONS_ACTION_VERSION,
+            buttonsVersionFor(listOf(c1, submit))
+        )
+        // Even beside a comment, and even alone.
+        assertEquals(
+            TEMPLATE_BUTTONS_ACTION_VERSION,
+            buttonsVersionFor(listOf(note, submit))
+        )
+        assertEquals(TEMPLATE_BUTTONS_ACTION_VERSION, buttonsVersionFor(listOf(submit)))
+    }
+
     @Test
     fun `a version this build does not know is refused, not guessed at`() {
-        assertNull(decodeTemplateButtons("custom1\tC1\ttag\tcust1", TEMPLATE_BUTTONS_COMMENT_VERSION + 1))
+        assertNull(
+            decodeTemplateButtons(
+                "custom1\tC1\ttag\tcust1",
+                TEMPLATE_BUTTONS_ACTION_VERSION + 1
+            )
+        )
     }
 
     @Test
@@ -155,6 +206,6 @@ class TemplateButtonTest {
         // A template that offers nothing is a fact the payload recorded, and it must not be
         // conflated with a payload this build could not read.
         assertEquals(emptyList<TemplateButton>(), decode(""))
-        assertNull(decodeTemplateButtons("", TEMPLATE_BUTTONS_COMMENT_VERSION + 1))
+        assertNull(decodeTemplateButtons("", TEMPLATE_BUTTONS_ACTION_VERSION + 1))
     }
 }

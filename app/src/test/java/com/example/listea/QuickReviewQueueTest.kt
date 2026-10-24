@@ -61,13 +61,15 @@ class QuickReviewQueueTest {
         unviewable: Boolean = false,
         sizeBytes: Long? = null,
         lastModified: Long? = null,
-        addOn: String = ""
+        addOn: String = "",
+        taskReview: String = ""
     ) = CatalogRow(
         taskId = taskId,
         groupPath = groupPath,
         displayName = displayName,
         isCompleted = completed,
         addOn = addOn,
+        taskReview = taskReview,
         assetCount = 1,
         missingAssets = missingAssets,
         sizeBytes = sizeBytes,
@@ -204,6 +206,31 @@ class QuickReviewQueueTest {
         assertEquals(
             listOf("addon\t2"),
             folderReviewQueue(root, "", listOf(file("", "a.jpg")), rows).map { it.addOn }
+        )
+    }
+
+    @Test
+    fun `a queued Task carries the review its import stamped`() {
+        // The queue is where a session learns which template judges each Task. Dropped here, the
+        // stamp falls back to the List's legacy reference, and a Task imported under *Sample a
+        // point* opens with the built-in's completion checkbox instead of the template's Submit.
+        val rows = listOf(
+            catalogRow(
+                "task-a",
+                "a.jpg",
+                "a.jpg",
+                taskReview = "builtin.image.sample-review\t1"
+            ),
+            catalogRow("task-b", "b.jpg", "b.jpg")
+        )
+
+        assertEquals(
+            listOf("builtin.image.sample-review\t1", ""),
+            taskReviewQueue(root, rows).map { it.taskReview }
+        )
+        assertEquals(
+            "builtin.image.sample-review\t1",
+            folderReviewQueue(root, "", listOf(file("", "a.jpg")), rows).single().taskReview
         )
     }
 

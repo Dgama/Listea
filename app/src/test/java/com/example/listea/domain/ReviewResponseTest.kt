@@ -1,114 +1,163 @@
 package com.example.listea.domain
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
- * The form a submitted response is stored in.
+ * The two grammars one stored response column holds.
  *
- * Worth pinning character for character, for the same reason the webhook body is: it is written to
- * a column now and read by a future release that will not have this code to consult. A golden
- * expectation makes a change to it something somebody wrote down deliberately rather than
- * something that happened.
- *
- * The other half is what the format deliberately is *not*. §8 freezes the wire format and §5 puts
- * the stored snapshot on the domain side of the boundary; if the two ever became each other, a
- * settings change would rewrite stored history.
- *
- * **v0.5.4 changed the field names, and the golden strings below are the record of it.**
- * `favorite=…;actions=…` became one `selections=…`, because `★` is a button with the id `favorite`
- * and a snapshot holding two fields about one button is a snapshot that can contradict itself. What
- * the format is *for* is unchanged, which is why the other tests here only needed their field name
- * moved: a response still carries ids rather than wire values, still canonicalises, and still says
- * `selections=` rather than nothing when the set is empty.
+ * The legacy form is pinned unchanged: every response written before v0.8.1 is this shape, and a
+ * reader that moved with a new writer would make old judgments unreadable for no reason. The primary
+ * form is pinned strictly for the opposite reason — it records what somebody decided, so a line this
+ * build cannot read makes the whole response unreadable rather than being dropped.
  */
 class ReviewResponseTest {
 
-    private fun response(
-        completed: Boolean = false,
-        selections: Set<String> = emptySet()
-    ) = ReviewResponse.MediaReview(completed, selections)
+    private fun parse(text: String) = ReviewResponse.parse(text)
+
+    // --- the legacy grammar, exactly as it was ------------------------------------------------
 
     @Test
-    fun `a response is exactly this text`() {
+    fun `a media review encodes as it always did`() {
         assertEquals(
-            "completed=true;selections=custom1",
-            response(completed = true, selections = setOf("custom1")).encode()
+            "completed=true;selections=a,b",
+            ReviewResponse.MediaReview(true, setOf("b", "a")).encode()
+        )
+        // Blank ids are dropped and the set is sorted, so the same judgment is the same bytes.
+        assertEquals(
+            "completed=false;selections=",
+            ReviewResponse.MediaReview(false, setOf("")).encode()
         )
     }
 
     @Test
-    fun `the same response always writes the same bytes`() {
-        val tappedOneWay = response(selections = setOf("custom2", "custom1"))
-        val tappedTheOther = response(selections = setOf("custom1", "custom2"))
-
-        // Storage that varies with the order somebody happened to tap things looks changed when
-        // nothing has, and every reader of the column then has to normalise before comparing.
-        assertEquals(tappedOneWay.encode(), tappedTheOther.encode())
-        assertEquals("completed=false;selections=custom1,custom2", tappedOneWay.encode())
-    }
-
-    @Test
-    fun `a response carries button ids, not what settings call them on the wire`() {
-        val encoded = response(selections = setOf("custom1")).encode()
-
-        // "custom1" is the id the Task is marked with, and it is permanent. "cust1" is what the
-        // built-in template currently sends that button as — configuration, renameable at any time,
-        // and what the webhook body is assembled from. A stored response that mentioned it would
-        // mean renaming a button rewrote what past reviews said.
-        assertTrue(encoded.contains("custom1"))
-        assertFalse(encoded.contains("cust1"))
-    }
-
-    @Test
-    fun `the star is one id in the set rather than a field beside it`() {
-        // The change of the release, asserted where its consequences are visible: a response marked
-        // with `★` and a response marked with a tag differ in *which ids* they hold, not in which of
-        // two fields is set. Until v0.5.4 the two could disagree about `★`, and every reader had to
-        // pick a field to believe.
+    fun `a media review decodes as it always did`() {
         assertEquals(
-            "completed=false;selections=favorite",
-            response(selections = setOf(Templates.FAVOURITE_BUTTON_ID)).encode()
-        )
-        assertEquals(
-            "completed=false;selections=custom1",
-            response(selections = setOf("custom1")).encode()
-        )
-        // And both together are one sorted list, which is what makes the format able to say so at
-        // all.
-        assertEquals(
-            "completed=false;selections=custom1,favorite",
-            response(selections = setOf("custom1", Templates.FAVOURITE_BUTTON_ID)).encode()
+            ReviewResponse.MediaReview(true, setOf("a", "b")),
+            parse("completed=true;selections=a,b")
         )
     }
 
     @Test
-    fun `an empty id is not a button`() {
-        // A row written by hand, or a button deleted out from under a marked item, must decode to a
-        // response about one button rather than about a nameless second one.
+    fun `an older mark spelling is read for the half the two agree on`() {
+        // v0.5.4's predecessors wrote `favorite` and `actions`; their meaning is not recoverable as
+        // a selection set, and the reader says so by not claiming to have recovered it.
         assertEquals(
-            "completed=false;selections=custom1",
-            response(selections = setOf("custom1", "")).encode()
+            ReviewResponse.MediaReview(true, emptySet()),
+            parse("completed=true;favorite=true;actions=a,b")
         )
     }
 
     @Test
-    fun `a response with no buttons says so, rather than saying nothing`() {
-        // The field is present and empty, so a reader can tell "marked with nothing" from "this
-        // format does not record markings".
-        assertEquals("completed=false;selections=", response().encode())
+    fun `a legacy response with no completed flag is unreadable`() {
+        assertNull(parse("selections=a"))
+    }
+
+    // --- the primary grammar --------------------------------------------------------------------
+
+    @Test
+    fun `a primary review round-trips, four decimals and all`() {
+        val response = ReviewResponse.PrimaryReview(
+            completed = true,
+            events = listOf(
+                ViewerEvent.ImagePoint(0.4213, 0.8137, "#aabbcc", "2026-07-11/a.jpg")
+            )
+        )
+        val encoded = response.encode()
+
+        assertEquals(
+            listOf(
+                "primary=2",
+                "completed=true",
+                "event=image.point\t0.4213\t0.8137\t#AABBCC\t2026-07-11/a.jpg"
+            ).joinToString("\n"),
+            encoded
+        )
+        // The reader returns the canonical spelling the envelope carries; a lower-case colour is
+        // the same fact written two ways, and only one of them is allowed on the record.
+        assertEquals(
+            ReviewResponse.PrimaryReview(
+                completed = true,
+                events = listOf(
+                    ViewerEvent.ImagePoint(0.4213, 0.8137, "#AABBCC", "2026-07-11/a.jpg")
+                )
+            ),
+            parse(encoded)
+        )
     }
 
     @Test
-    fun `completion and the markings are independent`() {
-        // Completing a Task does not mark it, and marking it does not complete it. Both travel in
-        // every submission, and neither is derived from the other on the way in or out.
-        val done = response(completed = true)
-        val marked = response(selections = setOf("custom1"))
+    fun `a point is written with four fixed decimals`() {
+        val encoded = ReviewResponse.PrimaryReview(
+            completed = false,
+            events = listOf(ViewerEvent.ImagePoint(0.1, 1.0, "#000000"))
+        ).encode()
 
-        assertTrue(done.encode().contains("selections="))
-        assertEquals("completed=false;selections=custom1", marked.encode())
+        assertEquals(
+            "event=image.point\t0.1000\t1.0000\t#000000\t",
+            encoded.split('\n')[2]
+        )
+    }
+
+    @Test
+    fun `a commit with no events is a legal value of the type`() {
+        // The refusal for a definition that promised events lives at the write boundary; the type
+        // itself has to be able to say *I submitted and there was nothing to submit*.
+        val response = ReviewResponse.PrimaryReview(completed = true, events = emptyList())
+        assertEquals(response, parse(response.encode()))
+    }
+
+    @Test
+    fun `a point outside the picture makes the response unreadable`() {
+        assertNull(
+            parse(
+                "primary=2\ncompleted=true\n" +
+                    "event=image.point\t1.5000\t0.5000\t#AABBCC\tpath"
+            )
+        )
+    }
+
+    @Test
+    fun `an unknown event type makes the response unreadable`() {
+        assertNull(
+            parse(
+                "primary=2\ncompleted=true\n" +
+                    "event=choice\t0.5000\t0.5000\t#AABBCC\tpath"
+            )
+        )
+    }
+
+    @Test
+    fun `a malformed colour makes the response unreadable`() {
+        for (color in listOf("#ABC", "#AABBC", "#AABBCG", "AABBCC")) {
+            assertNull(
+                "colour $color",
+                parse(
+                    "primary=2\ncompleted=true\n" +
+                        "event=image.point\t0.5000\t0.5000\t$color\tpath"
+                )
+            )
+        }
+    }
+
+    @Test
+    fun `a later envelope is unreadable rather than read as this one`() {
+        assertNull(parse("primary=3\ncompleted=true"))
+    }
+
+    @Test
+    fun `a duplicate flag makes the response unreadable`() {
+        assertNull(parse("primary=2\ncompleted=true\ncompleted=false"))
+    }
+
+    @Test
+    fun `an unknown line makes the response unreadable`() {
+        assertNull(parse("primary=2\ncompleted=true\nnote=anything"))
+    }
+
+    @Test
+    fun `a missing completed flag makes the response unreadable`() {
+        assertNull(parse("primary=2"))
     }
 }

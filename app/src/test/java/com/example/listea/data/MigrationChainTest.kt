@@ -201,10 +201,14 @@ class MigrationChainTest {
         assertEquals("custom1,favorite", selections(database, "2026-07-11/a.jpg"))
         assertEquals("custom2", selections(database, "2026-07-11/b.jpg"))
         assertEquals("custom1,favorite", selections(database, "c.jpg"))
-        assertEquals(1, int(database, "SELECT COUNT(*) FROM templates"))
+        // The step's own seed, named by id rather than counted against the whole table: v0.8.1
+        // adds two Task Review lineages on this path after it, and neither is V24's answer.
         assertEquals(
-            "builtin.media.asset-control",
-            text(database, "SELECT id FROM templates")
+            1,
+            int(
+                database,
+                "SELECT COUNT(*) FROM templates WHERE id = 'builtin.media.asset-control'"
+            )
         )
 
         database.close()
@@ -257,7 +261,14 @@ class MigrationChainTest {
         // because which of the two v9 rows V13 preferred for the marks is a question this walk is
         // not about; the merge is checked instead, and checked on every row: the set must be the two
         // columns beside it, with `★` folded in and the result sorted.
-        assertEquals(1, int(database, "SELECT COUNT(*) FROM template_versions"))
+        assertEquals(
+            1,
+            int(
+                database,
+                "SELECT COUNT(*) FROM template_versions " +
+                    "WHERE templateId = 'builtin.media.asset-control'"
+            )
+        )
         assertEquals(
             0,
             int(
@@ -489,7 +500,9 @@ class MigrationChainTest {
             ListeaDatabase.MIGRATION_25_26,
             ListeaDatabase.MIGRATION_26_27,
             ListeaDatabase.MIGRATION_27_28,
-        ListeaDatabase.MIGRATION_28_29
+        ListeaDatabase.MIGRATION_28_29,
+        ListeaDatabase.MIGRATION_29_30,
+        ListeaDatabase.MIGRATION_30_31
     )
 
         val CHAIN_FROM_9 = arrayOf(
@@ -512,7 +525,9 @@ class MigrationChainTest {
             ListeaDatabase.MIGRATION_25_26,
             ListeaDatabase.MIGRATION_26_27,
             ListeaDatabase.MIGRATION_27_28,
-        ListeaDatabase.MIGRATION_28_29
+        ListeaDatabase.MIGRATION_28_29,
+        ListeaDatabase.MIGRATION_29_30,
+        ListeaDatabase.MIGRATION_30_31
     )
     }
 }

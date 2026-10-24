@@ -7,6 +7,7 @@ import com.example.listea.TemplateResolver
 import com.example.listea.encodeTemplateAttachments
 import com.example.listea.domain.AssetKind
 import com.example.listea.domain.ButtonType
+import com.example.listea.domain.TEMPLATE_BUTTONS_ACTION_VERSION
 import com.example.listea.domain.TEMPLATE_BUTTONS_COMMENT_VERSION
 import com.example.listea.domain.TEMPLATE_BUTTONS_VERSION
 import com.example.listea.domain.TemplateButton
@@ -194,7 +195,9 @@ class TemplateStoreTest {
 
     @Test
     fun `a version written by a newer build is not written over, name and all`() = runTest {
-        seed(buttonsVersion = TEMPLATE_BUTTONS_COMMENT_VERSION + 1)
+        // One past the payload the newest build can read. `COMMENT_VERSION + 1` used to be that
+        // number; v0.8.1 made it readable, so the claim moves out with the format.
+        seed(buttonsVersion = TEMPLATE_BUTTONS_ACTION_VERSION + 1)
         val before = versions()
 
         store.update(seedId, "Renamed", scope(), listOf(button("custom1", "One", "one")))

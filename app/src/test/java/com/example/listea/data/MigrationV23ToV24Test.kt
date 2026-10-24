@@ -53,16 +53,39 @@ class MigrationV23ToV24Test {
         val database = migrate()
 
         val seed = Templates.AssetControlSeed
-        assertEquals(1, count(database, "SELECT COUNT(*) FROM templates"))
+        // Scoped to this step's seed rather than counting the whole table: the walk ends at the
+        // version the app ships, and v0.8.1 seeds its two Task Reviews on the way.
         assertEquals(
-            seed.ref.templateId.value,
-            text(database, "SELECT id FROM templates")
+            1,
+            count(
+                database,
+                "SELECT COUNT(*) FROM templates WHERE id = '${seed.ref.templateId.value}'"
+            )
         )
-        assertEquals(seed.name, text(database, "SELECT name FROM templates"))
+        assertEquals(
+            seed.name,
+            text(
+                database,
+                "SELECT name FROM templates WHERE id = '${seed.ref.templateId.value}'"
+            )
+        )
 
-        assertEquals(1, count(database, "SELECT COUNT(*) FROM template_versions"))
-        assertEquals(seed.ref.templateId.value, text(database, "SELECT templateId FROM template_versions"))
-        assertEquals(seed.ref.version, count(database, "SELECT version FROM template_versions"))
+        assertEquals(
+            1,
+            count(
+                database,
+                "SELECT COUNT(*) FROM template_versions " +
+                    "WHERE templateId = '${seed.ref.templateId.value}'"
+            )
+        )
+        assertEquals(
+            seed.ref.version,
+            count(
+                database,
+                "SELECT version FROM template_versions " +
+                    "WHERE templateId = '${seed.ref.templateId.value}'"
+            )
+        )
     }
 
     @Test
@@ -74,26 +97,32 @@ class MigrationV23ToV24Test {
         writeFixture()
         val database = migrate()
 
-        assertEquals("kind:image,video", text(database, "SELECT scope FROM template_versions"))
+        // Every read is scoped to this step's seed: the walk continues past v24 to the version the
+        // app ships, and v0.8.1 stores two Task Reviews that are just as much rows in this table.
+        val row = "WHERE templateId = '${Templates.AssetControlSeed.ref.templateId.value}'"
+        assertEquals(
+            "kind:image,video",
+            text(database, "SELECT scope FROM template_versions $row")
+        )
         assertEquals(
             "favorite\t★\tboolean\tfavorite\ncustom1\tC1\ttag\tcust1\ncustom2\tC2\ttag\tcust2",
-            text(database, "SELECT buttons FROM template_versions")
+            text(database, "SELECT buttons FROM template_versions $row")
         )
         assertEquals(
             TEMPLATE_BUTTONS_VERSION,
-            count(database, "SELECT buttonsVersion FROM template_versions")
+            count(database, "SELECT buttonsVersion FROM template_versions $row")
         )
 
         val seed = Templates.AssetControlSeed
         assertEquals(
             seed.scope,
-            decodeTemplateScope(text(database, "SELECT scope FROM template_versions"))
+            decodeTemplateScope(text(database, "SELECT scope FROM template_versions $row"))
         )
         assertEquals(
             seed.buttons,
             decodeTemplateButtons(
-                text(database, "SELECT buttons FROM template_versions"),
-                count(database, "SELECT buttonsVersion FROM template_versions")
+                text(database, "SELECT buttons FROM template_versions $row"),
+                count(database, "SELECT buttonsVersion FROM template_versions $row")
             )
         )
     }
@@ -265,7 +294,9 @@ class MigrationV23ToV24Test {
                 ListeaDatabase.MIGRATION_25_26,
                 ListeaDatabase.MIGRATION_26_27,
                 ListeaDatabase.MIGRATION_27_28,
-            ListeaDatabase.MIGRATION_28_29
+            ListeaDatabase.MIGRATION_28_29,
+            ListeaDatabase.MIGRATION_29_30,
+            ListeaDatabase.MIGRATION_30_31
         )
             .build()
             .also { it.openHelper.writableDatabase }

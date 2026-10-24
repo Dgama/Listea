@@ -6,7 +6,7 @@ import com.example.listea.data.TemplateEntity
 import com.example.listea.data.TemplateVersionEntity
 import com.example.listea.domain.AssetKind
 import com.example.listea.domain.ButtonType
-import com.example.listea.domain.TEMPLATE_BUTTONS_COMMENT_VERSION
+import com.example.listea.domain.TEMPLATE_BUTTONS_ACTION_VERSION
 import com.example.listea.domain.TEMPLATE_BUTTONS_VERSION
 import com.example.listea.domain.TemplateButton
 import com.example.listea.domain.TemplateId
@@ -348,7 +348,7 @@ class TemplateAttachmentTest {
         val resolver = resolver(
             lineage("a", "A") to listOf(
                 version("a", version = 1, buttons = TAGS_A),
-                version("a", version = 2, buttons = TAGS_A, buttonsVersion = TEMPLATE_BUTTONS_COMMENT_VERSION + 1)
+                version("a", version = 2, buttons = TAGS_A, buttonsVersion = TEMPLATE_BUTTONS_ACTION_VERSION + 1)
             )
         )
 
@@ -422,7 +422,7 @@ class TemplateAttachmentTest {
             // Every version unreadable, so the lineage cannot be attached at all — which is how a
             // template whose bar would draw empty stays out of the picker.
             lineage("b", "Beta") to listOf(
-                version("b", version = 1, buttons = TAGS_A, buttonsVersion = TEMPLATE_BUTTONS_COMMENT_VERSION + 1)
+                version("b", version = 1, buttons = TAGS_A, buttonsVersion = TEMPLATE_BUTTONS_ACTION_VERSION + 1)
             ),
             lineage("c", "Charlie") to listOf(version("c", version = 1, buttons = TAGS_A))
         )
@@ -439,7 +439,7 @@ class TemplateAttachmentTest {
         val resolver = resolver(
             lineage("a", "Alpha") to listOf(
                 version("a", version = 1, buttons = TAGS_A),
-                version("a", version = 2, buttons = TAGS_A, buttonsVersion = TEMPLATE_BUTTONS_COMMENT_VERSION + 1)
+                version("a", version = 2, buttons = TAGS_A, buttonsVersion = TEMPLATE_BUTTONS_ACTION_VERSION + 1)
             )
         )
 

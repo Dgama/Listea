@@ -1,7 +1,9 @@
 package com.example.listea
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -16,7 +18,10 @@ import org.junit.Test
  * **The forward slot at the end is the leave gate, not this function's business.** `pageStep`
  * answers null past the last page, and the card then offers the Task-level action if the caller
  * allows one; a blocked Task's forward stays inert on the add-on page for exactly the same reason it
- * does on its last file, which is that a blocked Task's leave gate is closed.
+ * does on its last file, which is that a blocked Task's leave gate is closed. The gate's second
+ * closed case — a template that accepts viewer events with none reported — is
+ * `canLeaveTaskForward`, and closing it at the gesture is what stops the card sliding off-screen
+ * into a refused leave.
  */
 class ReviewPageTest {
 
@@ -72,5 +77,38 @@ class ReviewPageTest {
         assertNull(pageStep(pageCount = 2, index = 2, forward = false))
         assertNull(pageStep(pageCount = 0, index = 0, forward = true))
         assertNull(pageStep(pageCount = 3, index = -1, forward = true))
+    }
+
+    // --- the leave gate, before the card slides ------------------------------------------------
+
+    @Test
+    fun `an ordinary Task may leave forward`() {
+        // The built-in review commits from the swipe itself, so there is nothing to wait for.
+        assertTrue(
+            canLeaveTaskForward(reviewBlocked = false, acceptsEvents = false, hasPendingEvent = false)
+        )
+    }
+
+    @Test
+    fun `a blocked Task may not leave forward, with or without an event`() {
+        assertFalse(
+            canLeaveTaskForward(reviewBlocked = true, acceptsEvents = false, hasPendingEvent = false)
+        )
+        assertFalse(
+            canLeaveTaskForward(reviewBlocked = true, acceptsEvents = true, hasPendingEvent = true)
+        )
+    }
+
+    @Test
+    fun `a template that accepts events needs one before forward leaves`() {
+        // Closing the edge at the gesture is what keeps a refused leave from animating the card
+        // off-screen first: the dispatch refuses it either way, but only this keeps the picture
+        // visible when it does.
+        assertFalse(
+            canLeaveTaskForward(reviewBlocked = false, acceptsEvents = true, hasPendingEvent = false)
+        )
+        assertTrue(
+            canLeaveTaskForward(reviewBlocked = false, acceptsEvents = true, hasPendingEvent = true)
+        )
     }
 }

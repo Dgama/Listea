@@ -301,7 +301,9 @@ class MigrationV24ToV25Test {
                 ListeaDatabase.MIGRATION_25_26,
                 ListeaDatabase.MIGRATION_26_27,
                 ListeaDatabase.MIGRATION_27_28,
-            ListeaDatabase.MIGRATION_28_29
+            ListeaDatabase.MIGRATION_28_29,
+            ListeaDatabase.MIGRATION_29_30,
+            ListeaDatabase.MIGRATION_30_31
         )
             .build()
             .also { it.openHelper.writableDatabase }
@@ -387,7 +389,7 @@ class MigrationV24ToV25Test {
         const val V24 = 24
 
         /** The version the entities declare, which this step plus every later one reaches. */
-        const val CURRENT = 29
+        const val CURRENT = 31
 
         /** The table `the step takes a v24 database to the current version` writes its column into. */
         const val GONE = "sources"

@@ -47,7 +47,10 @@ internal val TablesFromLaterSteps = listOf(
     "addons",
     "addon_versions",
     "task_review_answers",
-    "index_task_review_answers_taskId"
+    "index_task_review_answers_taskId",
+    // The v0.8.1 event rows: a submission's events, split out for the Info sheet.
+    "review_event_answers",
+    "index_review_event_answers_assetId"
 )
 
 /**
@@ -78,20 +81,36 @@ internal val ColumnsFromLaterSteps = mapOf(
     // The 24 → 25 step's export choice, the 26 → 27 step's Todo address, and the v0.7.1
     // attachment. A Set because more than one release appends to `sources` and `webhook_history`,
     // and the fixture has to subtract all of them to come back to the version under test.
-    "sources" to setOf("exportKind", "webhookUrl", "webhookFromDefault", "addOn"),
+    "sources" to setOf("exportKind", "webhookUrl", "webhookFromDefault", "addOn", "taskReview"),
     "lists" to setOf("exportKind"),
     "webhook_history" to setOf("kind", "webhookUrl", "roundId"),
     // The v0.6.1 step's wire identity, appended to the two rows that leave the device.
     "tasks" to setOf("publicId"),
     "assets" to setOf("publicId"),
-    // The v0.7.1 attachment, appended to the Todo's per-Task stamp.
-    "task_imports" to setOf("addOn")
+    // The v0.7.1 attachment and the v0.8.1 Task Review stamp, both appended to `sources` and to
+    // the Todo's per-Task copy.
+    "task_imports" to setOf("addOn", "taskReview")
 )
 
 /** One statement, against a database being built or wound back. */
 internal fun ListeaDatabase.exec(sql: String) {
     openHelper.writableDatabase.execSQL(sql)
 }
+
+/**
+ * Whether the schema at this point in a wind-back still has [table].
+ *
+ * The subtraction chain runs newest first, so a step that rebuilds or clears a table can be reached
+ * by a fixture older than the table itself — [subtractV24Additions] has already dropped the template
+ * tables by the time it walks down to [subtractV30Additions]. A v22 fixture never had them, and a
+ * v23 fixture has had them taken off, so a bare `DELETE` is a statement against a table that is not
+ * there.
+ */
+internal fun ListeaDatabase.hasTable(table: String): Boolean =
+    openHelper.writableDatabase.query(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        arrayOf(table)
+    ).use { it.moveToFirst() }
 
 /**
  * Takes everything `MIGRATION_23_24` adds back off, leaving a database in v23's shape.
@@ -423,6 +442,134 @@ internal fun ListeaDatabase.subtractV28Additions() {
 }
 
 /**
+ * Takes everything `MIGRATION_30_31` adds back off, leaving a database in v30's shape.
+ *
+ * One table, dropped outright because that step creates it. Its index goes with the table, and no
+ * other object moves: the step writes no existing column and rewrites no response. Every fixture
+ * older than v31 reaches this through [subtractV30Additions], which is why `IF EXISTS` is not
+ * decoration — a v22 fixture has never had the table at all.
+ */
+internal fun ListeaDatabase.subtractV31Additions() {
+    exec("DROP TABLE IF EXISTS review_event_answers")
+}
+
+/**
+ * Takes everything `MIGRATION_29_30` adds back off, leaving a database in v29's shape.
+ *
+ * Five columns and two seeded lineages come off. The columns are append-only `ALTER`s in the
+ * migration, so the three tables are rebuilt to remove them — [subtractV24Additions]'s rule, and
+ * here for the same reason: minSdk 24 has no `DROP COLUMN`. The DDL is transcribed from `29.json`;
+ * the pragmas are needed because `template_versions` and `task_imports` hold foreign keys that a
+ * rename would otherwise rewrite to point at the temporary names.
+ *
+ * **The two lineages are the step's own seed, not a fixture's rows.** No test writes a template
+ * called `builtin.media.rapid-review` or `builtin.image.sample-review`, and in v29 neither existed
+ * as a row at all — the rapid review was code-defined and the sample review had not been thought
+ * of. Leaving them behind would make the fixture a v29 that already stored what this step stored.
+ */
+internal fun ListeaDatabase.subtractV30Additions() {
+    // The step above this one, first: a fixture has to come back to v29, and a database left at
+    // v31 would still hold the event table.
+    subtractV31Additions()
+
+    // A fixture older than v24 is walked here after [subtractV24Additions] dropped the template
+    // tables, so the seed and the rebuild below only run when there is something to take apart.
+    val templates = hasTable("template_versions") && hasTable("templates")
+
+    // The seed first, so the rebuild below carries only the rows a v29 database could hold.
+    if (templates) {
+        exec(
+            "DELETE FROM template_versions WHERE templateId IN " +
+                "('builtin.media.rapid-review', 'builtin.image.sample-review')"
+        )
+        exec(
+            "DELETE FROM templates WHERE id IN " +
+                "('builtin.media.rapid-review', 'builtin.image.sample-review')"
+        )
+    }
+
+    exec("PRAGMA foreign_keys = OFF")
+    exec("PRAGMA legacy_alter_table = ON")
+
+    // --- template_versions: no kind, definition, definitionVersion ------------------------------
+    if (templates) {
+        exec(
+            "CREATE TABLE template_versions_v29 (`templateId` TEXT NOT NULL, " +
+                "`version` INTEGER NOT NULL, `scope` TEXT NOT NULL, `buttons` TEXT NOT NULL, " +
+                "`buttonsVersion` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, " +
+                "PRIMARY KEY(`templateId`, `version`), " +
+                "FOREIGN KEY(`templateId`) REFERENCES `templates`(`id`) " +
+                "ON UPDATE NO ACTION ON DELETE CASCADE )"
+        )
+        exec(
+            "INSERT INTO template_versions_v29 (templateId, version, scope, buttons, " +
+                "buttonsVersion, createdAt) " +
+                "SELECT templateId, version, scope, buttons, buttonsVersion, createdAt " +
+                "FROM template_versions"
+        )
+        exec("DROP TABLE template_versions")
+        exec("ALTER TABLE template_versions_v29 RENAME TO template_versions")
+    }
+
+    // --- sources: no taskReview -----------------------------------------------------------------
+    exec(
+        "CREATE TABLE sources_v29 (`id` TEXT NOT NULL, `rootUri` TEXT NOT NULL, " +
+            "`relativePath` TEXT NOT NULL, `displayName` TEXT NOT NULL, " +
+            "`importerKind` TEXT NOT NULL, `importerVersion` INTEGER NOT NULL, " +
+            "`createdAt` INTEGER NOT NULL, `keepTree` INTEGER NOT NULL, " +
+            "`keepStateOnDelete` INTEGER NOT NULL, `contentPolicy` TEXT NOT NULL, " +
+            "`followUpstream` INTEGER NOT NULL, `assetControls` TEXT NOT NULL, " +
+            "`addOn` TEXT NOT NULL, `exportKind` TEXT NOT NULL, " +
+            "`webhookUrl` TEXT NOT NULL DEFAULT '', " +
+            "`webhookFromDefault` INTEGER NOT NULL DEFAULT 0, `lastImportAt` INTEGER, " +
+            "`lastImportStatus` TEXT, PRIMARY KEY(`id`))"
+    )
+    exec(
+        "INSERT INTO sources_v29 (id, rootUri, relativePath, displayName, importerKind, " +
+            "importerVersion, createdAt, keepTree, keepStateOnDelete, contentPolicy, " +
+            "followUpstream, assetControls, addOn, exportKind, webhookUrl, webhookFromDefault, " +
+            "lastImportAt, lastImportStatus) " +
+            "SELECT id, rootUri, relativePath, displayName, importerKind, importerVersion, " +
+            "createdAt, keepTree, keepStateOnDelete, contentPolicy, followUpstream, " +
+            "assetControls, addOn, exportKind, webhookUrl, webhookFromDefault, lastImportAt, " +
+            "lastImportStatus FROM sources"
+    )
+    exec("DROP TABLE sources")
+    exec("ALTER TABLE sources_v29 RENAME TO sources")
+    exec(
+        "CREATE INDEX IF NOT EXISTS `index_sources_rootUri_relativePath` " +
+            "ON `sources` (`rootUri`, `relativePath`)"
+    )
+
+    // --- task_imports: no taskReview ------------------------------------------------------------
+    exec(
+        "CREATE TABLE task_imports_v29 (`taskId` TEXT NOT NULL, `sourceId` TEXT NOT NULL, " +
+            "`groupPath` TEXT NOT NULL, `displayName` TEXT NOT NULL, " +
+            "`importedAt` INTEGER NOT NULL, `lastSeenAt` INTEGER NOT NULL, " +
+            "`assetControls` TEXT NOT NULL, `addOn` TEXT NOT NULL, PRIMARY KEY(`taskId`), " +
+            "FOREIGN KEY(`taskId`) REFERENCES `tasks`(`id`) " +
+            "ON UPDATE NO ACTION ON DELETE CASCADE , " +
+            "FOREIGN KEY(`sourceId`) REFERENCES `sources`(`id`) " +
+            "ON UPDATE NO ACTION ON DELETE NO ACTION )"
+    )
+    exec(
+        "INSERT INTO task_imports_v29 (taskId, sourceId, groupPath, displayName, importedAt, " +
+            "lastSeenAt, assetControls, addOn) " +
+            "SELECT taskId, sourceId, groupPath, displayName, importedAt, lastSeenAt, " +
+            "assetControls, addOn FROM task_imports"
+    )
+    exec("DROP TABLE task_imports")
+    exec("ALTER TABLE task_imports_v29 RENAME TO task_imports")
+    exec(
+        "CREATE INDEX IF NOT EXISTS `index_task_imports_sourceId_groupPath` " +
+            "ON `task_imports` (`sourceId`, `groupPath`)"
+    )
+
+    exec("PRAGMA legacy_alter_table = OFF")
+    exec("PRAGMA foreign_keys = ON")
+}
+
+/**
  * Takes everything `MIGRATION_28_29` adds back off, leaving a database in v28's shape.
  *
  * Three tables drop outright, because that step creates them. The two columns are `ALTER`s, so
@@ -433,6 +580,10 @@ internal fun ListeaDatabase.subtractV28Additions() {
  * to point at the temporary name.
  */
 internal fun ListeaDatabase.subtractV29Additions() {
+    // The step above this one, first: a fixture has to come back to v28, and a database left at
+    // v30 would still hold kind/definition columns and the seeded Task Reviews.
+    subtractV30Additions()
+
     exec("DROP TABLE IF EXISTS task_review_answers")
     exec("DROP TABLE IF EXISTS addon_versions")
     exec("DROP TABLE IF EXISTS addons")
