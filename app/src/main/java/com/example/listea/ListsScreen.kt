@@ -193,7 +193,7 @@ private fun ListsIndex(
         AlertDialog(
             onDismissRequest = { deleting = null },
             title = { Text("Delete list") },
-            text = { Text("Delete \"${target.title}\" and its ${target.totalItems} items?") },
+            text = { Text("Delete \"${target.title}\" and its ${target.totalItems} Tasks?") },
             confirmButton = {
                 TextButton(onClick = { viewModel.deleteList(target.id); deleting = null }) {
                     Text("Delete")
@@ -433,6 +433,6 @@ internal fun dissolutionNote(count: Int, at: Long?, reason: DissolutionReason): 
         DissolutionReason.Dissolved -> "when a Todo was deleted"
         DissolutionReason.Dropped -> "when their content moved"
     }
-    return countLabel(count, "item") + " removed " + cause +
+    return countLabel(count, "Task") + " removed " + cause +
         (at?.let { " · " + formatTimestamp(it) } ?: "")
 }

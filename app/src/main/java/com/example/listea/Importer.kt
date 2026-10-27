@@ -69,6 +69,15 @@ data class ImportOptions(
     val contentPolicy: ContentPolicy = ContentPolicy.Default,
 
     /**
+     * How a Package's Prompts become Tasks in this run.
+     *
+     * Asked in the dialog only when the Package declares Sections; stored on the Todo so a refresh
+     * repeats the taker's rule rather than reverting it. A v1 Package has no Sections, and the
+     * choice behaves as [CompositionChoice.PROMPT].
+     */
+    val composition: CompositionChoice = CompositionChoice.Default,
+
+    /**
      * The templates the dialog attached, in the order the user attached them.
      *
      * An instruction *for this run* rather than a record of one, exactly as [contentPolicy] is —
@@ -241,22 +250,116 @@ data class PlannedAsset(
     val sortOrder: Int
 )
 
-/** One Task an importer would produce: what it grouped, what it called it, and its Assets. */
+/**
+ * Where one part of a planned Task came from.
+ *
+ * [PACKAGE] is a declared Prompt; [FILE] and [FOLDER] are the two local grouping rules, which each
+ * synthesize exactly one part because a folder tells Listea nothing about the judgments inside it.
+ * [LEGACY] is a Task migrated from schema 32 with no Package link. [SYNTHESIZED] is reserved for a
+ * host that assembles a part from material without a Prompt — no importer writes it yet.
+ */
+enum class PartOrigin(val key: String) {
+    PACKAGE("package"),
+    FILE("file"),
+    FOLDER("folder"),
+    LEGACY("legacy"),
+    SYNTHESIZED("synthesized");
+
+    companion object {
+        fun fromKey(key: String?): PartOrigin? = entries.firstOrNull { it.key == key }
+    }
+}
+
+/**
+ * One Task an importer would produce: what it grouped, what it called it, and the parts it holds.
+ *
+ * [compositionKey] is the taker's grouping rule that produced this Task — `prompt:<key>` or
+ * `section:<key>` — or null for a local Task, which has no composition concept. It is provenance,
+ * not a Task id: the same rule over two Todos still produces two independent Tasks.
+ */
 data class PlannedTask(
     val groupPath: String,
     val displayName: String,
-    val assets: List<PlannedAsset>,
+    val parts: List<PlannedPart>,
+    val compositionKey: String? = null
+) {
+    init {
+        require(parts.isNotEmpty()) { "A planned Task must hold at least one part." }
+    }
+}
+
+/**
+ * Every file the Task would present, across its parts, in part then attachment order.
+ *
+ * The whole-Task view is what the write path and reconciliation already speak: a Task's Asset set
+ * is the union of its parts'. Reading it through this function keeps the part boundary visible at
+ * the call site rather than hiding it in a field.
+ */
+fun PlannedTask.allAssets(): List<PlannedAsset> = parts.flatMap { it.assets }
+
+/**
+ * The decision unit one Task would be written with.
+ *
+ * A Package Prompt becomes one part with its payload, Assets and Resources. The local planners
+ * synthesize one part with no payload (`partKey = local:0`); the Prompt stays null and the files
+ * are Assets of that single part. A part is never empty: it needs a payload or at least one Asset,
+ * because a part with nothing to present is a decision nobody can make.
+ */
+data class PlannedPart(
+    val partKey: String,
+    val position: Int,
+    val origin: PartOrigin,
 
     /**
-     * The Prompt this Task answers, when it came from a Package; null for a media Task.
+     * The Prompt this part instantiates, when it came from a Package; null for a degenerate part.
      *
-     * The payload travels with the Task rather than in a second list because the two are one
-     * output: a Package Prompt that produced no Task is a Prompt nothing takes on, and a Task
-     * written without its payload would be a Task that can never be reviewed. It is also what lets
-     * the existing run loop mint package Tasks without a parallel writing path.
+     * The payload travels with the part rather than in a second list because the two are one
+     * output: a Package Prompt that produced no part is a Prompt nothing takes on, and a part
+     * written without its payload would be a decision that can never be reviewed.
      */
-    val prompt: PlannedTaskPrompt? = null
+    val prompt: PlannedTaskPrompt? = null,
+    val assets: List<PlannedAsset> = emptyList(),
+    val resources: List<PlannedPromptResource> = emptyList(),
+    val required: Boolean = true
+) {
+    init {
+        require(prompt != null || assets.isNotEmpty()) {
+            "A part needs a Prompt payload or at least one Asset."
+        }
+    }
+}
+
+/**
+ * One composition the plan would record: the taker's grouping rule over a Package.
+ *
+ * [sourceId] is filled by the host, not by the pure planner; the Package protocol never names a
+ * Todo. The row is provenance for reconciliation, not an owner of the Task.
+ */
+data class PlannedComposition(
+    val sourceId: String,
+    val packageKey: String,
+    val compositionKey: String,
+    val present: Boolean = true
 )
+
+/**
+ * How a Package's Prompts are grouped into Tasks.
+ *
+ * The default is one Task per Prompt, which is what every v1 Package meant and what a v2 taker gets
+ * when they ignore Sections. [SECTION] groups tagged Prompts by their Section, in manifest order;
+ * an untagged Prompt stays its own Task under `prompt:<key>`.
+ */
+enum class CompositionChoice(val key: String) {
+    PROMPT("prompt"),
+    SECTION("section");
+
+    companion object {
+        val Default = PROMPT
+
+        fun fromKey(key: String?): CompositionChoice =
+            entries.firstOrNull { it.key == key } ?: Default
+    }
+}
 
 /**
  * The stored half of one Package Prompt: what a Viewer needs to draw it and what a submission
@@ -434,9 +537,14 @@ fun planFolderAsTask(importRoot: String, snapshot: FolderSnapshot): ImportPlan {
             tasks += PlannedTask(
                 groupPath = childRelativePath(importRoot, folder),
                 displayName = folder,
-                assets = supported.mapIndexed { index, file ->
-                    plannedAsset(importRoot, file, index)
-                }
+                parts = listOf(
+                    degeneratePart(
+                        origin = PartOrigin.FOLDER,
+                        assets = supported.mapIndexed { index, file ->
+                            plannedAsset(importRoot, file, index)
+                        }
+                    )
+                )
             )
         }
     }
@@ -462,8 +570,28 @@ fun folderAsTaskSupported(name: String): Boolean = assetViewerAvailable(name)
 private fun fileTask(importRoot: String, file: ScannedFile): PlannedTask = PlannedTask(
     groupPath = childRelativePath(importRoot, file.relativePath),
     displayName = file.name,
-    assets = listOf(plannedAsset(importRoot, file, 0))
+    parts = listOf(
+        degeneratePart(
+            origin = PartOrigin.FILE,
+            assets = listOf(plannedAsset(importRoot, file, 0))
+        )
+    )
 )
+
+/**
+ * The one part a local importer synthesizes for a Task.
+ *
+ * A folder carries files, not judgments, so the local rules write exactly one decision over
+ * whatever they grouped. The key is stable within the Task and deliberately not a Prompt key: the
+ * importer does not fake a Prompt it never read.
+ */
+internal fun degeneratePart(origin: PartOrigin, assets: List<PlannedAsset>): PlannedPart =
+    PlannedPart(
+        partKey = "local:0",
+        position = 0,
+        origin = origin,
+        assets = assets
+    )
 
 private fun plannedAsset(importRoot: String, file: ScannedFile, sortOrder: Int): PlannedAsset =
     PlannedAsset(

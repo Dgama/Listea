@@ -662,7 +662,7 @@ private fun LosingListGroups(lists: List<ListLosingItems>) {
                 )
                 Spacer(Modifier.width(ListeaDimens.CompactGap))
                 Text(
-                    countLabel(list.itemCount, "item"),
+                    countLabel(list.itemCount, "Task"),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -688,7 +688,7 @@ internal fun deleteTodoOutcome(report: DissolutionReport): String = buildString 
         append(" ")
         append(
             report.lists.joinToString(", ") {
-                "\"" + it.title + "\" lost " + countLabel(it.itemCount, "item")
+                "\"" + it.title + "\" lost " + countLabel(it.itemCount, "Task")
             }
         )
         append(".")

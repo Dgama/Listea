@@ -58,6 +58,20 @@ sealed interface ReviewResponse {
         val events: List<ViewerEvent>
     ) : ReviewResponse
 
+    /**
+     * A structured answer: the visible fields of one `form` Prompt, as one TaskPart's judgment.
+     *
+     * Fields are not viewer events — there is no point or option a card reported, only the record a
+     * questionnaire produced — so this is its own response shape rather than a [PrimaryReview]
+     * carrying invented events. [fields] holds only the fields that were visible and answered at
+     * commit time; a hidden field is not part of the answer and changing the branch does not leave
+     * one behind.
+     */
+    data class StructuredReview(
+        val completed: Boolean,
+        val fields: List<FieldAnswer>
+    ) : ReviewResponse
+
     companion object
 }
 
@@ -102,15 +116,42 @@ fun ReviewResponse.encode(): String = when (this) {
         add("completed=$completed")
         for (event in events) add("event=${event.encodeLine()}")
     }.joinToString("\n")
+
+    is ReviewResponse.StructuredReview -> listOf(
+        "$STRUCTURED_TAG=$STRUCTURED_RESPONSE_VERSION",
+        "completed=$completed",
+        // One canonical JSON array, ordered by field key. The answer is free text as well as ids,
+        // so the event grammar's tab-separated line cannot hold it: a text field may contain tabs,
+        // newlines and anything else a person typed.
+        "$ANSWERS_TAG=${encodeFieldAnswers(fields)}"
+    ).joinToString("\n")
 }
 
 /** The envelope version [ReviewResponse.PrimaryReview] writes. */
 const val PRIMARY_RESPONSE_VERSION = 2
 
+/** The envelope version [ReviewResponse.StructuredReview] writes. */
+const val STRUCTURED_RESPONSE_VERSION = 1
+
 private const val PRIMARY_TAG = "primary"
+private const val STRUCTURED_TAG = "structured"
 private const val COMPLETED_TAG = "completed"
 private const val SELECTIONS_TAG = "selections"
 private const val EVENT_TAG = "event"
+private const val ANSWERS_TAG = "answers"
+
+private fun encodeFieldAnswers(fields: List<FieldAnswer>): String =
+    JsonValue.Arr(
+        fields.sortedBy { it.fieldKey }.map { answer ->
+            JsonValue.Obj(
+                listOf(
+                    "key" to JsonValue.Str(answer.fieldKey),
+                    "type" to JsonValue.Str(answer.type),
+                    "value" to JsonValue.Str(answer.value)
+                )
+            )
+        }
+    ).canonical()
 
 /**
  * A stored response read back, or null when this build cannot read it.
@@ -129,7 +170,57 @@ private const val EVENT_TAG = "event"
  */
 fun ReviewResponse.Companion.parse(text: String): ReviewResponse? {
     val first = text.substringBefore('\n')
-    return if (first.startsWith("$PRIMARY_TAG=")) parsePrimary(text) else parseLegacy(text)
+    return when {
+        first.startsWith("$PRIMARY_TAG=") -> parsePrimary(text)
+        first.startsWith("$STRUCTURED_TAG=") -> parseStructured(text)
+        else -> parseLegacy(text)
+    }
+}
+
+private fun parseStructured(text: String): ReviewResponse.StructuredReview? {
+    val lines = text.split('\n')
+    if (lines.firstOrNull() != "$STRUCTURED_TAG=$STRUCTURED_RESPONSE_VERSION") return null
+
+    var completed: Boolean? = null
+    var answers: List<FieldAnswer>? = null
+    for (line in lines.drop(1)) {
+        if (line.isBlank()) continue
+        val index = line.indexOf('=')
+        if (index <= 0) return null
+        when (line.substring(0, index)) {
+            COMPLETED_TAG -> {
+                if (completed != null) return null
+                completed = when (line.substring(index + 1)) {
+                    "true" -> true
+                    "false" -> false
+                    else -> return null
+                }
+            }
+
+            ANSWERS_TAG -> {
+                if (answers != null) return null
+                answers = parseFieldAnswers(line.substring(index + 1)) ?: return null
+            }
+
+            else -> return null
+        }
+    }
+    return completed?.let { ReviewResponse.StructuredReview(it, answers ?: emptyList()) }
+}
+
+private fun parseFieldAnswers(text: String): List<FieldAnswer>? {
+    val array = runCatching { Json.parse(text) }.getOrNull()?.asArrOrNull() ?: return null
+    val seen = mutableSetOf<String>()
+    val fields = array.items.map { value ->
+        val obj = value.asObjOrNull() ?: return null
+        if (obj.keys != setOf("key", "type", "value")) return null
+        val key = obj["key"]?.asStringOrNull()?.takeIf { PackageProtocol.isKey(it) } ?: return null
+        if (!seen.add(key)) return null
+        val type = obj["type"]?.asStringOrNull()?.takeIf { it.isNotEmpty() } ?: return null
+        val answer = obj["value"]?.asStringOrNull() ?: return null
+        FieldAnswer(fieldKey = key, type = type, value = answer)
+    }
+    return fields
 }
 
 private fun parsePrimary(text: String): ReviewResponse.PrimaryReview? {
@@ -213,6 +304,22 @@ private fun parseEvent(value: String): ViewerEvent? {
 val ReviewResponse.viewerEvents: List<ViewerEvent> get() = when (this) {
     is ReviewResponse.MediaReview -> emptyList()
     is ReviewResponse.PrimaryReview -> events
+    // A structured answer has fields, not events. Its rows are projected separately, with the
+    // field identity the event table's `fieldKey` column exists for.
+    is ReviewResponse.StructuredReview -> emptyList()
+}
+
+/**
+ * The structured fields a response carries, or nothing.
+ *
+ * The projection boundary's input: [viewerEvents] names what goes to `review_event_answers` as
+ * events, this names what goes there as field rows. Keeping the two accessors exhaustive means a
+ * response shape that arrives without saying which family it belongs to stops the build.
+ */
+val ReviewResponse.structuredFields: List<FieldAnswer> get() = when (this) {
+    is ReviewResponse.MediaReview -> emptyList()
+    is ReviewResponse.PrimaryReview -> emptyList()
+    is ReviewResponse.StructuredReview -> fields
 }
 
 /**
@@ -232,4 +339,5 @@ val ReviewResponse.viewerEvents: List<ViewerEvent> get() = when (this) {
 val ReviewResponse.completesTask: Boolean get() = when (this) {
     is ReviewResponse.MediaReview -> completed
     is ReviewResponse.PrimaryReview -> completed
+    is ReviewResponse.StructuredReview -> completed
 }

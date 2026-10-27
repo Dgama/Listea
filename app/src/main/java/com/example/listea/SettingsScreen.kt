@@ -632,7 +632,7 @@ private fun SettingsReviewPage(
             // what has already been decided.
             HelperText(
                 "Off takes Quick Review off the Todo tab, and stops the Upstreams browser " +
-                    "showing which files are already checked. Lists keep their items, " +
+                    "showing which files are already checked. Lists keep their Tasks, " +
                     "completion and actions."
             )
         }
@@ -676,19 +676,19 @@ private fun SettingsMediaPage(
             )
             HelperText(
                 "Resuming applies to full Review only — Quick Review always starts at the first " +
-                    "unchecked item. With auto-checking off, a List says \"Not checked\" until " +
+                    "unchecked Task. With auto-checking off, a List says \"Not checked\" until " +
                     "you use Update from folder."
             )
 
             SwitchRow(
-                label = "Review unchecked items only",
+                label = "Review unchecked Tasks only",
                 icon = Icons.Outlined.CheckCircle,
                 checked = settings.reviewUncheckedOnly,
                 onCheckedChange = { viewModel.setReviewUncheckedOnly(it) }
             )
             HelperText(
-                "Review and Quick Review queue only the items that were unchecked when you " +
-                    "opened them. The queue is fixed for that round, so an item you check stays " +
+                "Review and Quick Review queue only the Tasks that were unchecked when you " +
+                    "opened them. The queue is fixed for that round, so a Task you check stays " +
                     "in front of you until you leave."
             )
         }
@@ -828,11 +828,11 @@ private fun SettingsFilePage(
             )
             HelperText(
                 "On, one filter and one sort order are shared by every folder and every list: " +
-                    "set them once from a folder's Files header or a list's Items header and " +
+                    "set them once from a folder's Files header or a list's Tasks header and " +
                     "everywhere else follows. Off, each folder and each list keeps its own."
             )
             HelperText(
-                "Filtering and sorting only change what is shown, and which items a review then " +
+                "Filtering and sorting only change what is shown, and which Tasks a review then " +
                     "walks. Progress, completion and webhooks always count the whole folder or " +
                     "the whole list."
             )
@@ -856,10 +856,10 @@ private fun SettingsFilePage(
                     "deleted until you confirm."
             )
             HelperText(
-                "The offer follows the webhook, not the review. \"Review unchecked items only\" " +
-                    "decides what the round walked and \"Send checked items only\" decides what " +
+                "The offer follows the webhook, not the review. \"Review unchecked Tasks only\" " +
+                    "decides what the round walked and \"Export checked Tasks only\" decides what " +
                     "the payload carried — both have already had their say by the time you are " +
-                    "asked, and what is offered is exactly the checked items in the payload " +
+                    "asked, and what is offered is exactly the checked Tasks in the payload " +
                     "that went out. Nothing else under the root is touched."
             )
             HelperText(
@@ -948,7 +948,7 @@ private fun SettingsFilePage(
                 "Deletes every checked file in the current root folder from the device itself, " +
                     "permanently — however and whenever it was checked, which is what makes it " +
                     "wider than the offer above. You are shown the full list first and nothing " +
-                    "happens until you confirm. The items stay in their Lists, marked as " +
+                    "happens until you confirm. The Tasks stay in their Lists, marked as " +
                     "missing, so what you decided about them is kept."
             )
             HelperText(
@@ -1144,7 +1144,7 @@ private fun DeleteCheckedFilesDialog(
                 DeleteCheckedRequest.Scanning -> Text("Looking for checked files…")
 
                 DeleteCheckedRequest.NothingChecked -> Text(
-                    "No checked item in this folder still has a file behind it, so there is " +
+                    "No checked Task in this folder still has a file behind it, so there is " +
                         "nothing to delete."
                 )
 
@@ -1157,7 +1157,7 @@ private fun DeleteCheckedFilesDialog(
                     )
                     Spacer(Modifier.height(ListeaDimens.RowGap))
                     Text(
-                        "Nothing is deleted by granting this, and your Lists, items and settings " +
+                        "Nothing is deleted by granting this, and your Lists, Tasks and settings " +
                             "are not touched. You are brought straight back here.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1178,7 +1178,7 @@ private fun DeleteCheckedFilesDialog(
                     if (pending.deleted > 0) {
                         Spacer(Modifier.height(ListeaDimens.RowGap))
                         Text(
-                            "Their items are kept and marked as missing, so what you decided " +
+                            "Their Tasks are kept and marked as missing, so what you decided " +
                                 "about them is not lost.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant

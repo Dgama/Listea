@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -21,6 +22,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.runtime.Composable
@@ -34,6 +36,7 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -60,7 +63,12 @@ import com.example.listea.domain.ReviewResponse
 import com.example.listea.domain.encodeValue
 import com.example.listea.domain.parse
 import com.example.listea.domain.parseEventValue
+import com.example.listea.domain.FormFieldType
+import com.example.listea.domain.FormPrompt
+import com.example.listea.domain.PromptContent
+import com.example.listea.domain.answeredFields
 import com.example.listea.domain.decodePrompt
+import com.example.listea.domain.isComplete
 import com.example.listea.domain.StoredTemplateVersion
 import com.example.listea.domain.TASK_REVIEW_COMPLETE_CONTROL
 import com.example.listea.domain.TaskAction
@@ -70,7 +78,9 @@ import com.example.listea.domain.TemplateVersionRef
 import com.example.listea.domain.Templates
 import com.example.listea.domain.ViewerEvent
 import com.example.listea.domain.ViewerEventType
+import com.example.listea.domain.Viewers
 import com.example.listea.domain.CommitPolicy
+import com.example.listea.domain.CompletionPolicy
 import com.example.listea.domain.markKind
 import java.util.Locale
 import kotlinx.coroutines.flow.flowOf
@@ -255,10 +265,10 @@ fun ReviewScreen(
             val matched = items.count { matchesFilter(reviewFacts(it), arrangement, now) }
             Text(
                 when {
-                    items.isEmpty() -> "This list has no items to review."
-                    matched == 0 -> "No items match this list's filter."
-                    arrangement.isFilterDefault -> "Every item in this list is already checked."
-                    else -> "Every item this list's filter keeps is already checked."
+                    items.isEmpty() -> "This list has no Tasks to review."
+                    matched == 0 -> "No Tasks match this list's filter."
+                    arrangement.isFilterDefault -> "Every Task in this list is already checked."
+                    else -> "Every Task this list's filter keeps is already checked."
                 }
             )
         }
@@ -643,6 +653,26 @@ fun ReviewSession(
         (reviewDefinition?.commit as? CommitPolicy.Immediate)?.intent ==
             ViewerEventType.CHOICE_SELECT
 
+    // How many of this Task's required parts are unanswered, when its template completes from
+    // them. Zero for every other template — a SinglePart media Task has no questions to count —
+    // and the bar then draws exactly as it did before v0.8.4. Read live, because answering a part
+    // on one page must clear the count the completion control shows on another.
+    val completionPolicy = reviewDefinition?.completion ?: CompletionPolicy.SinglePart
+    val countsParts = completionPolicy == CompletionPolicy.AllRequiredParts ||
+        completionPolicy == CompletionPolicy.AnyPart
+    val answeredParts by remember(item.taskId, countsParts) {
+        if (countsParts) viewModel.observeAnsweredParts(item.taskId)
+        else flowOf(emptySet<String>())
+    }.collectAsStateWithLifecycle(initialValue = emptySet())
+    val pendingRequiredParts = if (countsParts) {
+        item.parts.count { it.present && it.required && it.partKey !in answeredParts }
+    } else {
+        0
+    }
+    // The confirmation a completion control owes when it would finish a Task with open questions:
+    // the count is visible before the tap, and the dialog is the second chance the plan gives it.
+    var confirmPendingCompletion by remember(item.taskId) { mutableStateOf(false) }
+
     // What the viewer has reported and the template will catch. Held encoded so it survives a
     // rotation, exactly as the import dialog's drafts are. Keyed by Task *and* page because a point
     // is an answer about one picture: advancing to another Task or paging to another file of the
@@ -661,12 +691,17 @@ fun ReviewSession(
         pendingChoice?.let { parseEventValue(ViewerEventType.CHOICE_SELECT, it) as? ViewerEvent.Choice }
     }
 
-    // The Content page's own two reads. The body is read by Task id here, not carried on the item;
-    // the Resources are read with the Task's own requiredness.
-    val payloadRow by remember(item.taskId) { viewModel.observeTaskPayload(item.taskId) }
-        .collectAsStateWithLifecycle(initialValue = null)
-    val taskResources by remember(item.taskId) { viewModel.observeTaskResources(item.taskId) }
-        .collectAsStateWithLifecycle(initialValue = emptyList())
+    // The Content page's own two reads, addressed by the Task and the part: a part is where a body
+    // and its Resources live, and a Task may hold several. The first part with a Viewer body is the
+    // one the Task-level gate below speaks for; each Content page reads its own part again when it
+    // is drawn.
+    val payloadPartKey = item.payloadPart?.partKey
+    val payloadRow by remember(item.taskId, payloadPartKey) {
+        payloadPartKey?.let { viewModel.observePartPayload(item.taskId, it) } ?: flowOf(null)
+    }.collectAsStateWithLifecycle(initialValue = null)
+    val taskResources by remember(item.taskId, payloadPartKey) {
+        payloadPartKey?.let { viewModel.observePartResources(item.taskId, it) } ?: flowOf(emptyList())
+    }.collectAsStateWithLifecycle(initialValue = emptyList())
     // The body is decoded through the Viewer table, so this screen never names a Viewer and never
     // parses one. The card resolves its own Resource against the Task's uses; the resources flow
     // is read here for the requiredness gate below.
@@ -685,12 +720,6 @@ fun ReviewSession(
     val recordedPoint = remember(recorded) {
         (recorded as? ReviewResponse.PrimaryReview)
             ?.events?.filterIsInstance<ViewerEvent.ImagePoint>()?.lastOrNull()
-    }
-    // The same for a choice: the latest answer on record, so a revisited Prompt shows what was
-    // said rather than an untouched card. History is append-only; this is only the newest.
-    val recordedChoice = remember(recorded) {
-        (recorded as? ReviewResponse.PrimaryReview)
-            ?.events?.filterIsInstance<ViewerEvent.Choice>()?.lastOrNull()
     }
     // The same submission's events as rows of their own. Read from `review_event_answers` rather
     // than filtered out of the response above: that table is where a caught event is addressed as
@@ -714,14 +743,9 @@ fun ReviewSession(
     // menu that is not open.
     val queueEntries = remember(items, addOnResolver) {
         reviewQueueEntries(items) { entry ->
-            reviewPageEntries(
-                assets = assetsOf(entry),
-                addOn = addOnResolver.readableVersion(entry.addOn),
-                // The Content page is a page of the Task and keeps its place in the guide. It was
-                // omitted while every page after it was counted, so a Prompt Task's guide rows were
-                // one page to the left of the position beside them.
-                content = entry.hasContentPage()
-            )
+            // The guide is the page list by parts, so its rows and the inner counter cannot
+            // disagree about a Task that presents several Prompts or a Prompt plus files.
+            reviewPageEntries(entry.parts, addOn = addOnResolver.readableVersion(entry.addOn))
         }
     }
     // The frame takes real room here, so the system bars are never hidden: there is no full-bleed
@@ -735,12 +759,10 @@ fun ReviewSession(
     //
     // Read here, above the queue moves, because a commit has to know whether the Task has an add-on
     // page to land on before it decides to advance — see [commitArrival].
-    val assets = assetsOf(item)
     // The questionnaire this Task was stamped with, if this build can read it. A reference this
     // build cannot resolve draws nothing — the fail-closed rule the resolver states — so the Task
     // simply has no extra page rather than a page it cannot fill.
     val storedAddOn = addOnResolver.readableVersion(item.addOn)
-    val hasAddOnPage = storedAddOn != null
     // The pages this Task presents, in the order the arrows and the guide walk them: the Prompt
     // body first when it has one, then the Assets, then the add-on. One state derivation, shared
     // with the read-only Task surfaces, is the source for the count, the step, the guide and which
@@ -751,8 +773,8 @@ fun ReviewSession(
     // The pages as the jump list names them, for when the queue itself has only one Task to move
     // between. The Content and add-on pages are both entries, and each row says what it is — see
     // [reviewPageEntries].
-    val pageEntries = remember(assets, storedAddOn, pages) {
-        reviewPageEntries(assets, storedAddOn, content = item.hasContentPage())
+    val pageEntries = remember(item.parts, storedAddOn, pages) {
+        reviewPageEntries(item.parts, storedAddOn)
     }
     val currentPage = pageState.pageIndex
     val currentModel = pageState.current
@@ -760,6 +782,70 @@ fun ReviewSession(
     // The add-on page is the last index. `page` is then null, which every file-specific value below
     // already reads as *no file* rather than as an error.
     val onAddOnPage = pageState.onAddOnPage
+
+    // The Content page's own body and Resources, read by the part its page names. A Task may hold
+    // several Prompts, and drawing the first one's body under the second one's page would put one
+    // question's words beneath another question's answer.
+    val pagePayloadRow by remember(item.taskId, contentPage?.partKey) {
+        contentPage?.partKey?.let { viewModel.observePartPayload(item.taskId, it) } ?: flowOf(null)
+    }.collectAsStateWithLifecycle(initialValue = null)
+    val pageResources by remember(item.taskId, contentPage?.partKey) {
+        contentPage?.partKey?.let { viewModel.observePartResources(item.taskId, it) }
+            ?: flowOf(emptyList())
+    }.collectAsStateWithLifecycle(initialValue = emptyList())
+    val pageContent = remember(pagePayloadRow) {
+        pagePayloadRow?.let { decodePrompt(it.kind, it.schemaVersion, it.payload) }
+    }
+
+    // The Content page's answer is the **part's own** current state: a Task may present several
+    // Prompts, and the Task's latest response is whichever part was answered most recently. A row
+    // written before v0.8.4 kept no part state, so a Task with a single Content part falls back to
+    // the task-level record — there is no other part it could belong to.
+    val contentParts = remember(item.parts) {
+        item.parts.filter { it.present && it.payloadKind != null }
+    }
+    val partStateText by remember(item.taskId, contentPage?.partKey) {
+        contentPage?.partKey?.let { viewModel.observePartState(item.taskId, it) } ?: flowOf(null)
+    }.collectAsStateWithLifecycle(initialValue = null)
+    val recordedChoiceText = partStateText?.response?.takeIf { it.isNotEmpty() }
+        ?: recordedText.takeIf { contentParts.size == 1 }
+    // The latest answer on record for *this page's* Prompt, so a revisited one shows what was said
+    // rather than an untouched card. History is append-only; this is only the newest.
+    val recordedChoice = remember(recordedChoiceText) {
+        recordedChoiceText?.let { ReviewResponse.parse(it) }
+            ?.let { it as? ReviewResponse.PrimaryReview }
+            ?.events?.filterIsInstance<ViewerEvent.Choice>()?.lastOrNull()
+    }
+    // A form's draft, lifted here because the Submit control is the frame's and must read the same
+    // answers the card is drawing. Keyed by part, so paging to another Prompt cannot submit this
+    // one's answers under it.
+    val formAnswersSaver = listSaver<Map<String, String>, String>(
+        save = { answers -> answers.toList().flatMap { listOf(it.first, it.second) } },
+        restore = { flat ->
+            flat.chunked(2).filter { it.size == 2 }.associate { it[0] to it[1] }
+        }
+    )
+    var formAnswers by rememberSaveable(
+        item.taskId,
+        contentPage?.partKey,
+        stateSaver = formAnswersSaver
+    ) {
+        mutableStateOf(emptyMap<String, String>())
+    }
+    // What this part's last structured answer said, so a revisited form opens with its answers
+    // rather than blank. Only a structured record seeds it; an event review of the same part has
+    // no fields to restore.
+    val recordedFormAnswers = remember(partStateText?.response) {
+        (partStateText?.response
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { ReviewResponse.parse(it) } as? ReviewResponse.StructuredReview)
+            ?.fields?.associate { it.fieldKey to it.value }
+            .orEmpty()
+    }
+    LaunchedEffect(item.taskId, contentPage?.partKey, recordedFormAnswers) {
+        if (recordedFormAnswers.isNotEmpty()) formAnswers = recordedFormAnswers
+    }
+    val pageForm = pageContent as? FormPrompt
 
     // Why this Prompt cannot be answered, resolved once: the Content page draws it, and the
     // forward edge has to know whether this Task has a judgment in it at all. Null means the page
@@ -769,20 +855,50 @@ fun ReviewSession(
     // Whether *the Task* has a Content page, not whether one is on screen: the forward edge is
     // resolved on the add-on page too, and asking the current page would have said "no Prompt"
     // exactly where the gate is applied.
+    // A form's legal answer is a structured record governed by the form Viewer's own template; a
+    // choice template attached to it catches nothing this card can emit.
+    val acceptsStructured = content is FormPrompt &&
+        reviewDefinition?.viewer == Viewers.Form.ref
     val contentNotice = if (item.hasContentPage()) {
         when {
-            payloadRow == null -> "This Prompt's body could not be read."
-            content == null -> "This build cannot read this Prompt."
+            payloadRow == null -> "This question's body could not be read."
+            content == null -> "This build cannot read this question."
             item.payloadRevision != null && payloadRow?.revision != item.payloadRevision ->
-                "This Prompt was updated after the review opened. Reopen it to judge the new text."
+                "This question was updated after the review opened. Reopen it to judge the new text."
 
             missingRequired != null ->
-                "The file this Prompt requires is missing from the source, so it cannot be answered."
-            !acceptsChoice -> "No Task Review in force catches a choice."
+                "The file this question requires is missing from the source, so it cannot be answered."
+            content is FormPrompt && !acceptsStructured ->
+                "No Task Review in force catches this form."
+            content !is FormPrompt && !acceptsChoice ->
+                "No Task Review in force catches a choice."
             else -> null
         }
     } else {
         null
+    }
+
+    // The same question for the page on screen rather than for the Task's first Prompt. A Task may
+    // present several Prompts and only one of them may be unreadable; the page that cannot be
+    // answered is the one that says so.
+    val pageNotice = if (contentPage == null) {
+        null
+    } else {
+        val pagePart = item.parts.firstOrNull { it.partKey == contentPage.partKey }
+        when {
+            pagePayloadRow == null -> "This question's body could not be read."
+            pageContent == null -> "This build cannot read this question."
+            pagePart?.payloadRevision != null && pagePayloadRow?.revision != pagePart.payloadRevision ->
+                "This question was updated after the review opened. Reopen it to judge the new text."
+
+            pageResources.any { it.required && it.missing } ->
+                "The file this question requires is missing from the source, so it cannot be answered."
+            pageContent is FormPrompt && !acceptsStructured ->
+                "No Task Review in force catches this form."
+            pageContent !is FormPrompt && !acceptsChoice ->
+                "No Task Review in force catches a choice."
+            else -> null
+        }
     }
 
     // Landing on a Task is what moves the List's cursor; [id] rather than [taskId] because the
@@ -832,26 +948,55 @@ fun ReviewSession(
         }
     }
 
+    // The part this judgment is about: the one whose page is on screen. A Task-level page — the
+    // add-on, or a media Task's file (whose part is degenerate and carries no body) — answers the
+    // Task as a whole, and the write boundary reads that as the older rule.
+    val commitPartKey = when (val model = currentModel) {
+        is ReviewPage.Content -> model.partKey
+        // A file presented by a Prompt part is that part's answer; a media Task's file belongs to
+        // a degenerate part with no body, and that Task's judgment stays Task-level exactly as it
+        // always was — one state, no part event.
+        is ReviewPage.Asset -> item.parts
+            .firstOrNull { it.partKey == model.partKey }
+            ?.takeIf { it.payloadKind != null }
+            ?.partKey
+
+        ReviewPage.AddOn, null -> null
+    }
+
     fun commit(events: List<ViewerEvent>) {
-        viewModel.submitItemReview(item, terms, review, events) { accepted ->
+        // A form's answer travels beside the events: the card draws the fields, the frame's
+        // control commits them, and the write boundary reads only the visible, answered ones.
+        val fields = pageForm
+            ?.takeIf { contentPage?.partKey == commitPartKey }
+            ?.answeredFields(formAnswers)
+            .orEmpty()
+        viewModel.submitItemReview(
+            item,
+            terms,
+            review,
+            events,
+            partKey = commitPartKey,
+            fields = fields
+        ) { accepted ->
             // A refused commit wrote nothing, so there is nowhere to move: advancing would show the
             // next Prompt while this one stayed unanswered, and the round would have walked past a
             // judgment it never made.
             if (!accepted) return@submitItemReview
             when (
-                commitArrival(
+                val arrival = commitArrival(
                     advanceAfterCommit = reviewDefinition?.advanceAfterCommit != false,
-                    hasAddOnPage = hasAddOnPage,
-                    currentPage = currentPage,
-                    pageCount = pageCount
+                    pages = pages,
+                    currentPage = currentPage
                 )
             ) {
-                // Judged, but its questionnaire is a page it has not shown yet. Land there rather
-                // than on the next Task: the add-on is the Task's last page, and the place a Task
-                // is left from — advancing straight away skipped it without a trace.
-                CommitArrival.AddOnPage -> {
-                    committedHere = true
-                    pageIndex = pageCount - 1
+                // Another part's Prompt, or the questionnaire this Task has not shown yet. Land on
+                // that page rather than on the next Task: an unanswered Prompt of the same Task is
+                // still the reviewer's work, and the add-on is the Task's last page and the place a
+                // Task is left from — advancing straight away skipped it without a trace.
+                is CommitArrival.Page -> {
+                    committedHere = pages.getOrNull(arrival.index) is ReviewPage.AddOn
+                    pageIndex = arrival.index
                 }
 
                 CommitArrival.NextTask -> advanceToNextTask()
@@ -947,19 +1092,30 @@ fun ReviewSession(
                     // Only a control-committed template draws a button here. An Immediate template
                     // has none: the options on the card are the controls, and the tap is the commit.
                     if (commitControlId != null && !commitIsCompletion) {
+                        val formReady = pageForm?.isComplete(formAnswers) == true
                         ReviewTemplateControl(
                             label = commitLabel,
-                            enabled = choice != null && !sampling,
+                            enabled = if (pageForm != null) {
+                                formReady && pageNotice == null
+                            } else {
+                                choice != null && !sampling
+                            },
                             status = when {
+                                pageForm != null && pageNotice != null -> pageNotice
+                                pageForm != null && !formReady -> "Answer every required field."
+                                pageForm != null -> "Ready to submit."
                                 choice != null -> "Selected: ${choice.label}"
                                 recordedChoice != null -> "Recorded: ${recordedChoice.label}"
                                 acceptsChoice -> "Choose an option."
                                 else -> null
                             },
-                            onClick = { choice?.let { commit(listOf(it)) } }
+                            onClick = {
+                                if (pageForm != null) commit(emptyList())
+                                else choice?.let { commit(listOf(it)) }
+                            }
                         )
                     }
-                    MediaInfoBar(contentDescription = "Prompt info") { infoOpen = true }
+                    MediaInfoBar(contentDescription = "Question info") { infoOpen = true }
                 }
             }
         }
@@ -1066,6 +1222,33 @@ fun ReviewSession(
             null
         }
 
+    if (confirmPendingCompletion) {
+        AlertDialog(
+            onDismissRequest = { confirmPendingCompletion = false },
+            title = { Text("Complete anyway?") },
+            text = {
+                Text(
+                    if (pendingRequiredParts == 1) "1 required part is not answered."
+                    else "$pendingRequiredParts required parts are not answered."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmPendingCompletion = false
+                    viewModel.submitItemReview(
+                        item,
+                        terms,
+                        review,
+                        explicitCompletion = true
+                    )
+                }) { Text("Complete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmPendingCompletion = false }) { Text("Cancel") }
+            }
+        )
+    }
+
     MediaShell(
         modifier = modifier,
         navigator = MediaNavigator(
@@ -1075,7 +1258,7 @@ fun ReviewSession(
             // file and must not borrow the name of the last one.
             subtitle = when {
                 !hasPageLevel -> null
-                contentPage != null -> "Prompt"
+                contentPage != null -> "Question"
                 onAddOnPage -> "Add-on"
                 else -> page?.name
             },
@@ -1156,13 +1339,27 @@ fun ReviewSession(
                 TaskCompletionBar(
                     item = item,
                     reviewBlocked = item.reviewBlocked,
+                    pendingParts = pendingRequiredParts,
                     onToggleCompleted = { completed ->
                         if (completed) {
                             // The frame's own control, so checking it here is a judgment and
                             // unchecking it is not: §5 records what somebody committed, and there
                             // is no retraction for a template to record. The uncheck still has to
                             // happen — it just moves state.
-                            viewModel.submitItemReview(item, terms, review)
+                            //
+                            // A Task with open required parts is still completable — the person
+                            // may be signing off on what is there — but not silently: the count is
+                            // already under the checkbox, and this is the second confirmation.
+                            if (pendingRequiredParts > 0) {
+                                confirmPendingCompletion = true
+                            } else {
+                                viewModel.submitItemReview(
+                                    item,
+                                    terms,
+                                    review,
+                                    explicitCompletion = true
+                                )
+                            }
                         } else {
                             viewModel.setItemCompleted(item, false)
                         }
@@ -1180,7 +1377,8 @@ fun ReviewSession(
             // build cannot answer has no judgment to make, so it joins the ordinary run — swipe
             // turns the page, and at the run's ends crosses Tasks as navigation, not as a commit.
             // Both cases get the tap that reveals and hides the asset band.
-            val interactive = contentNotice == null
+            //
+            val interactive = pageNotice == null
             ContentPageSwipe(
                 canSwipeForward = !interactive && (pageForward != null || navigation.next != null),
                 canSwipeBack = !interactive && (pageBack != null || navigation.previous != null),
@@ -1195,16 +1393,16 @@ fun ReviewSession(
                 onTap = { chromeVisible = !chromeVisible },
                 modifier = Modifier.fillMaxSize()
             ) {
-                if (content != null) {
+                if (pageContent != null) {
                     PromptContentPage(
-                        content = content,
-                        resources = taskResources,
+                        content = pageContent,
+                        resources = pageResources,
                         selectedOptionId = (choice ?: recordedChoice)?.optionId,
                         interactive = interactive,
                         // A drill reveals its meaning only once the answer is on record. A page
                         // this build cannot answer is read-only and shows everything it has.
                         reveal = !interactive || recordedChoice != null,
-                        notice = contentNotice,
+                        notice = pageNotice,
                         player = player,
                         onSelect = { option ->
                             val event = ViewerEvent.Choice(option.id, option.label)
@@ -1219,19 +1417,22 @@ fun ReviewSession(
                                 pendingChoice = event.encodeValue()
                             }
                         },
+                        answers = formAnswers,
+                        onAnswer = { field, value -> formAnswers = formAnswers + (field.key to value) },
                         modifier = Modifier.fillMaxSize()
                     )
                 } else {
-                    PromptNoticePage(contentNotice ?: "This Prompt cannot be shown.")
+                    PromptNoticePage(pageNotice ?: "This question cannot be shown.")
                 }
             }
         } else {
         // [AssetRun] counts Assets, and its add-on sentinel is the Asset count. The unified page
-        // list counts the Content page as zero, so a Prompt Task carrying both a body and files
-        // would otherwise open one file too far and put its add-on on the wrong page. The two
-        // converters are the same pair the preview surfaces use; see [assetIndexOf].
-        val hasContent = item.hasContentPage()
-        val backToContent = hasContent && currentPage == 1
+        // list counts a Content page as a page of its own, so leaving backwards from the first
+        // file of a part returns to *that part's* Content page — the page immediately before it —
+        // rather than assuming there is exactly one Content page and it is index 0.
+        val backToContentPage = (currentModel as? ReviewPage.Asset)?.let { asset ->
+            (pages.getOrNull(currentPage - 1) as? ReviewPage.Content)?.partKey == asset.partKey
+        } == true
         // This visit's judgment has already been written, and the reviewer is on the add-on page it
         // was sent to. Forward from here is a queue move, not a second commit — for a template that
         // accepts events there is nothing left to report, so committing again would be refused and
@@ -1259,7 +1460,7 @@ fun ReviewSession(
                 ),
             // Back off the first file of a Prompt Task returns to its Content page — a page turn,
             // not a queue step. Elsewhere it steps the queue, exactly as before.
-            canLeaveBack = backToContent || navigation.canGoPrevious,
+            canLeaveBack = backToContentPage || navigation.canGoPrevious,
             pdfTools = pdfTools,
             pdfMarks = pdfMarks,
             onPdfCreateMark = onCreatePdfMark,
@@ -1280,9 +1481,10 @@ fun ReviewSession(
             // Backwards is never a judgment: it either returns to this Task's Content page or
             // steps the queue, and changes nothing about the Task that was left behind.
             onLeaveBack = {
-                if (backToContent) pageIndex = 0 else dispatch(TaskAction.PreviousTask)
+                if (backToContentPage) pageIndex = currentPage - 1
+                else dispatch(TaskAction.PreviousTask)
             },
-            onSelectAsset = { pageIndex = pageOfAsset(it, hasContent) },
+            onSelectAsset = { pageIndex = pageState.pageOfAssetIndex(it) },
             onTap = { chromeVisible = !chromeVisible },
             // The viewer's third gesture, offered only when the template in force accepts it and
             // the page on screen is a picture. The point is resolved through the card's own zoom
@@ -1361,6 +1563,10 @@ fun ReviewSession(
             // events, so its sheet does not gain a section that could only ever say "None".
             recordedEvents = recordedEvents.takeIf { definitionAcceptsEvents },
             recordedSourceNames = recordedSourceNames,
+            // The answer the question on screen currently holds, read through the same part state
+            // the card draws. The body is handed in as well so a form's rows say the label the
+            // Prompt declared rather than its key.
+            partAnswer = partAnswerSummary(recordedChoiceText, pageContent),
             onDismiss = { infoOpen = false }
         )
     }
@@ -1445,7 +1651,7 @@ fun AssetRun(
             onLongPress = onLongPress
         ) { zoom ->
             LaunchedEffect(zoom) { zoom.contentAspect = null }
-            PreviewPlaceholder(Modifier.fillMaxSize().mediaZoom(zoom), "Manual item", item.title)
+            PreviewPlaceholder(Modifier.fillMaxSize().mediaZoom(zoom), "Manual Task", item.title)
         }
         return
     }
@@ -1597,7 +1803,8 @@ fun ReviewItemInfoSheet(
     marks: List<PdfMarkInfo>? = null,
     addOnInfo: AddOnInfo? = null,
     recordedEvents: List<ViewerEvent>? = null,
-    recordedSourceNames: Map<String, String> = emptyMap()
+    recordedSourceNames: Map<String, String> = emptyMap(),
+    partAnswer: String? = null
 ) {
     val context = LocalContext.current
     val sourceUri = asset?.sourceUri?.takeIf { it.isNotEmpty() } ?: info.sourceUri
@@ -1640,6 +1847,10 @@ fun ReviewItemInfoSheet(
                     }
                     info.listTitle?.let { add(InfoField("List", it)) }
                     add(InfoField("Status", if (info.isCompleted) "Checked" else "Not checked"))
+                    // What this question's part currently answers. Current state, not history —
+                    // the Recorded section below is the append-only events. The row is absent when
+                    // the part is pending, so an untouched question adds no empty field.
+                    partAnswer?.let { add(InfoField("Answer", it)) }
                     recordedEvents?.let { addAll(recordedEventRows(it, recordedSourceNames)) }
                 }
 
@@ -1654,7 +1865,7 @@ fun ReviewItemInfoSheet(
                     add(InfoField("Status", if (info.isCompleted) "Checked" else "Not checked"))
                     if (!isPdf) add(InfoField("Actions", info.actionLabel ?: "None"))
                     when {
-                        sourceUri == null -> add(InfoField("Source", "Manual item — no file"))
+                        sourceUri == null -> add(InfoField("Source", "Manual Task — no file"))
                         sourceMissing ->
                             add(InfoField("Source", "Missing from the source folder"))
                     }
@@ -1676,6 +1887,48 @@ fun ReviewItemInfoSheet(
             ?.takeIf { level == ReviewInfoLevel.Asset && !sourceMissing }
             ?.let { uri -> { MediaFileActions(sourceUri = uri, name = title) } }
     )
+}
+
+/**
+ * What one TaskPart's current answer says, as the Info sheet's Answer row.
+ *
+ * The sheet is opened from a question's own page, so the question's answer is the fact that page is
+ * about. It is **current state** — the same value the card draws — and deliberately not the
+ * Recorded section, which lists the append-only events behind it; a revised answer has one Answer
+ * row and several recorded ones.
+ *
+ * A choice names the option's label, because the id is a wire value and the label is what the
+ * person read. A form answers each visible field under the label the body declared, falling back to
+ * the field key when this build can read the record but not the body; a choice field's stored value
+ * is an option id, so it is mapped through the body's options the same way. A media review is the
+ * Task's judgment about its files, not an answer to a question, and says nothing here.
+ *
+ * Null when the part is pending, holds no answer this build can read, or holds a record with
+ * nothing to show — the row is absent rather than empty.
+ */
+internal fun partAnswerSummary(response: String?, content: PromptContent?): String? {
+    val parsed = response?.takeIf { it.isNotEmpty() }?.let { ReviewResponse.parse(it) }
+        ?: return null
+    return when (parsed) {
+        is ReviewResponse.PrimaryReview ->
+            parsed.events.filterIsInstance<ViewerEvent.Choice>().lastOrNull()?.label
+
+        is ReviewResponse.StructuredReview -> {
+            val form = content as? FormPrompt
+            parsed.fields.joinToString("\n") { answer ->
+                val field = form?.fields?.firstOrNull { it.key == answer.fieldKey }
+                val label = field?.label ?: answer.fieldKey
+                val value = if (field?.type == FormFieldType.ChoiceSingle) {
+                    field.options.firstOrNull { it.id == answer.value }?.label ?: answer.value
+                } else {
+                    answer.value
+                }
+                "$label: $value"
+            }.takeIf { it.isNotEmpty() }
+        }
+
+        is ReviewResponse.MediaReview -> null
+    }
 }
 
 /** What to call the provenance line for an item: a Package has a name, a file has a path. */
@@ -1839,7 +2092,7 @@ private fun ReviewFinished(
         )
         if (roundSize < total) {
             Text(
-                "This round covered " + countLabel(roundSize, "item"),
+                "This round covered " + countLabel(roundSize, "Task"),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

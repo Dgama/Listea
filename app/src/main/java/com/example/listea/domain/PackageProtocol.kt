@@ -3,7 +3,7 @@ package com.example.listea.domain
 import java.security.MessageDigest
 
 /**
- * `listea.package/1`, read and planned without touching Android.
+ * `listea.package/1` and `listea.package/2`, read and planned without touching Android.
  *
  * A Package is a directory whose manifest names Prompts. This file turns the bytes a host has
  * already located into a [PackagePlan]: what would be written, what is merely diagnosed, and the
@@ -11,6 +11,11 @@ import java.security.MessageDigest
  * host supplies the manifest, the set of member paths it saw, and a way to read a referenced
  * description — which keeps every rejection rule testable on the JVM and keeps a partially read
  * Package from being written.
+ *
+ * v2 adds a declared Section tag, renames a Prompt's `assets` to `files`, and accepts a
+ * `structured` response whose body is Viewer-owned. v1 remains readable and means exactly what it
+ * meant before: no Sections, `assets`, and `prompt:` composition. The protocol never declares a
+ * Task or a composition — those are the taker's grouping rules, not the setter's.
  *
  * The division of strictness is deliberate and follows the protocol:
  *
@@ -25,12 +30,17 @@ import java.security.MessageDigest
  * without a revision bump is not this version's concern.
  */
 object PackageProtocol {
-    const val PROTOCOL = "listea.package/1"
+    const val PROTOCOL_V1 = "listea.package/1"
+    const val PROTOCOL_V2 = "listea.package/2"
+
+    /** The newest protocol this build writes; v1 remains readable. */
+    const val PROTOCOL = PROTOCOL_V2
 
     const val MAX_MANIFEST_BYTES = 256 * 1024
     const val MAX_DESCRIPTION_BYTES = 64 * 1024
     const val MAX_PROMPTS = 2_000
     const val MAX_RESOURCES = 5_000
+    const val MAX_SECTIONS = 2_000
     const val MAX_ASSET_USES = 200
     const val MAX_RESOURCE_USES = 50
     const val MAX_OPTIONS = 100
@@ -43,11 +53,18 @@ object PackageProtocol {
 
     private val KEY = Regex("[a-z0-9][a-z0-9._-]{0,63}")
     private val RESOURCE_KINDS = setOf("image", "audio", "video", "pdf", "other")
-    private val TOP_FIELDS = setOf("protocol", "packageKey", "revision", "title", "prompts", "resources")
-    private val PROMPT_FIELDS = setOf(
+    private val TOP_FIELDS_V1 =
+        setOf("protocol", "packageKey", "revision", "title", "prompts", "resources")
+    private val TOP_FIELDS_V2 = TOP_FIELDS_V1 + "sections"
+    private val PROMPT_FIELDS_V1 = setOf(
         "promptKey", "kind", "schema", "response", "title", "description", "assets", "resources"
     )
+    private val PROMPT_FIELDS_V2 = setOf(
+        "promptKey", "kind", "schema", "response", "title", "description", "files", "section",
+        "resources"
+    )
     private val ASSET_FIELDS = setOf("member", "name")
+    private val SECTION_FIELDS = setOf("sectionKey", "title", "order")
     private val RESOURCE_USE_FIELDS = setOf("resourceKey", "required")
     private val RESOURCE_FIELDS = setOf("resourceKey", "kind", "member")
 
@@ -77,7 +94,15 @@ object PackageProtocol {
         }
 
         fun rejected(): PackagePlan =
-            PackagePlan(snapshot.rootRelativePath, null, null, null, emptyList(), emptyList(), diagnostics)
+            PackagePlan(
+                snapshot.rootRelativePath,
+                null,
+                null,
+                null,
+                emptyList(),
+                emptyList(),
+                diagnostics = diagnostics
+            )
 
         val bytes = snapshot.manifestBytes
             ?: run {
@@ -118,16 +143,21 @@ object PackageProtocol {
             return text
         }
 
-        for (key in manifest.keys - TOP_FIELDS) {
-            packageProblem("unknown-field", "The manifest has an unknown field \"$key\".")
-        }
-
         val protocol = topString("protocol")
-        if (protocol != null && protocol != PROTOCOL) {
+        val isV2 = protocol == PROTOCOL_V2
+        if (protocol != null && protocol != PROTOCOL_V1 && protocol != PROTOCOL_V2) {
             packageProblem(
                 "protocol-unknown",
-                "The Package declares \"$protocol\"; this build reads $PROTOCOL."
+                "The Package declares \"$protocol\"; this build reads $PROTOCOL_V1 and $PROTOCOL_V2."
             )
+        }
+
+        val topFields = if (isV2) TOP_FIELDS_V2 else TOP_FIELDS_V1
+        for (key in manifest.keys - topFields) {
+            // A v2-only field in a v1 manifest is an older-version disagreement, not a typo: the
+            // producer is speaking a language this Package's declared protocol does not have.
+            val code = if (!isV2 && key == "sections") "section-in-v1" else "unknown-field"
+            packageProblem(code, "The manifest has an unknown field \"$key\".")
         }
 
         val packageKey = topString("packageKey")
@@ -171,6 +201,74 @@ object PackageProtocol {
                 "limit-exceeded",
                 "The Package has ${resourceValues.items.size} Resources; the limit is $MAX_RESOURCES."
             )
+        }
+
+        val sectionValues = if (isV2) manifest["sections"] else null
+        val plannedSections = mutableListOf<PlannedSection>()
+        val sectionByKey = mutableMapOf<String, PlannedSection>()
+        if (isV2 && sectionValues != null) {
+            if (sectionValues !is JsonValue.Arr) {
+                packageProblem("invalid-field", "\"sections\" must be an array when present.")
+            } else if (sectionValues.items.size > MAX_SECTIONS) {
+                packageProblem(
+                    "limit-exceeded",
+                    "The Package has ${sectionValues.items.size} Sections; the limit is $MAX_SECTIONS."
+                )
+            } else {
+                sectionValues.items.forEachIndexed { index, value ->
+                    val entry = value as? JsonValue.Obj
+                    if (entry == null) {
+                        packageProblem(
+                            "section-invalid",
+                            "Section #${index + 1} must be an object."
+                        )
+                        return@forEachIndexed
+                    }
+                    val key = entry["sectionKey"]?.asStringOrNull()
+                    if (key == null || !isKey(key)) {
+                        packageProblem(
+                            "section-invalid",
+                            "Section #${index + 1} has no valid sectionKey."
+                        )
+                        return@forEachIndexed
+                    }
+                    if (sectionByKey.containsKey(key)) {
+                        packageProblem(
+                            "section-duplicate",
+                            "\"$key\" names more than one Section."
+                        )
+                        return@forEachIndexed
+                    }
+                    val sectionTitle = entry["title"]?.asStringOrNull()
+                    if (sectionTitle == null || sectionTitle.length !in 1..MAX_TITLE) {
+                        packageProblem(
+                            "section-invalid",
+                            "Section \"$key\" needs a title of 1–$MAX_TITLE characters."
+                        )
+                        return@forEachIndexed
+                    }
+                    val orderValue = entry["order"]
+                    val order = orderValue?.asIntOrNull()
+                    if (orderValue != null && order == null) {
+                        packageProblem(
+                            "section-invalid",
+                            "Section \"$key\" has a non-integer order."
+                        )
+                        return@forEachIndexed
+                    }
+                    val unknown = entry.keys - SECTION_FIELDS
+                    if (unknown.isNotEmpty()) {
+                        packageProblem(
+                            "section-invalid",
+                            "Section \"$key\" has unknown fields: ${unknown.joinToString(", ")}."
+                        )
+                        return@forEachIndexed
+                    }
+                    val planned = PlannedSection(key, sectionTitle, order ?: index)
+                    sectionByKey[key] = planned
+                    plannedSections += planned
+                }
+            }
         }
 
         if (diagnostics.any { it.scope == DiagnosticScope.PACKAGE }) return rejected()
@@ -274,10 +372,17 @@ object PackageProtocol {
                 if (unavailable == null) unavailable = code
             }
 
-            val unknownFields = entry.keys - PROMPT_FIELDS
+            val promptFields = if (isV2) PROMPT_FIELDS_V2 else PROMPT_FIELDS_V1
+            val unknownFields = entry.keys - promptFields
             if (unknownFields.isNotEmpty()) {
+                val code = when {
+                    !isV2 && "files" in unknownFields -> "files-in-v1"
+                    !isV2 && "section" in unknownFields -> "section-in-v1"
+                    isV2 && "assets" in unknownFields -> "assets-in-v2"
+                    else -> "unknown-field"
+                }
                 promptProblem(
-                    "unknown-field",
+                    code,
                     "Prompt \"$promptKey\" has unknown fields: ${unknownFields.joinToString(", ")}."
                 )
             }
@@ -322,10 +427,34 @@ object PackageProtocol {
                 )
             }
 
+            var sectionKey: String? = null
+            if (isV2) {
+                val sectionValue = entry["section"]
+                if (sectionValue != null) {
+                    val tag = sectionValue.asStringOrNull()
+                    if (tag == null || !isKey(tag)) {
+                        promptProblem(
+                            "section-invalid",
+                            "Prompt \"$promptKey\" has an invalid section tag."
+                        )
+                    } else if (!sectionByKey.containsKey(tag)) {
+                        promptProblem(
+                            "section-unknown",
+                            "Prompt \"$promptKey\" names Section \"$tag\", which is not declared."
+                        )
+                    } else {
+                        sectionKey = tag
+                    }
+                }
+            }
+
             val assets = mutableListOf<PlannedPromptAsset>()
-            val assetValues = entry["assets"]
+            val assetValues = entry[if (isV2) "files" else "assets"]
             if (assetValues != null && assetValues !is JsonValue.Arr) {
-                promptProblem("invalid-field", "Prompt \"$promptKey\"'s assets must be an array.")
+                promptProblem(
+                    "invalid-field",
+                    "Prompt \"$promptKey\"'s ${if (isV2) "files" else "assets"} must be an array."
+                )
             } else if (assetValues is JsonValue.Arr) {
                 if (assetValues.items.size > MAX_ASSET_USES) {
                     promptProblem(
@@ -566,9 +695,14 @@ object PackageProtocol {
                         )
                     }
                 }
+                // The body of a structured Prompt belongs to the Viewer that declared its
+                // kind/schema; the protocol only guarantees that it is a JSON object within the
+                // size limit. Validating its fields here would make Core learn one Viewer's
+                // vocabulary, which is the boundary this protocol exists to keep.
+                ResponseContract.STRUCTURED -> Unit
             }
 
-            if (response != ResponseContract.SINGLE) {
+            if (response != ResponseContract.SINGLE && response != ResponseContract.STRUCTURED) {
                 promptProblem(
                     "response-unsupported",
                     "Prompt \"$promptKey\" asks for ${response.wire}, which this build cannot submit."
@@ -593,6 +727,7 @@ object PackageProtocol {
                 options = options,
                 assets = assets,
                 resources = resourceUses,
+                section = sectionKey,
                 availability = unavailable?.let(PromptAvailability::Unavailable)
                     ?: PromptAvailability.Available
             )
@@ -601,12 +736,12 @@ object PackageProtocol {
         if (diagnostics.any { it.scope == DiagnosticScope.PACKAGE }) return rejected()
 
         val canonicalManifest = manifest.canonical()
-        val fingerprint = fingerprint(canonicalManifest, descriptionCanonical)
+        val fingerprint = fingerprint(fingerprintManifest(manifest, isV2).canonical(), descriptionCanonical)
 
         return PackagePlan(
             rootRelativePath = snapshot.rootRelativePath,
             manifest = PackageManifest(
-                protocol = PROTOCOL,
+                protocol = protocol!!,
                 packageKey = packageKey!!,
                 revision = revision!!,
                 title = title!!
@@ -615,6 +750,7 @@ object PackageProtocol {
             fingerprint = fingerprint,
             prompts = prompts,
             resources = resources,
+            sections = plannedSections,
             diagnostics = diagnostics
         )
     }
@@ -635,6 +771,30 @@ object PackageProtocol {
         return value.split('/').all { it.isNotEmpty() && it != "." && it != ".." }
     }
 
+    /**
+     * The manifest as the fingerprint reads it.
+     *
+     * v1 is hashed whole. v2 hashes the Section registry by membership only — keys, sorted, without
+     * titles or display order — so renaming or reordering a Section is not a content change to its
+     * Prompts. The Prompt tags themselves stay in the manifest, so moving a Prompt between Sections
+     * is still a content change.
+     */
+    private fun fingerprintManifest(manifest: JsonValue.Obj, isV2: Boolean): JsonValue.Obj {
+        if (!isV2) return manifest
+        val sections = manifest["sections"] as? JsonValue.Arr ?: return manifest
+        val keys = sections.items
+            .mapNotNull { (it as? JsonValue.Obj)?.get("sectionKey")?.asStringOrNull() }
+            .sorted()
+        val reduced = JsonValue.Arr(
+            keys.map { JsonValue.Obj(listOf("sectionKey" to JsonValue.Str(it))) }
+        )
+        return JsonValue.Obj(
+            manifest.entries.map { (key, value) ->
+                if (key == "sections") key to (reduced as JsonValue) else key to value
+            }
+        )
+    }
+
     fun fingerprint(canonicalManifest: String, canonicalDescriptions: Map<String, String>): String {
         val builder = StringBuilder(canonicalManifest).append('\n')
         for (key in canonicalDescriptions.keys.sorted()) {
@@ -650,7 +810,16 @@ object PackageProtocol {
 enum class ResponseContract(val wire: String) {
     SINGLE("choice.single"),
     MULTIPLE("choice.multiple"),
-    FREEFORM("freeform");
+    FREEFORM("freeform"),
+
+    /**
+     * One record whose fields are declared by the Viewer, not by this protocol.
+     *
+     * v2 accepts it so a conditional questionnaire can be one part with internal steps. The body's
+     * grammar belongs to the Viewer that declares the kind/schema; Core only checks that it is an
+     * object within the description limit, and the Viewer validates what it draws and commits.
+     */
+    STRUCTURED("structured");
 
     companion object {
         fun fromWire(value: String): ResponseContract? = entries.firstOrNull { it.wire == value }
@@ -687,7 +856,29 @@ data class PlannedPrompt(
     val options: List<PromptOption>,
     val assets: List<PlannedPromptAsset>,
     val resources: List<PlannedPromptResource>,
+
+    /**
+     * The Section tag this Prompt carries, or null when it has none.
+     *
+     * A tag, not an owner: it says the setter declared these Prompts together. Whether the taker
+     * groups them into one Task is [CompositionChoice.SECTION], a rule that lives outside the
+     * protocol.
+     */
+    val section: String? = null,
     val availability: PromptAvailability
+)
+
+/**
+ * One declared Section: its registry entry and display order.
+ *
+ * [order] is a display hint from the manifest; the taker's composition orders parts by Prompt
+ * order, not by this value. Renaming or reordering a Section does not change its membership and so
+ * does not change the fingerprint — see [PackageProtocol].
+ */
+data class PlannedSection(
+    val sectionKey: String,
+    val title: String,
+    val order: Int
 )
 
 data class PlannedPackageResource(
@@ -721,6 +912,7 @@ data class PackagePlan(
     val fingerprint: String?,
     val prompts: List<PlannedPrompt>,
     val resources: List<PlannedPackageResource>,
+    val sections: List<PlannedSection> = emptyList(),
     val diagnostics: List<PackageDiagnostic>
 ) {
     val accepted: Boolean get() = manifest != null

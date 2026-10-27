@@ -320,7 +320,7 @@ private fun AddOnQuestionEditor(
     }
 
     DraftTextField(
-        label = "Prompt",
+        label = "Question text",
         value = question.prompt,
         onValueChange = onPromptChange,
         error = promptError

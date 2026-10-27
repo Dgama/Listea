@@ -121,7 +121,23 @@ object Viewers {
         parse = { payload -> parseVocabularyPrompt(payload) }
     )
 
-    val all: List<ViewerCapability> = listOf(Profile, Vocabulary)
+    /**
+     * The conditional questionnaire: several fields answered as one structured result.
+     *
+     * It emits no viewer *events*: a form's answer is a structured record, not a point or a tapped
+     * option, so its capability declares the [ResponseContract.STRUCTURED] contract and an empty
+     * intent set. Hiding a field never creates a part; the whole form is one part's body.
+     */
+    val Form = ViewerCapability(
+        ref = TemplateVersionRef(TemplateId("builtin.viewer.form"), 1),
+        kind = "form",
+        schema = 1,
+        responses = setOf(ResponseContract.STRUCTURED),
+        intents = emptySet(),
+        parse = { payload -> parseFormPrompt(payload) }
+    )
+
+    val all: List<ViewerCapability> = listOf(Profile, Vocabulary, Form)
 
     /** The Viewer that can draw this envelope, or null when none in this build can. */
     fun forPayload(kind: String?, schema: Int?): ViewerCapability? =

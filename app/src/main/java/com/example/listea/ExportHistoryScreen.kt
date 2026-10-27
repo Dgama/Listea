@@ -259,7 +259,7 @@ private fun ExportRecordRow(
         StatusLine(
             listOfNotNull(
                 kind?.label ?: "Unknown export",
-                countOfItems(record.itemCount),
+                countOfTasks(record.itemCount),
                 recordAddressLabel(record)
             ).joinToString(" · ")
         )

@@ -39,10 +39,36 @@ data class PayloadTaskRow(
 data class PayloadPromptRow(
     val taskId: String,
     val packageKey: String?,
+    val partKey: String = "local:0",
     val promptKey: String?,
     val kind: String?,
     val schemaVersion: Int?,
     val revision: Int?
+)
+
+/**
+ * One TaskPart as the v6 payload sees it: its identity, its optional body, and its current answer.
+ *
+ * The successor to [PayloadPromptRow] for the v6 writer, and deliberately a superset of it: a part
+ * with no payload is still a part (the degenerate one a local file or folder import creates), and a
+ * part nobody answered still has to be exported as *pending* rather than omitted. The join is
+ * `LEFT` on both tables for exactly that reason — absence of a body is a fact, not a missing row.
+ *
+ * [response] is the part's current canonical answer, or null/empty while pending. It is read as
+ * text for the same reason [PayloadReviewRow.response] is: only `ReviewResponse.parse` may decide
+ * whether this build can read it.
+ */
+data class PayloadPartRow(
+    val taskId: String,
+    val partKey: String,
+    val position: Int,
+    val promptKey: String?,
+    val required: Boolean,
+    val present: Boolean,
+    val kind: String?,
+    val schemaVersion: Int?,
+    val revision: Int?,
+    val response: String? = null
 )
 
 /**
@@ -82,7 +108,10 @@ data class PayloadAssetRow(
      * sent with it; a row that cannot be read is therefore a row whose marks are omitted rather
      * than sent against unknown bytes.
      */
-    val sourceUri: String? = null
+    val sourceUri: String? = null,
+
+    /** The part the Asset is presented for; v6 groups a Task's Assets by it. */
+    val partKey: String? = null
 )
 
 /**

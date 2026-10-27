@@ -18,12 +18,13 @@ import com.example.listea.data.CatalogRow
 import com.example.listea.data.DecisionTarget
 import com.example.listea.data.ReviewDecisions
 import com.example.listea.data.ReviewItem
-import com.example.listea.data.TaskPayloadEntity
+import com.example.listea.data.TaskPartPayloadEntity
 import com.example.listea.data.TaskResourceView
 import com.example.listea.data.decodeActionIds
 import com.example.listea.domain.AddOnAnswer
 import com.example.listea.domain.decodePrompt
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
 
 /**
  * The catalog's preview, wired to the Source and the level it was opened from.
@@ -73,8 +74,8 @@ fun CatalogTaskPreview(
         rootUri = rootUri,
         settings = settings,
         addOnResolver = addOnResolver,
-        observePayload = viewModel::observeTaskPayload,
-        observeResources = viewModel::observeTaskResources,
+        observePayload = viewModel::observePartPayload,
+        observeResources = viewModel::observePartResources,
         observeAnswers = viewModel::observeTaskAnswers,
         onClose = onExit
     )
@@ -116,11 +117,11 @@ fun CatalogTaskPreviewScreen(
     // The add-on is resolved from the rows every Task column names, exactly as Review resolves it,
     // so this screen and Review cannot disagree about whether a Task has a questionnaire page.
     addOnResolver: AddOnResolver,
-    // The Prompt body is read by Task id when its page is composed, not carried on every row: a
-    // catalog of a thousand prompts must not hold a thousand bodies to show one. Reads only — this
-    // screen still has no write it could make.
-    observePayload: (String) -> Flow<TaskPayloadEntity?>,
-    observeResources: (String) -> Flow<List<TaskResourceView>>,
+    // The Prompt body is read by Task and part when its page is composed, not carried on every
+    // row: a catalog of a thousand prompts must not hold a thousand bodies to show one. Reads
+    // only — this screen still has no write it could make.
+    observePayload: (String, String) -> Flow<TaskPartPayloadEntity?>,
+    observeResources: (String, String) -> Flow<List<TaskResourceView>>,
     observeAnswers: (String) -> Flow<List<AddOnAnswer>>,
     onClose: () -> Unit
 ) {
@@ -186,9 +187,8 @@ fun CatalogTaskPreviewScreen(
                     title = task.displayName
                 ),
                 pages = reviewPageEntries(
-                    task.assets,
-                    addOn = addOnResolver.readableVersion(task.addOn),
-                    content = task.payloadKind != null
+                    task.parts,
+                    addOn = addOnResolver.readableVersion(task.addOn)
                 ).takeIf { it.size > 1 }.orEmpty()
             )
         }
@@ -196,16 +196,21 @@ fun CatalogTaskPreviewScreen(
     // A level holding one Task still has a counter worth opening when the Task holds several
     // pages: the counter then names the pages, and this is that list. Nothing here can be marked,
     // so an entry is only a page's name.
-    val pageEntries = remember(assets, storedAddOn, pageState.hasContentPage) {
-        reviewPageEntries(assets, addOn = storedAddOn, content = pageState.hasContentPage)
+    val pageEntries = remember(item.parts, storedAddOn) {
+        reviewPageEntries(item.parts, addOn = storedAddOn)
     }
 
-    // The Prompt body, for the Content page only. Read by Task id rather than carried, and read
-    // here rather than in the card so the card stays a pure renderer with no database behind it.
-    val payloadRow by remember(item.taskId) { observePayload(item.taskId) }
-        .collectAsStateWithLifecycle(initialValue = null)
-    val taskResources by remember(item.taskId) { observeResources(item.taskId) }
-        .collectAsStateWithLifecycle(initialValue = emptyList())
+    // The Prompt body, for the Content page only. Read by Task and part rather than carried, and
+    // read here rather than in the card so the card stays a pure renderer with no database behind
+    // it. The part is the one the page on screen names, so a Task presenting several Prompts draws
+    // each body under its own heading rather than the first one's on every page.
+    val contentPartKey = (pageState.current as? ReviewPage.Content)?.partKey
+    val payloadRow by remember(item.taskId, contentPartKey) {
+        contentPartKey?.let { observePayload(item.taskId, it) } ?: flowOf(null)
+    }.collectAsStateWithLifecycle(initialValue = null)
+    val taskResources by remember(item.taskId, contentPartKey) {
+        contentPartKey?.let { observeResources(item.taskId, it) } ?: flowOf(emptyList())
+    }.collectAsStateWithLifecycle(initialValue = emptyList())
     // The answers the read-only questionnaire page shows. The same flow Review reads; this screen
     // has no control that could write to it.
     val answers by remember(item.taskId) { observeAnswers(item.taskId) }
@@ -225,7 +230,7 @@ fun CatalogTaskPreviewScreen(
             onBack = onClose,
             subtitle = when {
                 !hasPageLevel -> null
-                onContentPage -> "Prompt"
+                onContentPage -> "Question"
                 pageState.onAddOnPage -> "Add-on"
                 else -> assets.getOrNull(currentAsset)?.name
             },
@@ -326,12 +331,18 @@ fun CatalogTaskPreviewScreen(
                         )
                     } else {
                         PromptNoticePage(
-                            "This Prompt cannot be shown.",
+                            "This question cannot be shown.",
                             modifier = Modifier.fillMaxSize()
                         )
                     }
                 }
             } else {
+                // Back off the first file of a part returns to that part's Content page; the page
+                // list is where the answer lives now that a Task may present more than one Prompt.
+                val backToContentPage = (pageState.current as? ReviewPage.Asset)?.let { asset ->
+                    (pageState.pages.getOrNull(currentPage - 1) as? ReviewPage.Content)?.partKey ==
+                        asset.partKey
+                } == true
                 AssetRun(
                     item = item,
                     selectedIndex = currentAsset,
@@ -343,22 +354,22 @@ fun CatalogTaskPreviewScreen(
                     // the *level* it simply stops: there is no Task to leave for and nothing to
                     // complete, because nothing here is being decided.
                     //
-                    // Back off the **first page** goes to the Prompt page when there is one. A
-                    // Prompt Task's pages are Content first, then files, and skipping the Content
+                    // Back off the **first page of a part** goes to that part's Content page. A
+                    // Prompt's pages are Content first, then its files, and skipping the Content
                     // page to land on the previous Task made the back gesture jump two steps. The
                     // forward direction already stepped page → next Task only at the last page, so
                     // this makes the two ends symmetric.
                     canLeaveForward = taskIndex < tasks.lastIndex,
-                    canLeaveBack = pageState.hasContentPage || taskIndex > 0,
+                    canLeaveBack = backToContentPage || taskIndex > 0,
                     onLeaveForward = { currentTaskId = tasks[taskIndex + 1].taskId },
                     onLeaveBack = {
-                        if (pageState.hasContentPage) {
-                            pageIndex = 0
+                        if (backToContentPage) {
+                            pageIndex = currentPage - 1
                         } else if (taskIndex > 0) {
                             currentTaskId = tasks[taskIndex - 1].taskId
                         }
                     },
-                    onSelectAsset = { pageIndex = pageOfAsset(it, pageState.hasContentPage) },
+                    onSelectAsset = { pageIndex = pageState.pageOfAssetIndex(it) },
                     onTap = { chromeVisible = !chromeVisible },
                     // The last page, drawn read-only: the questions the attached version still asks
                     // and the answers on record. No chip and no field, so a look cannot become an
@@ -402,20 +413,16 @@ internal fun CatalogRow.asPreviewItem(rootUri: String): ReviewItem = ReviewItem(
     isCompleted = isCompleted,
     sizeBytes = sizeBytes,
     lastModified = lastModified,
-    assets = assets,
+    // The parts, which carry the Assets and each part's own envelope: this screen renders a whole
+    // item, and an item's pages are its parts'.
+    parts = parts,
     rootRelativePath = groupPath,
     // Carried for the same reason the decisions are: this screen draws no chip row today, but the
     // item it hands the renderer is the same shape every other surface hands it, and a control left
     // off here would be a second kind of item the moment this screen grows one.
     assetControls = assetControls,
-    // The Prompt envelope, carried for the same reason: this screen renders a whole item, and an
-    // item with a body is one whose first page is its Content page.
     packageKey = packageKey,
     packageTitle = packageTitle,
-    promptKey = promptKey,
-    payloadKind = payloadKind,
-    payloadSchema = payloadSchema,
-    payloadRevision = payloadRevision,
     // The questionnaire stamp, carried because it is a page of the Task: resolving it here is what
     // lets the preview show the same pages Review does. Reading it is all this screen does; the
     // answers arrive on their own flow.

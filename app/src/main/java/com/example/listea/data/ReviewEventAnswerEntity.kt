@@ -3,6 +3,7 @@ package com.example.listea.data
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
+import com.example.listea.domain.FieldAnswer
 import com.example.listea.domain.ViewerEvent
 import com.example.listea.domain.ViewerEventType
 import com.example.listea.domain.encodeValue
@@ -64,7 +65,17 @@ data class ReviewEventAnswerEntity(
     val type: String,
 
     /** The event's value half; see [com.example.listea.domain.encodeValue]. */
-    val value: String
+    val value: String,
+
+    /**
+     * The structured field this row answers, for a `form` Viewer's body; null for a viewer event.
+     *
+     * Schema 33 adds the column without backfilling it: a row that predates structured answers
+     * answered the Task as a whole and is never reinterpreted as a field. A field row's [type] is
+     * the field's declared type and [value] its encoded answer, so the two families share a table
+     * without either reading the other's rows.
+     */
+    val fieldKey: String? = null
 )
 
 /**
@@ -75,6 +86,9 @@ data class ReviewEventAnswerEntity(
  * the type will read it.
  */
 fun ReviewEventAnswerEntity.toViewerEvent(): ViewerEvent? {
+    // A field row's `type` is the field's declared type (`choice.single`), not an event key. It is
+    // a different family in the same table, and reading it as an event would be a guess.
+    if (fieldKey != null) return null
     val eventType = ViewerEventType.fromKey(type) ?: return null
     return parseEventValue(eventType, value)
 }
@@ -90,4 +104,17 @@ internal fun ViewerEvent.toReviewEventAnswer(
     assetId = assetId,
     type = type.key,
     value = encodeValue()
+)
+
+/** The row one structured field is stored as, under the submission that answered it. */
+internal fun FieldAnswer.toReviewEventAnswer(
+    reviewEventId: String,
+    ordinal: Int
+): ReviewEventAnswerEntity = ReviewEventAnswerEntity(
+    reviewEventId = reviewEventId,
+    ordinal = ordinal,
+    assetId = null,
+    type = type,
+    value = value,
+    fieldKey = fieldKey
 )

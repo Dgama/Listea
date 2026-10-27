@@ -132,8 +132,8 @@ fun ExportListScreen(
                     onCheckedChange = { viewModel.setQuickReviewWebhookEnabled(it) }
                 )
                 HelperText(
-                    "Finishing a Quick Review exports the folder's items. A folder belongs to no " +
-                        "List, so each item leaves by the method its own Todo chose."
+                    "Finishing a Quick Review exports the folder's Tasks. A folder belongs to no " +
+                        "List, so each Task leaves by the method its own Todo chose."
                 )
 
                 SwitchRow(
@@ -150,14 +150,14 @@ fun ExportListScreen(
                 )
 
                 SwitchRow(
-                    label = "Export checked items only",
+                    label = "Export checked Tasks only",
                     icon = Icons.Filled.FilterList,
                     checked = settings.webhookCompletedItemsOnly,
                     onCheckedChange = { viewModel.setWebhookCompletedItemsOnly(it) }
                 )
                 HelperText(
-                    "Every export carries only the items that are checked. With \"Review " +
-                        "unchecked items only\" on, that is exactly the decisions of the round you " +
+                    "Every export carries only the Tasks that are checked. With \"Review " +
+                        "unchecked Tasks only\" on, that is exactly the decisions of the round you " +
                         "just did. Nothing checked means nothing is exported, and Listea says so."
                 )
             }
@@ -287,7 +287,7 @@ private fun WebhookExportScreen(
                 HelperText(
                     "The value a Todo copies when it is created on Use default. A Todo keeps " +
                         "its own copy, so changing this later does not move an existing Todo; edit " +
-                        "the Todo to change where it posts. Items no Todo owns fall back to it."
+                        "the Todo to change where it posts. Tasks no Todo owns fall back to it."
                 )
             }
 
@@ -362,7 +362,7 @@ private fun TxtExportScreen(modifier: Modifier, onBack: () -> Unit) {
 
             SectionCard(title = "What is in the file") {
                 Text(
-                    "A header naming the round, then one line per item: its id, its name, " +
+                    "A header naming the round, then one line per Task: its id, its name, " +
                         "whether it is checked, its folder, and the actions it carries. The same " +
                         "facts a webhook POST carries, in a plain tab-separated form.",
                     style = MaterialTheme.typography.bodySmall,

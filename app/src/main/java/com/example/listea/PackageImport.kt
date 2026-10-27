@@ -5,8 +5,11 @@ import android.net.Uri
 import com.example.listea.data.ScannedFile
 import com.example.listea.domain.DiagnosticScope
 import com.example.listea.domain.PackageDiagnostic
+import com.example.listea.domain.PackageManifest
 import com.example.listea.domain.PackageProtocol
 import com.example.listea.domain.PackageSnapshot
+import com.example.listea.domain.PlannedPrompt
+import com.example.listea.domain.PlannedSection
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 
@@ -24,7 +27,12 @@ import java.io.InputStream
  * Nested Packages are allowed: a Package may ship another inside a member folder, and each is read
  * as its own.
  */
-fun planPackages(context: Context, importRoot: String, snapshot: FolderSnapshot): ImportPlan {
+fun planPackages(
+    context: Context,
+    importRoot: String,
+    snapshot: FolderSnapshot,
+    composition: CompositionChoice = CompositionChoice.Default
+): ImportPlan {
     val files = snapshot.files.associateBy { it.relativePath }
     val roots = packageRoots(snapshot, files)
     if (roots.size > PackageProtocol.MAX_PACKAGES_PER_SCOPE) {
@@ -93,7 +101,7 @@ fun planPackages(context: Context, importRoot: String, snapshot: FolderSnapshot)
 
         diagnostics += plan.diagnostics
         val packageRoot = packageScopePath(importRoot, root)
-        for (prompt in plan.prompts) {
+        val plannedPrompts = plan.prompts.map { prompt ->
             val assets = prompt.assets.filter { it.present }.mapIndexedNotNull { index, asset ->
                 val file = byMember[asset.member] ?: return@mapIndexedNotNull null
                 PlannedAsset(
@@ -105,21 +113,14 @@ fun planPackages(context: Context, importRoot: String, snapshot: FolderSnapshot)
                     sortOrder = index
                 )
             }
-            tasks += PlannedTask(
-                groupPath = catalogKey(manifest.packageKey, prompt.promptKey),
-                displayName = prompt.title,
-                assets = assets,
-                prompt = PlannedTaskPrompt(
-                    packageKey = manifest.packageKey,
-                    promptKey = prompt.promptKey,
-                    kind = prompt.kind,
-                    schema = prompt.schema,
-                    payload = prompt.payload,
-                    revision = manifest.revision,
-                    resources = prompt.resources
-                )
-            )
+            plannedPromptPart(manifest, prompt, assets) to prompt
         }
+        tasks += plannedTasks(
+            manifest = manifest,
+            prompts = plannedPrompts,
+            sections = plan.sections,
+            composition = composition
+        )
         packages += PlannedPackage(
             rootRelativePath = packageRoot,
             packageKey = manifest.packageKey,
@@ -150,6 +151,45 @@ fun planPackages(context: Context, importRoot: String, snapshot: FolderSnapshot)
 }
 
 /**
+ * Whether a scanned folder holds a v2 Package that declares at least one Section.
+ *
+ * The import dialog asks this **before** the run's plan exists, so it reads manifests only. A full
+ * [planPackages] would read every description body twice — once to ask, once to import — and the
+ * answer needs only the declaration. A folder with no Package, a v1 Package, or a v2 Package whose
+ * `sections` is empty answers false, which is what keeps the composition choice hidden where
+ * choosing it would change nothing.
+ */
+fun folderOffersSectionComposition(
+    context: Context,
+    importRoot: String,
+    snapshot: FolderSnapshot
+): Boolean {
+    val files = snapshot.files.associateBy { it.relativePath }
+    return packageRoots(snapshot, files).any { root ->
+        val prefix = if (root.isEmpty()) "" else "$root/"
+        val byMember = snapshot.files
+            .filter { it.relativePath.startsWith(prefix) }
+            .associateBy { it.relativePath.removePrefix(prefix) }
+        val manifest = byMember[MANIFEST_MEMBER] ?: return@any false
+        val plan = PackageProtocol.plan(
+            PackageSnapshot(
+                rootRelativePath = packageScopePath(importRoot, root),
+                manifestBytes = readBounded(
+                    context,
+                    manifest.uri,
+                    PackageProtocol.MAX_MANIFEST_BYTES
+                ),
+                presentMembers = byMember.keys,
+                // Prompt bodies are irrelevant to the declaration: the sections are read out of the
+                // manifest, and a missing description only makes a prompt unavailable.
+                readMember = { null }
+            )
+        )
+        plan.manifest?.protocol == PackageProtocol.PROTOCOL_V2 && plan.sections.isNotEmpty()
+    }
+}
+
+/**
  * A Package's catalog key: `<packageKey>/<promptKey>`.
  *
  * Deliberately **not** a filesystem path. A prompt-only Task has no locator of its own, and giving
@@ -157,6 +197,83 @@ fun planPackages(context: Context, importRoot: String, snapshot: FolderSnapshot)
  * show one Package as one scope and so `task_imports.groupPath` can carry a stable identity.
  */
 fun catalogKey(packageKey: String, promptKey: String): String = "$packageKey/$promptKey"
+
+/**
+ * A Section composition's catalog key: `<packageKey>/~section/<sectionKey>`.
+ *
+ * The `~` first segment cannot be a Prompt key (the protocol's key grammar starts with a
+ * lowercase letter or digit), so a Section Task and a Prompt Task can never collide in the catalog.
+ */
+fun sectionCatalogKey(packageKey: String, sectionKey: String): String =
+    "$packageKey/~section/$sectionKey"
+
+private fun plannedPromptPart(
+    manifest: PackageManifest,
+    prompt: PlannedPrompt,
+    assets: List<PlannedAsset>
+): PlannedPart = PlannedPart(
+    partKey = prompt.promptKey,
+    position = 0,
+    origin = PartOrigin.PACKAGE,
+    prompt = PlannedTaskPrompt(
+        packageKey = manifest.packageKey,
+        promptKey = prompt.promptKey,
+        kind = prompt.kind,
+        schema = prompt.schema,
+        payload = prompt.payload,
+        revision = manifest.revision,
+        resources = prompt.resources
+    ),
+    assets = assets,
+    resources = prompt.resources
+)
+
+/**
+ * The Tasks one Package would produce under [composition].
+ *
+ * One Task per Prompt is the default and the only v1 behavior. [CompositionChoice.SECTION] groups
+ * tagged Prompts under the Section's title, in manifest order, and leaves an untagged Prompt its
+ * own Task. A Section with no tagged Prompt yields no Task: it is a declaration, not work.
+ */
+private fun plannedTasks(
+    manifest: PackageManifest,
+    prompts: List<Pair<PlannedPart, PlannedPrompt>>,
+    sections: List<PlannedSection>,
+    composition: CompositionChoice
+): List<PlannedTask> {
+    fun promptTask(part: PlannedPart, prompt: PlannedPrompt) = PlannedTask(
+        groupPath = catalogKey(manifest.packageKey, prompt.promptKey),
+        displayName = prompt.title,
+        parts = listOf(part),
+        compositionKey = "prompt:${prompt.promptKey}"
+    )
+
+    if (composition != CompositionChoice.SECTION ||
+        manifest.protocol != PackageProtocol.PROTOCOL_V2
+    ) {
+        return prompts.map { (part, prompt) -> promptTask(part, prompt) }
+    }
+
+    val titles = sections.associate { it.sectionKey to it.title }
+    val grouped = linkedMapOf<String, MutableList<Pair<PlannedPart, PlannedPrompt>>>()
+    val untagged = mutableListOf<Pair<PlannedPart, PlannedPrompt>>()
+    for (entry in prompts) {
+        val section = entry.second.section
+        if (section == null) untagged += entry else grouped.getOrPut(section) { mutableListOf() } += entry
+    }
+
+    val tasks = mutableListOf<PlannedTask>()
+    for ((sectionKey, members) in grouped) {
+        tasks += PlannedTask(
+            groupPath = sectionCatalogKey(manifest.packageKey, sectionKey),
+            displayName = titles[sectionKey] ?: sectionKey,
+            parts = members.mapIndexed { index, (part, _) -> part.copy(position = index) },
+            compositionKey = "section:$sectionKey"
+        )
+    }
+    untagged.forEach { (part, prompt) -> tasks += promptTask(part, prompt) }
+    return tasks
+}
 
 private const val MANIFEST_MEMBER = ".listea/manifest.json"
 

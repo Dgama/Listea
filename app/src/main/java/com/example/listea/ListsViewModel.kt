@@ -31,6 +31,7 @@ import com.example.listea.data.AddOnVersionEntity
 import com.example.listea.data.toAddOnAnswer
 import com.example.listea.data.toViewerEvent
 import com.example.listea.data.AssetDecisions
+import com.example.listea.data.AssetEntity
 import com.example.listea.data.CatalogRow
 import com.example.listea.data.toAssetMark
 import com.example.listea.data.toEntity
@@ -53,10 +54,12 @@ import com.example.listea.data.newItemPublicId
 import com.example.listea.data.PayloadAnswerRow
 import com.example.listea.data.PayloadAssetRow
 import com.example.listea.data.PayloadMarkRow
+import com.example.listea.data.PayloadPartRow
 import com.example.listea.data.PayloadPromptRow
 import com.example.listea.data.PayloadTaskRow
 import com.example.listea.data.ReviewAsset
 import com.example.listea.data.ReviewItem
+import com.example.listea.data.ReviewPart
 import com.example.listea.data.ScannedFile
 import com.example.listea.data.SharedFileState
 import com.example.listea.data.SourceEntity
@@ -69,7 +72,8 @@ import com.example.listea.data.rootRelativePathOf
 import com.example.listea.data.taskDecisions
 import com.example.listea.data.toReviewAsset
 import com.example.listea.data.TaskAssetControls
-import com.example.listea.data.TaskPayloadEntity
+import com.example.listea.data.TaskPartPayloadEntity
+import com.example.listea.data.TaskPartStateEntity
 import com.example.listea.data.TaskResourceView
 import com.example.listea.data.TemplateEntity
 import com.example.listea.data.TemplateStore
@@ -92,6 +96,7 @@ import com.example.listea.domain.ReviewContext
 import com.example.listea.domain.decodeExportChoice
 import com.example.listea.domain.encodeExportChoice
 import com.example.listea.domain.ReviewResponse
+import com.example.listea.domain.completesTask
 import com.example.listea.domain.parse
 import com.example.listea.domain.StoredAddOnVersion
 import com.example.listea.domain.StoredTemplateVersion
@@ -102,6 +107,15 @@ import com.example.listea.domain.Templates
 import com.example.listea.domain.ViewerEvent
 import com.example.listea.domain.ViewerEventType
 import com.example.listea.domain.CommitPolicy
+import com.example.listea.domain.CompletionPolicy
+import com.example.listea.domain.FieldAnswer
+import com.example.listea.domain.FormFieldType
+import com.example.listea.domain.FormPrompt
+import com.example.listea.domain.MAX_FORM_TEXT
+import com.example.listea.domain.isComplete
+import com.example.listea.domain.visibleFields
+import com.example.listea.domain.ResponseContract
+import com.example.listea.domain.ViewerCapability
 import com.example.listea.domain.TaskReviewDefinition
 import com.example.listea.domain.Viewers
 import java.util.UUID
@@ -249,7 +263,18 @@ sealed interface ImportFolderRequest {
          * the other two pickers this one always has at least the built-in, because every Task has
          * always been judged by something.
          */
-        val taskReviews: List<StoredTemplateVersion> = emptyList()
+        val taskReviews: List<StoredTemplateVersion> = emptyList(),
+
+        /**
+         * Whether this folder holds a v2 Package that declares Sections.
+         *
+         * Read when the folder was walked, from the manifests alone — see
+         * [folderOffersSectionComposition] — because the choice of *one Task per question* or *one
+         * Task per Section* only changes anything for such a Package. False hides the choice
+         * entirely, which is the honest answer for a v1 Package, a folder of files, or a v2 Package
+         * whose Sections list is empty.
+         */
+        val compositionOffered: Boolean = false
     ) : ImportFolderRequest
 
     /** The run is writing. */
@@ -1029,36 +1054,60 @@ class ListsViewModel @JvmOverloads constructor(
                 // has never been written has no row, and `AssetDecisions()` is what that means: a
                 // file nobody has said anything about, which is not the same as a missing answer.
                 val stateByAsset = states.associate { it.assetId to it.decisions }
-                // A Task with no import row is absent, and the item's default `""` is the right
-                // answer for it: a manual entry has no run behind it to have been configured by.
-                val controlByTask = controls.associate { it.taskId to it.assetControls }
-                // The same rule for the questionnaire: a Task with no import row has no add-on, and
-                // the item's default `""` is the right answer for it.
-                val addOnByTask = controls.associate { it.taskId to it.addOn }
-                // And for the review: the Task was judged under the template its own import
-                // stamped, and an empty stamp is a Task from before v0.8.1 that was in fact
-                // judged by the built-in.
-                val reviewByTask = controls.associate { it.taskId to it.taskReview }
+                // One row per part since v0.8.4. The Task-level stamps repeat on each, and the
+                // first row is where the Task's own facts are read.
+                val controlsByTask = controls.groupBy { it.taskId }
                 ListDetail(
                     owner,
                     items.map { item ->
-                        val resolved = byTask[item.taskId].orEmpty().map { asset ->
+                        val taskAssets = byTask[item.taskId].orEmpty()
+                        val rows = controlsByTask[item.taskId].orEmpty().sortedBy { it.position }
+                        fun reviewAsset(asset: AssetEntity) =
                             asset.toReviewAsset(stateByAsset[asset.id] ?: AssetDecisions())
+
+                        val assetsByPart = taskAssets.groupBy { it.partKey }
+                        val parts = rows.map { row ->
+                            ReviewPart(
+                                partKey = row.partKey,
+                                position = row.position,
+                                promptKey = row.promptKey,
+                                payloadKind = row.payloadKind,
+                                payloadSchema = row.payloadSchema,
+                                payloadRevision = row.payloadRevision,
+                                required = row.required,
+                                present = row.present,
+                                availability = row.availability,
+                                assets = assetsByPart[row.partKey].orEmpty().map(::reviewAsset)
+                            )
                         }
-                        val control = controls.firstOrNull { it.taskId == item.taskId }
+                        // See `ListsDao.resolveParts`: an Asset whose part row is gone still
+                        // belongs to its Task, and a Task with no part rows reads as one
+                        // degenerate part rather than as a Task with no pages.
+                        val unassigned = assetsByPart[null].orEmpty().map(::reviewAsset)
+                        val resolvedParts = when {
+                            parts.isEmpty() -> listOf(
+                                ReviewPart(
+                                    partKey = "local:0",
+                                    position = 0,
+                                    assets = taskAssets.map(::reviewAsset)
+                                )
+                            )
+                            unassigned.isEmpty() -> parts
+                            else -> parts.mapIndexed { index, part ->
+                                if (index == 0) part.copy(assets = part.assets + unassigned) else part
+                            }
+                        }
+                        val control = rows.firstOrNull()
+                        val resolved = resolvedParts.flatMap { it.assets }
                         item.toReviewItem(
                             rootUri = owner.sourceRootUri,
-                            assetControls = controlByTask[item.taskId].orEmpty(),
-                            addOn = addOnByTask[item.taskId].orEmpty(),
-                            taskReview = reviewByTask[item.taskId].orEmpty(),
+                            assetControls = control?.assetControls.orEmpty(),
+                            addOn = control?.addOn.orEmpty(),
+                            taskReview = control?.taskReview.orEmpty(),
                             packageKey = control?.packageKey,
                             packageTitle = control?.packageTitle,
-                            promptKey = control?.promptKey,
-                            payloadKind = control?.payloadKind,
-                            payloadSchema = control?.payloadSchema,
-                            payloadRevision = control?.payloadRevision
+                            parts = resolvedParts
                         ).copy(
-                            assets = resolved,
                             reviewBlocked = reviewBlockFor(resolved)
                         )
                     }
@@ -1231,17 +1280,40 @@ class ListsViewModel @JvmOverloads constructor(
     fun observeLatestResponse(taskId: String): Flow<String?> = dao.observeLatestResponse(taskId)
 
     /**
-     * The Prompt body for one Task, read when its Content page is composed.
+     * One part's Prompt body, read when its Content page is composed.
      *
-     * Deliberately not carried on the queue item: a round may hold hundreds of Tasks, and every
-     * body in memory to draw one page is the cost this split exists to avoid.
+     * Deliberately not carried on the queue item: a round may hold hundreds of Tasks and several
+     * parts each, and every body in memory to draw one page is the cost this split exists to avoid.
+     * The part is named because a Task may hold several Content pages and they are not the same
+     * document.
      */
-    fun observeTaskPayload(taskId: String): Flow<TaskPayloadEntity?> =
-        dao.observeTaskPayload(taskId)
+    fun observePartPayload(taskId: String, partKey: String): Flow<TaskPartPayloadEntity?> =
+        dao.observePartPayload(taskId, partKey)
 
-    /** The Resources one Prompt uses, with this Task's own requiredness for each. */
-    fun observeTaskResources(taskId: String): Flow<List<TaskResourceView>> =
-        dao.observeTaskResourceViews(taskId)
+    /** The Resources one part uses, with this Prompt's own requiredness for each. */
+    fun observePartResources(taskId: String, partKey: String): Flow<List<TaskResourceView>> =
+        dao.observePartResourceViews(taskId, partKey)
+
+    /**
+     * One part's current answer, live: what its Content page shows as already said.
+     *
+     * The part's own state, not the Task's latest response. A Task presenting two questions has
+     * two answers, and the newer one belongs under its own page — the task-level read would show
+     * the second question filled with the first one's answer. History stays in the events; this is
+     * the canonical current value.
+     */
+    fun observePartState(taskId: String, partKey: String): Flow<TaskPartStateEntity?> =
+        dao.observePartState(taskId, partKey)
+
+    /**
+     * Which of a Task's parts are answered, live: the completion bar's pending count.
+     *
+     * A set of part keys rather than a number, because the caller knows which parts are required
+     * and present — the DAO does not repeat the part model into the UI, and the count shown is
+     * computed from the same rows completion is.
+     */
+    fun observeAnsweredParts(taskId: String): Flow<Set<String>> =
+        dao.observeAnsweredPartKeys(taskId).map { keys -> keys.toSet() }
 
     /**
      * The events of that same latest submission, as the domain events the sheet lists.
@@ -1691,6 +1763,18 @@ class ListsViewModel @JvmOverloads constructor(
         terms: ReviewTerms,
         review: StoredTemplateVersion? = null,
         events: List<ViewerEvent> = emptyList(),
+        // The part the judgment is about. Null is a Task-level submission: the completion control
+        // on a media Task, or a template committing the Task as a whole. A Prompt's answer is
+        // always scoped to the part whose page it was made on.
+        partKey: String? = null,
+        // A structured Prompt's answer: the visible fields of a `form` body. A form is not a
+        // viewer event — there is no point or option a card reported — so the answer travels
+        // beside [events] and becomes a StructuredReview rather than an invented event list.
+        fields: List<FieldAnswer> = emptyList(),
+        // True when this call is the completion control itself: a person saying the Task is done,
+        // as opposed to answering one of its parts. Completion provenance is written down so a
+        // later part answer cannot silently retract the sign-off.
+        explicitCompletion: Boolean = false,
         onResult: (accepted: Boolean) -> Unit = {}
     ) = launchDb {
         // A template that accepts viewer events is submitted *with* them or not at all. Writing a
@@ -1705,23 +1789,54 @@ class ListsViewModel @JvmOverloads constructor(
         // a non-revisable template has not already committed. A refusal writes neither an event nor
         // a state change, and [onResult] is how the surface learns not to advance.
         val definition = review?.taskReview
-        if (!submissionAccepted(item, definition, events)) {
+        if (!submissionAccepted(item, definition, events, partKey, fields)) {
             onResult(false)
             return@launchDb
         }
-        val response: ReviewResponse = if (definition != null && definition.accepts.isNotEmpty()) {
-            ReviewResponse.PrimaryReview(completed = true, events = events)
-        } else {
-            // The headless definition and every template written before v0.8.1 record the fold of
-            // the pairs, exactly as they always did.
-            ReviewResponse.MediaReview(
-                completed = true,
-                selections = item.taskDecisions.selections
+        val structured = fields.isNotEmpty() || (
+            partKey != null &&
+                item.parts.firstOrNull { it.partKey == partKey }?.payloadKind == Viewers.Form.kind
             )
+        val response: ReviewResponse = when {
+            // A form's answer is its fields, even when the form has none visible: the submission
+            // still says *which* shape was committed, and an empty structured answer is readable.
+            structured && partKey != null -> ReviewResponse.StructuredReview(
+                completed = true,
+                fields = fields
+            )
+
+            definition != null && definition.accepts.isNotEmpty() ->
+                ReviewResponse.PrimaryReview(completed = true, events = events)
+
+            else ->
+                // The headless definition and every template written before v0.8.1 record the fold
+                // of the pairs, exactly as they always did.
+                ReviewResponse.MediaReview(
+                    completed = true,
+                    selections = item.taskDecisions.selections
+                )
+        }
+        val completion = definition?.completion ?: CompletionPolicy.SinglePart
+        // SinglePart keeps the rule every pre-v0.8.4 definition stated: the *response* answers
+        // whether the Task is complete. A part policy is the template's own flag, and the DAO
+        // computes the rest from the parts it just wrote.
+        val completesTask = when (completion) {
+            CompletionPolicy.SinglePart -> response.completesTask
+            else -> definition?.completesTask == true
         }
         val ref = review?.ref ?: terms.template
         val (transitioned, scopes) = writeOrder.withLock {
-            val ids = dao.submitReview(item.taskId, response, ref, terms.context, now())
+            val ids = dao.submitReview(
+                item.taskId,
+                partKey,
+                response,
+                ref,
+                terms.context,
+                completion,
+                completesTask,
+                explicitCompletion,
+                now()
+            )
             ids to ids.associateWith { scopeOf(it) }
         }
         transitioned.forEach { onCompletionTransition(it, true, scopes.getValue(it)) }
@@ -1740,19 +1855,42 @@ class ListsViewModel @JvmOverloads constructor(
     private suspend fun submissionAccepted(
         item: ReviewItem,
         definition: TaskReviewDefinition?,
-        events: List<ViewerEvent>
+        events: List<ViewerEvent>,
+        partKey: String?,
+        fields: List<FieldAnswer>
     ): Boolean {
-        if (item.payloadKind == null) {
+        // No part named: the judgment is the Task's own. A media Task keeps exactly the rule it
+        // had; a Prompt Task submitted this way (the completion control, a whole-Task template) has
+        // no Prompt facts to check against, and the event rule is the one that applies.
+        val part = partKey?.let { key -> item.parts.firstOrNull { it.partKey == key } }
+        if (part == null || part.payloadKind == null) {
             return !(definition != null && definition.accepts.isNotEmpty() && events.isEmpty())
         }
 
-        val payload = dao.taskPayload(item.taskId) ?: return false
+        val payload = dao.partPayload(item.taskId, part.partKey) ?: return false
         val capability = Viewers.forPayload(payload.kind, payload.schemaVersion) ?: return false
         val review = definition ?: return false
-        if (review.accepts.isEmpty()) return false
 
         // The body moved under an open review: the option list on screen is not this body's.
-        if (item.payloadRevision != null && payload.revision != item.payloadRevision) return false
+        if (part.payloadRevision != null && payload.revision != part.payloadRevision) return false
+
+        // Required content that is not there cannot support a judgment — this part's requirements,
+        // because a photo another Prompt requires is not this Prompt's evidence. Both families are
+        // held to it: a form whose required photo is missing cannot be submitted either.
+        if (dao.partResourceViews(item.taskId, part.partKey).any { it.required && it.missing }) {
+            return false
+        }
+
+        if (ResponseContract.STRUCTURED in capability.responses) {
+            // A structured answer is governed by the Viewer's own template, not by whichever
+            // event template happened to be attached: the contract and the renderer are one
+            // compatibility statement.
+            if (review.viewer != capability.ref) return false
+            if (!structuredSubmissionAccepted(payload, capability, fields)) return false
+            return partIsRevisableOrUnanswered(item.taskId, part.partKey, review)
+        }
+
+        if (review.accepts.isEmpty()) return false
 
         // `choice.single` is exactly one choice event, and it must be one the Viewer can emit and
         // the template catches.
@@ -1778,16 +1916,66 @@ class ListsViewModel @JvmOverloads constructor(
         val content = capability.parse(payload.payload) ?: return false
         if (content.options.none { it.id == choice.optionId && it.label == choice.label }) return false
 
-        // Required content that is not there cannot support a judgment.
-        if (dao.taskResourceViews(item.taskId).any { it.required && it.missing }) return false
+        return partIsRevisableOrUnanswered(item.taskId, part.partKey, review)
+    }
 
-        // One answer for good, when the template says so.
-        if (!review.revisable) {
-            val recorded = dao.latestResponse(item.taskId)?.let { ReviewResponse.parse(it) }
+    /**
+     * Whether a structured submission answers exactly the form's visible questions.
+     *
+     * The body is parsed again here rather than trusted from the surface: a form's fields, their
+     * types, options and conditions are content, and the write boundary is the one place every
+     * caller crosses. Hidden fields are refused even when the surface sends them — changing a
+     * branch must not leave an answer to a question the person can no longer see — and a visible
+     * required field with no answer refuses the whole submission.
+     */
+    private fun structuredSubmissionAccepted(
+        payload: TaskPartPayloadEntity,
+        capability: ViewerCapability,
+        fields: List<FieldAnswer>
+    ): Boolean {
+        val form = capability.parse(payload.payload) as? FormPrompt ?: return false
 
-            if (recorded is ReviewResponse.PrimaryReview) return false
+        val answers = mutableMapOf<String, String>()
+        for (answer in fields) {
+            if (answers.put(answer.fieldKey, answer.value) != null) return false
         }
-        return true
+
+        val visible = form.visibleFields(answers).associateBy { it.key }
+        for (answer in fields) {
+            val field = visible[answer.fieldKey] ?: return false
+            if (field.type.wire != answer.type) return false
+            when (field.type) {
+                FormFieldType.ChoiceSingle -> {
+                    if (field.options.none { it.id == answer.value }) return false
+                }
+
+                FormFieldType.Text -> {
+                    if (answer.value.isBlank() || answer.value.length > MAX_FORM_TEXT) return false
+                }
+            }
+        }
+        return form.isComplete(answers)
+    }
+
+    /**
+     * One answer for good, when the template says so.
+     *
+     * "Answered" is the part's state, not the Task's latest event: another part's answer must not
+     * lock this one. Both answer families count — an event review and a structured review are the
+     * same fact about the part, and a non-revisable part may not be given a second one.
+     */
+    private suspend fun partIsRevisableOrUnanswered(
+        taskId: String,
+        partKey: String,
+        review: TaskReviewDefinition
+    ): Boolean {
+        if (review.revisable) return true
+        val recorded = dao.partState(taskId, partKey)
+            ?.response
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { ReviewResponse.parse(it) }
+        return recorded !is ReviewResponse.PrimaryReview &&
+            recorded !is ReviewResponse.StructuredReview
     }
 
     /**
@@ -1987,7 +2175,14 @@ class ListsViewModel @JvmOverloads constructor(
             histories = dao.dissolvedHistoriesAt(rootUri, folderPath),
             templates = attachable,
             addOns = attachableAddOns,
-            taskReviews = attachableReviews
+            taskReviews = attachableReviews,
+            // Manifests only: the dialog asks whether choosing Sections would mean anything before
+            // the run that would read the bodies exists.
+            compositionOffered = folderOffersSectionComposition(
+                context = getApplication(),
+                importRoot = folderPath,
+                snapshot = tree
+            )
         )
     }
 
@@ -2024,6 +2219,10 @@ class ListsViewModel @JvmOverloads constructor(
             // This Todo's own answer, not Settings': a refresh is about a Todo that exists and has
             // already said what a change to its material means.
             contentPolicy = ContentPolicy.fromKey(source.contentPolicy),
+            // And its own composition rule: a refresh repeats the taker's answer rather than
+            // reverting a Section Todo to one Task per question. The dialog offers changing it;
+            // until it does, this is what it opens on.
+            composition = CompositionChoice.fromKey(source.composition),
             // The same read, and it is the Todo's own answer for the same reason. A refresh opens
             // on the templates the Todo is attached to, so the attach step shows what is already
             // true and a user changes it deliberately rather than re-choosing from scratch.
@@ -2071,7 +2270,14 @@ class ListsViewModel @JvmOverloads constructor(
             options = options,
             templates = attachableTemplates(),
             addOns = addOnResolverNow().attachable,
-            taskReviews = resolverNow().attachableReviews
+            taskReviews = resolverNow().attachableReviews,
+            // Only for the sentence the dialog draws: a refresh repeats the stored composition
+            // rather than asking again, but it can say which one that is.
+            compositionOffered = folderOffersSectionComposition(
+                context = getApplication(),
+                importRoot = source.relativePath,
+                snapshot = tree
+            )
             // Deliberately no histories: a refresh runs over a Todo that is still here, and a
             // recovery overwrites a Task's judgment. Loading a history into a live Todo would take
             // the decisions made since and quietly replace them with older ones. Recovery is for a
@@ -2188,9 +2394,10 @@ class ListsViewModel @JvmOverloads constructor(
     private fun importPlan(
         importer: ImporterKind,
         importRoot: String,
-        tree: FolderSnapshot
+        tree: FolderSnapshot,
+        composition: CompositionChoice = CompositionChoice.Default
     ): ImportPlan = plan(importer, importRoot, tree) { root, snapshot ->
-        planPackages(getApplication(), root, snapshot)
+        planPackages(getApplication(), root, snapshot, composition)
     }
 
     private suspend fun applyImport(
@@ -2279,6 +2486,12 @@ class ListsViewModel @JvmOverloads constructor(
             return
         }
         val taskReview = encodeTemplateAttachments(listOf(offeredReview))
+        // The rule this run's Tasks are completed under, read from the same resolvable version
+        // that was just validated. A reference this build cannot read carries forward with no
+        // policy to apply, which is [CompletionPolicy.SinglePart] — the pre-v0.8.4 answer that
+        // neither adds nor removes a completion on a re-import.
+        val completion = reviewTables.reviewForRef(offeredReview)?.taskReview?.completion
+            ?: CompletionPolicy.SinglePart
 
         // The address is resolved by the dialog (*Use default* copies the live default at Confirm;
         // *Custom* is what was typed) and arrives here final. A Todo whose method is Webhook must
@@ -2316,6 +2529,7 @@ class ListsViewModel @JvmOverloads constructor(
                 keepStateOnDelete = options.keepStateOnDelete,
                 webhookUrl = webhookUrl,
                 webhookFromDefault = options.webhookFromDefault,
+                composition = options.composition,
                 now = now()
             )
         } else {
@@ -2333,7 +2547,7 @@ class ListsViewModel @JvmOverloads constructor(
             dao.runImport(
                 source.id,
                 pending.folderPath,
-                importPlan(importer, pending.folderPath, pending.tree),
+                importPlan(importer, pending.folderPath, pending.tree, options.composition),
                 now(),
                 recoverFrom = recoverFrom?.sourceId,
                 // The dialog's answer, not the row's: the write-back below records it, and a run
@@ -2343,7 +2557,8 @@ class ListsViewModel @JvmOverloads constructor(
                 // so it has to be what the user just chose rather than what the Todo holds.
                 assetControls = assetControls,
                 addOn = addOn,
-                taskReview = taskReview
+                taskReview = taskReview,
+                completion = completion
             )
         }.getOrNull()
 
@@ -2378,7 +2593,8 @@ class ListsViewModel @JvmOverloads constructor(
             followUpstream = options.followUpstream,
             keepStateOnDelete = options.keepStateOnDelete,
             webhookUrl = webhookUrl,
-            webhookFromDefault = options.webhookFromDefault
+            webhookFromDefault = options.webhookFromDefault,
+            composition = options.composition
         )
 
         _importVersion.value += 1
@@ -2413,7 +2629,13 @@ class ListsViewModel @JvmOverloads constructor(
 
         val importer = ImporterKind.fromKey(source.importerKind) ?: return@launchDb
         val tree = scanFolderTreeAt(source.rootUri, source.relativePath) ?: return@launchDb
-        if (!dao.sourceHasChanges(sourceId, source.relativePath, importPlan(importer, source.relativePath, tree))) {
+        val composition = CompositionChoice.fromKey(source.composition)
+        if (!dao.sourceHasChanges(
+                sourceId,
+                source.relativePath,
+                importPlan(importer, source.relativePath, tree, composition)
+            )
+        ) {
             return@launchDb
         }
 
@@ -2426,6 +2648,7 @@ class ListsViewModel @JvmOverloads constructor(
             displayName = source.displayName,
             keepTree = source.keepTree,
             contentPolicy = ContentPolicy.fromKey(source.contentPolicy),
+            composition = composition,
             // The same decode [requestSourceRefresh] does, because this is that dialog's answer
             // taken without the dialog: a run nobody was asked about re-attaches exactly what the
             // Todo already names, so following an upstream changes the material and never the
@@ -2993,7 +3216,7 @@ class ListsViewModel @JvmOverloads constructor(
         _resyncRequest.value = if (removed.isSuccess) {
             null
         } else {
-            ResyncRequest.Error("Could not remove the missing items. Nothing was changed.")
+            ResyncRequest.Error("Could not remove the missing Tasks. Nothing was changed.")
         }
     }
 
@@ -3757,7 +3980,15 @@ class ListsViewModel @JvmOverloads constructor(
          * The newest submission's stored response, by Task. Absent for a Task never submitted, and
          * unreadable rows are dropped by the export writer rather than guessed at.
          */
-        val responseByTask: Map<String, String> = emptyMap()
+        val responseByTask: Map<String, String> = emptyMap(),
+        /**
+         * Every part of every Task in the round, by Task, in composition order.
+         *
+         * The v6 writer's input: a Task's parts are its decisions, and a part with no body or no
+         * answer is still a part. The v5 writer keeps using [promptsByTask] because a v5 body has
+         * one `content` object and must stay byte-identical.
+         */
+        val partsByTask: Map<String, List<PayloadPartRow>> = emptyMap()
     )
 
     private suspend fun payloadFacts(rows: List<ListItemEntity>): PayloadFacts {
@@ -3779,12 +4010,24 @@ class ListsViewModel @JvmOverloads constructor(
         val promptsByTask = if (taskIds.isEmpty()) {
             emptyMap()
         } else {
-            dao.getPayloadPrompts(taskIds).associateBy { it.taskId }
+            // One entry per Task, and the envelope of its *first* part: v5 has one `content`
+            // object per Task, and the query orders parts by position. v6 reads every part and
+            // groups by `partKey` instead; see the v6 writer.
+            dao.getPayloadPrompts(taskIds)
+                .groupBy { it.taskId }
+                .mapValues { (_, parts) -> parts.first() }
         }
         val responseByTask = if (taskIds.isEmpty()) {
             emptyMap()
         } else {
             dao.getLatestResponses(taskIds).associate { it.taskId to it.response }
+        }
+        // The v6 read, asked for every round for the same reason: it is one query and empty when the
+        // round is a single-part media round, which is the shape that must stay v5.
+        val partsByTask = if (taskIds.isEmpty()) {
+            emptyMap()
+        } else {
+            dao.getPayloadParts(taskIds).groupBy { it.taskId }
         }
         val assets = assetsByTask.values.flatten()
         val marksByAsset = if (assets.isEmpty()) {
@@ -3823,7 +4066,8 @@ class ListsViewModel @JvmOverloads constructor(
             addOnResolver = addOnResolverNow(),
             answersByTask = answersByTask,
             promptsByTask = promptsByTask,
-            responseByTask = responseByTask
+            responseByTask = responseByTask,
+            partsByTask = partsByTask
         )
     }
 
@@ -3930,7 +4174,8 @@ class ListsViewModel @JvmOverloads constructor(
                     addOnResolver = facts.addOnResolver,
                     answersByTask = facts.answersByTask,
                     promptsByTask = facts.promptsByTask,
-                    responseByTask = facts.responseByTask
+                    responseByTask = facts.responseByTask,
+                    partsByTask = facts.partsByTask
                 )
             )
 

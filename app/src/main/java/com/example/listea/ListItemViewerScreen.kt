@@ -16,11 +16,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.exoplayer.ExoPlayer
 import com.example.listea.data.AssetDecisions
 import com.example.listea.data.ReviewItem
-import com.example.listea.data.TaskPayloadEntity
+import com.example.listea.data.TaskPartPayloadEntity
 import com.example.listea.data.TaskResourceView
 import com.example.listea.domain.AddOnAnswer
 import com.example.listea.domain.decodePrompt
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
 
 /**
  * Looking at what a list item actually is, opened by tapping it on the list page.
@@ -58,11 +59,11 @@ fun ListItemViewerScreen(
     // The add-on is resolved from the rows every item column names, exactly as Review resolves it,
     // so this screen and Review cannot disagree about whether a Task has a questionnaire page.
     addOnResolver: AddOnResolver,
-    // The Prompt body is read by Task id rather than carried on every item, and the same is true
-    // here: a list of a thousand prompts must not hold a thousand bodies in memory to show one.
-    // These are reads only — the screen still has no write it could make.
-    observePayload: (String) -> Flow<TaskPayloadEntity?>,
-    observeResources: (String) -> Flow<List<TaskResourceView>>,
+    // The Prompt body is read by Task and part rather than carried on every item, and the same is
+    // true here: a list of a thousand prompts must not hold a thousand bodies in memory to show
+    // one. These are reads only — the screen still has no write it could make.
+    observePayload: (String, String) -> Flow<TaskPartPayloadEntity?>,
+    observeResources: (String, String) -> Flow<List<TaskResourceView>>,
     observeAnswers: (String) -> Flow<List<AddOnAnswer>>,
     onClose: () -> Unit
 ) {
@@ -107,11 +108,7 @@ fun ListItemViewerScreen(
     // Prompt's Content page is one of those pages and keeps its place at the front.
     val queueEntries = remember(items, addOnResolver) {
         reviewQueueEntries(items) { entry ->
-            reviewPageEntries(
-                assetsOf(entry),
-                addOn = addOnResolver.readableVersion(entry.addOn),
-                content = entry.hasContentPage()
-            )
+            reviewPageEntries(entry.parts, addOn = addOnResolver.readableVersion(entry.addOn))
         }
     }
 
@@ -134,16 +131,21 @@ fun ListItemViewerScreen(
     val hasPageLevel = pageState.hasPageLevel
     // A list holding one item still has a queue worth opening when that item holds several pages:
     // the counter then names the pages, and this is that list.
-    val pageEntries = remember(assets, storedAddOn, pageState.hasContentPage) {
-        reviewPageEntries(assets, addOn = storedAddOn, content = pageState.hasContentPage)
+    val pageEntries = remember(item.parts, storedAddOn) {
+        reviewPageEntries(item.parts, addOn = storedAddOn)
     }
 
-    // The Prompt body, for the Content page only. Read by Task id rather than carried, and read
-    // here rather than in the card so the card stays a pure renderer with no database behind it.
-    val payloadRow by remember(item.taskId) { observePayload(item.taskId) }
-        .collectAsStateWithLifecycle(initialValue = null)
-    val taskResources by remember(item.taskId) { observeResources(item.taskId) }
-        .collectAsStateWithLifecycle(initialValue = emptyList())
+    // The Prompt body, for the Content page only. Read by Task and part rather than carried, and
+    // read here rather than in the card so the card stays a pure renderer with no database behind
+    // it. The part is the one the page on screen names, so a Task presenting several Prompts draws
+    // each body under its own heading rather than the first one's on every page.
+    val contentPartKey = (pageState.current as? ReviewPage.Content)?.partKey
+    val payloadRow by remember(item.taskId, contentPartKey) {
+        contentPartKey?.let { observePayload(item.taskId, it) } ?: flowOf(null)
+    }.collectAsStateWithLifecycle(initialValue = null)
+    val taskResources by remember(item.taskId, contentPartKey) {
+        contentPartKey?.let { observeResources(item.taskId, it) } ?: flowOf(emptyList())
+    }.collectAsStateWithLifecycle(initialValue = emptyList())
     // The answers the read-only questionnaire page and the Info sheet show. The same flow Review
     // reads; this screen has no control that could write to it.
     val answers by remember(item.taskId) { observeAnswers(item.taskId) }
@@ -160,7 +162,7 @@ fun ListItemViewerScreen(
             onBack = onClose,
             subtitle = when {
                 !hasPageLevel -> null
-                onContentPage -> "Prompt"
+                onContentPage -> "Question"
                 pageState.onAddOnPage -> "Add-on"
                 else -> assets.getOrNull(currentAsset)?.name
             },
@@ -258,12 +260,18 @@ fun ListItemViewerScreen(
                         )
                     } else {
                         PromptNoticePage(
-                            "This Prompt cannot be shown.",
+                            "This question cannot be shown.",
                             modifier = Modifier.fillMaxSize()
                         )
                     }
                 }
             } else {
+                // Back off the first file of a part returns to that part's Content page; the page
+                // list is where the answer lives now that a Task may present more than one Prompt.
+                val backToContentPage = (pageState.current as? ReviewPage.Asset)?.let { asset ->
+                    (pageState.pages.getOrNull(currentPage - 1) as? ReviewPage.Content)?.partKey ==
+                        asset.partKey
+                } == true
                 AssetRun(
                     item = item,
                     selectedIndex = currentAsset,
@@ -272,20 +280,20 @@ fun ListItemViewerScreen(
                     settings = settings,
                     // The outer ends simply stop. There is no queue being worked through and
                     // nothing to complete, so running off the last item is not an event — it is
-                    // just the end. Back off the **first page** of a Prompt Task goes to its
+                    // just the end. Back off the **first page of a part** goes to that part's
                     // Content page rather than skipping it for the previous item, which makes the
                     // two ends of the run symmetric.
                     canLeaveForward = index < items.lastIndex,
-                    canLeaveBack = pageState.hasContentPage || index > 0,
+                    canLeaveBack = backToContentPage || index > 0,
                     onLeaveForward = { currentItemId = items[index + 1].id },
                     onLeaveBack = {
-                        if (pageState.hasContentPage) {
-                            pageIndex = 0
+                        if (backToContentPage) {
+                            pageIndex = currentPage - 1
                         } else if (index > 0) {
                             currentItemId = items[index - 1].id
                         }
                     },
-                    onSelectAsset = { pageIndex = pageOfAsset(it, pageState.hasContentPage) },
+                    onSelectAsset = { pageIndex = pageState.pageOfAssetIndex(it) },
                     onTap = { chromeVisible = !chromeVisible },
                     // The last page, drawn read-only: the questions the attached version still asks
                     // and the answers on record. No chip and no field, so a look cannot become an
@@ -307,9 +315,9 @@ fun ListItemViewerScreen(
         assetControls = {
             MediaInfoBar(
                 contentDescription = when {
-                    onContentPage -> "Prompt info"
+                    onContentPage -> "Question info"
                     pageState.onAddOnPage -> "Add-on info"
-                    else -> "Item info"
+                    else -> "File info"
                 }
             ) { infoOpen = true }
         }

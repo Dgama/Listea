@@ -22,17 +22,114 @@ data class DissolvedFileRecord(
  * without knowing what wrote it. A reader that does not recognise a version says so instead of
  * guessing at a shape a later build invented — see [decodeDissolvedRecords].
  *
- * **2 since v0.5.4, and 1 is still readable.** The step is the record's: version 1 wrote a file's
- * marks as a favourite flag beside an id list, and version 2 writes one selection set, because a
- * template's `★` is a button like any other. The flag was not dropped on the way in — a version-1
- * record's `1` becomes the id [com.example.listea.domain.Templates.FAVOURITE_BUTTON_ID] in the set,
- * which is what the 23 → 24 migration does to the same value in the table. A history written by an
- * older build therefore restores the star it recorded rather than losing it.
+ * **3 since v0.8.4, and 2 and 1 are still readable.** The file records' own line shape did not
+ * change at 3 — it is still a path and a selection set — but a version-3 snapshot also carries
+ * `partRecords` beside it, because a Task now holds 1..N parts and each part has its own current
+ * answer. A version-2 snapshot has no part answers to offer, and reading it as if it did would be
+ * the guess the version exists to refuse.
+ *
+ * **2 since v0.5.4, and 1 is still readable.** Version 1 wrote a file's marks as a favourite flag
+ * beside an id list, and version 2 writes one selection set, because a template's `★` is a button
+ * like any other. The flag was not dropped on the way in — a version-1 record's `1` becomes the id
+ * [com.example.listea.domain.Templates.FAVOURITE_BUTTON_ID] in the set, which is what the 23 → 24
+ * migration does to the same value in the table. A history written by an older build therefore
+ * restores the star it recorded rather than losing it.
  */
-const val DISSOLVED_RECORDS_VERSION = 2
+const val DISSOLVED_RECORDS_VERSION = 3
+
+/** The version whose snapshots recorded files but no part answers. Read, never written. */
+private const val DISSOLVED_RECORDS_VERSION_PER_FILE = 2
 
 /** The version whose lines carried a favourite flag beside the ids. Read, never written. */
 private const val DISSOLVED_RECORDS_VERSION_FAVOURITE_FLAG = 1
+
+/**
+ * The version [encodeDissolvedParts] writes, carried as the payload's own first line.
+ *
+ * `partRecords` has no column of its own to say which shape it holds — the entity's
+ * [DissolvedTaskStateEntity.recordVersion] describes the file records — so the payload names its
+ * version inside itself. A reader that does not know the number returns null rather than reading
+ * the lines it happens to see.
+ */
+const val DISSOLVED_PARTS_VERSION = 1
+
+/**
+ * One TaskPart as a dissolved history keeps it: the key it was known by in that Task, whether the
+ * composition required it, and its current canonical answer.
+ *
+ * The key, not an Asset path, is what a recovery matches on: a part is the decision, and the new
+ * import's Task names the same decisions by the same keys (a Prompt key, or `local:0`). [required]
+ * is recorded so the snapshot remains a faithful account of the composition it came from; a
+ * recovery does **not** write it back, because the Task being recovered into has its own
+ * composition and its own claim about what is required.
+ */
+data class DissolvedPartRecord(
+    val partKey: String,
+    val required: Boolean,
+    val response: String
+)
+
+/**
+ * A dissolved Task's parts, as one string.
+ *
+ * A version line, then one line per present part with three tab-separated fields:
+ *
+ * ```
+ * 1
+ * <escaped partKey> \t <1|0> \t <escaped response>
+ * ```
+ *
+ * The response is escaped rather than embedded: a canonical structured or primary response contains
+ * tabs and newlines by construction, and a field that swallowed the line separator would turn one
+ * part into two on the way back. `''` is no payload at all — a history written before schema 33 —
+ * and is read as *nothing to restore*, never as a Task with no parts.
+ */
+fun encodeDissolvedParts(records: List<DissolvedPartRecord>): String =
+    if (records.isEmpty()) {
+        ""
+    } else {
+        buildString {
+            append(DISSOLVED_PARTS_VERSION).append('\n')
+            records.forEachIndexed { index, record ->
+                if (index > 0) append('\n')
+                append(escapeField(record.partKey))
+                append('\t').append(if (record.required) "1" else "0")
+                append('\t').append(escapeField(record.response))
+            }
+        }
+    }
+
+/**
+ * The parts a dissolved payload holds, or `null` when this build cannot read it.
+ *
+ * `''` is an empty list: the snapshot recorded no part answers, which is what every history written
+ * before schema 33 holds. Anything else that does not have this version's shape is a payload from a
+ * later build — or a damaged one — and the caller restores the Task's completion and no part answers
+ * rather than guessing which line belonged to which decision.
+ */
+fun decodeDissolvedParts(encoded: String): List<DissolvedPartRecord>? {
+    if (encoded.isEmpty()) return emptyList()
+    val lines = encoded.split("\n")
+    if (lines.firstOrNull() != DISSOLVED_PARTS_VERSION.toString()) return null
+
+    val seen = mutableSetOf<String>()
+    return lines.drop(1).map { line ->
+        val fields = line.split("\t")
+        if (fields.size != 3) return null
+        val partKey = unescapeField(fields[0])
+        if (partKey.isEmpty() || !seen.add(partKey)) return null
+        val required = when (fields[1]) {
+            "1" -> true
+            "0" -> false
+            else -> return null
+        }
+        DissolvedPartRecord(
+            partKey = partKey,
+            required = required,
+            response = unescapeField(fields[2])
+        )
+    }
+}
 
 /**
  * A dissolved Task's files, as one string.
@@ -78,7 +175,7 @@ fun encodeDissolvedRecords(records: List<DissolvedFileRecord>): String =
  */
 fun decodeDissolvedRecords(encoded: String, version: Int): List<DissolvedFileRecord>? {
     val fieldsPerLine = when (version) {
-        DISSOLVED_RECORDS_VERSION -> 2
+        DISSOLVED_RECORDS_VERSION, DISSOLVED_RECORDS_VERSION_PER_FILE -> 2
         DISSOLVED_RECORDS_VERSION_FAVOURITE_FLAG -> 3
         else -> return null
     }

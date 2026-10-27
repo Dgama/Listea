@@ -56,13 +56,16 @@ import java.util.UUID
         AddOnVersionEntity::class,
         TaskReviewAnswerEntity::class,
         ReviewEventAnswerEntity::class,
-        TaskPayloadEntity::class,
         PackageCheckpointEntity::class,
-        PackagePromptTaskEntity::class,
         PackageResourceEntity::class,
-        TaskResourceEntity::class
+        TaskPartEntity::class,
+        TaskPartPayloadEntity::class,
+        TaskPartStateEntity::class,
+        TaskPartResourceEntity::class,
+        PackageCompositionEntity::class,
+        PackageCompositionPromptEntity::class
     ],
-    version = 32,
+    version = 33,
     exportSchema = true
 )
 abstract class ListeaDatabase : RoomDatabase() {
@@ -1562,6 +1565,245 @@ abstract class ListeaDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Schema 33: a Task's decision units, their payloads and Resources, and compositions.
+         *
+         * The shape change is a key change, not a column addition: `task_payloads` and
+         * `task_resources` were keyed by Task, and payloads and Resource uses now belong to a part.
+         * Both tables are copied into their part-keyed successors and dropped. Every existing Task
+         * becomes exactly one part, so an old database reads through the same model as a new one:
+         *
+         * - A Task linked to a Package Prompt keeps that Prompt as its part key (and kind `package`).
+         * - A local Task is `legacy:<taskId>` unless its Todo's importer says file or folder, which
+         *   is how the part knows what made it.
+         * - A Task with no import row at all is `legacy`.
+         *
+         * The migration deliberately invents **no** `review_events.partKey`. Those submissions
+         * answered the Task as a whole, and the read model treats a null part as the Task's own
+         * history rather than guessing which part a person meant.
+         *
+         * `assets.partKey` is nullable in SQLite because `ALTER TABLE … ADD COLUMN` is the only way
+         * to add it without rebuilding the table, but every row that exists when this finishes has
+         * one: the backfill below is exhaustive because step 1 gives every Task a part.
+         */
+        internal val MIGRATION_32_33 = object : Migration(32, 33) {
+            override fun migrate(connection: SQLiteConnection) {
+                val now = System.currentTimeMillis()
+
+                // 0. Completion provenance. Every existing row reads as `''` — *not recorded* —
+                // because a schema-32 completion was neither automatic nor explicitly signed off
+                // under a policy: there was one decision, and the checkbox was it. The first write
+                // through either path stamps the word that is true from then on.
+                connection.execSQL(
+                    "ALTER TABLE `task_state` " +
+                        "ADD COLUMN `completionSource` TEXT NOT NULL DEFAULT ''"
+                )
+
+                // 1. One part per Task, carrying what made it and which Prompt it came from.
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `task_parts` (" +
+                        "`taskId` TEXT NOT NULL, `partKey` TEXT NOT NULL, " +
+                        "`position` INTEGER NOT NULL, `origin` TEXT NOT NULL, " +
+                        "`promptKey` TEXT, `required` INTEGER NOT NULL DEFAULT 1, " +
+                        "`present` INTEGER NOT NULL DEFAULT 1, `availability` TEXT, " +
+                        "`updatedAt` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`taskId`, `partKey`), " +
+                        "FOREIGN KEY(`taskId`) REFERENCES `tasks`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE )"
+                )
+                connection.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_task_parts_taskId_position` " +
+                        "ON `task_parts` (`taskId`, `position`)"
+                )
+                connection.execSQL(
+                    "INSERT INTO `task_parts` (" +
+                        "`taskId`, `partKey`, `position`, `origin`, `promptKey`, " +
+                        "`required`, `present`, `availability`, `updatedAt`) " +
+                        "SELECT t.`id`, " +
+                        "COALESCE(ppt.`promptKey`, 'legacy:' || t.`id`), " +
+                        "0, " +
+                        "CASE " +
+                        "WHEN ppt.`promptKey` IS NOT NULL THEN 'package' " +
+                        "WHEN s.`importerKind` = 'folder-as-task' THEN 'folder' " +
+                        "WHEN s.`importerKind` = 'file-as-task' THEN 'file' " +
+                        "WHEN s.`importerKind` = 'package' THEN 'package' " +
+                        "ELSE 'legacy' END, " +
+                        "ppt.`promptKey`, 1, 1, NULL, $now " +
+                        "FROM `tasks` t " +
+                        "LEFT JOIN `package_prompt_tasks` ppt ON ppt.`taskId` = t.`id` " +
+                        "LEFT JOIN `task_imports` ti ON ti.`taskId` = t.`id` " +
+                        "LEFT JOIN `sources` s ON s.`id` = ti.`sourceId`"
+                )
+
+                // 2. Payloads move from the Task to its one part, then the old table goes.
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `task_part_payloads` (" +
+                        "`taskId` TEXT NOT NULL, `partKey` TEXT NOT NULL, " +
+                        "`kind` TEXT NOT NULL, `schemaVersion` INTEGER NOT NULL, " +
+                        "`payload` TEXT NOT NULL, `revision` INTEGER NOT NULL, " +
+                        "`updatedAt` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`taskId`, `partKey`), " +
+                        "FOREIGN KEY(`taskId`, `partKey`) " +
+                        "REFERENCES `task_parts`(`taskId`, `partKey`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE )"
+                )
+                connection.execSQL(
+                    "INSERT INTO `task_part_payloads` (" +
+                        "`taskId`, `partKey`, `kind`, `schemaVersion`, `payload`, " +
+                        "`revision`, `updatedAt`) " +
+                        "SELECT tp.`taskId`, p.`partKey`, tp.`kind`, tp.`schemaVersion`, " +
+                        "tp.`payload`, tp.`revision`, tp.`updatedAt` " +
+                        "FROM `task_payloads` tp " +
+                        "JOIN `task_parts` p ON p.`taskId` = tp.`taskId`"
+                )
+                connection.execSQL("DROP TABLE `task_payloads`")
+
+                // 3. Each part gets a state row. The stored response is empty because a schema-32
+                // Task never had a current response outside `review_events`; the payload revision
+                // is carried so a body that moves under an answer stays visible.
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `task_part_state` (" +
+                        "`taskId` TEXT NOT NULL, `partKey` TEXT NOT NULL, " +
+                        "`response` TEXT NOT NULL DEFAULT '', `answeredAt` INTEGER, " +
+                        "`revision` INTEGER, `updatedAt` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`taskId`, `partKey`), " +
+                        "FOREIGN KEY(`taskId`, `partKey`) " +
+                        "REFERENCES `task_parts`(`taskId`, `partKey`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE )"
+                )
+                connection.execSQL(
+                    "INSERT INTO `task_part_state` (" +
+                        "`taskId`, `partKey`, `response`, `answeredAt`, `revision`, `updatedAt`) " +
+                        "SELECT p.`taskId`, p.`partKey`, '', NULL, pp.`revision`, $now " +
+                        "FROM `task_parts` p " +
+                        "LEFT JOIN `task_part_payloads` pp ON pp.`taskId` = p.`taskId` " +
+                        "AND pp.`partKey` = p.`partKey`"
+                )
+
+                // 4. Resource uses move to the part, and the old link table goes.
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `task_part_resources` (" +
+                        "`taskId` TEXT NOT NULL, `partKey` TEXT NOT NULL, " +
+                        "`resourceId` TEXT NOT NULL, `required` INTEGER NOT NULL DEFAULT 1, " +
+                        "PRIMARY KEY(`taskId`, `partKey`, `resourceId`), " +
+                        "FOREIGN KEY(`taskId`, `partKey`) " +
+                        "REFERENCES `task_parts`(`taskId`, `partKey`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE, " +
+                        "FOREIGN KEY(`resourceId`) REFERENCES `package_resources`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE )"
+                )
+                connection.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_task_part_resources_resourceId` " +
+                        "ON `task_part_resources` (`resourceId`)"
+                )
+                connection.execSQL(
+                    "INSERT INTO `task_part_resources` " +
+                        "(`taskId`, `partKey`, `resourceId`, `required`) " +
+                        "SELECT tr.`taskId`, p.`partKey`, tr.`resourceId`, tr.`required` " +
+                        "FROM `task_resources` tr " +
+                        "JOIN `task_parts` p ON p.`taskId` = tr.`taskId`"
+                )
+                connection.execSQL("DROP TABLE `task_resources`")
+
+                // 5. An Asset belongs to one part, so the uniqueness is scoped to it. The old index
+                // said "one Asset per file per Task"; the new one says "per part", which lets two
+                // parts of one Task ask different questions about the same file.
+                connection.execSQL("ALTER TABLE `assets` ADD COLUMN `partKey` TEXT")
+                connection.execSQL(
+                    "UPDATE `assets` SET `partKey` = " +
+                        "(SELECT p.`partKey` FROM `task_parts` p " +
+                        "WHERE p.`taskId` = `assets`.`taskId`)"
+                )
+                connection.execSQL("DROP INDEX IF EXISTS `index_assets_taskId_rootUri_relativePath`")
+                connection.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS " +
+                        "`index_assets_taskId_partKey_rootUri_relativePath` " +
+                        "ON `assets` (`taskId`, `partKey`, `rootUri`, `relativePath`)"
+                )
+
+                // 6. A submission may answer a part. Legacy rows stay null on purpose.
+                connection.execSQL("ALTER TABLE `review_events` ADD COLUMN `partKey` TEXT")
+                connection.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_review_events_taskId_partKey_at` " +
+                        "ON `review_events` (`taskId`, `partKey`, `at`)"
+                )
+
+                // 7. Structured fields need field identity; viewer-event rows are not reinterpreted.
+                connection.execSQL(
+                    "ALTER TABLE `review_event_answers` ADD COLUMN `fieldKey` TEXT"
+                )
+
+                // 8–9. One Prompt Task becomes one `prompt:<key>` composition. The composite key
+                // includes `compositionKey` so a future Section composition may hold the same Prompt
+                // while the old Task remains untouched.
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `package_compositions` (" +
+                        "`taskId` TEXT NOT NULL, `sourceId` TEXT NOT NULL, " +
+                        "`packageKey` TEXT NOT NULL, `compositionKey` TEXT NOT NULL, " +
+                        "`present` INTEGER NOT NULL DEFAULT 1, " +
+                        "`updatedAt` INTEGER NOT NULL, PRIMARY KEY(`taskId`), " +
+                        "FOREIGN KEY(`taskId`) REFERENCES `tasks`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE, " +
+                        "FOREIGN KEY(`sourceId`) REFERENCES `sources`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE NO ACTION )"
+                )
+                connection.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS " +
+                        "`index_package_compositions_source_package_composition` " +
+                        "ON `package_compositions` (`sourceId`, `packageKey`, `compositionKey`)"
+                )
+                connection.execSQL(
+                    "INSERT INTO `package_compositions` (" +
+                        "`taskId`, `sourceId`, `packageKey`, `compositionKey`, " +
+                        "`present`, `updatedAt`) " +
+                        "SELECT `taskId`, `sourceId`, `packageKey`, " +
+                        "'prompt:' || `promptKey`, `present`, $now " +
+                        "FROM `package_prompt_tasks`"
+                )
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `package_composition_prompts` (" +
+                        "`taskId` TEXT NOT NULL, `sourceId` TEXT NOT NULL, " +
+                        "`packageKey` TEXT NOT NULL, `compositionKey` TEXT NOT NULL, " +
+                        "`promptKey` TEXT NOT NULL, `present` INTEGER NOT NULL DEFAULT 1, " +
+                        "PRIMARY KEY(`taskId`, `promptKey`), " +
+                        "FOREIGN KEY(`taskId`) REFERENCES `tasks`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE, " +
+                        "FOREIGN KEY(`sourceId`, `packageKey`, `compositionKey`) " +
+                        "REFERENCES `package_compositions`" +
+                        "(`sourceId`, `packageKey`, `compositionKey`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE )"
+                )
+                connection.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS " +
+                        "`index_package_composition_prompts_source_composition_prompt` " +
+                        "ON `package_composition_prompts` " +
+                        "(`sourceId`, `packageKey`, `compositionKey`, `promptKey`)"
+                )
+                connection.execSQL(
+                    "INSERT INTO `package_composition_prompts` (" +
+                        "`taskId`, `sourceId`, `packageKey`, `compositionKey`, " +
+                        "`promptKey`, `present`) " +
+                        "SELECT ppt.`taskId`, ppt.`sourceId`, ppt.`packageKey`, " +
+                        "pc.`compositionKey`, ppt.`promptKey`, ppt.`present` " +
+                        "FROM `package_prompt_tasks` ppt " +
+                        "JOIN `package_compositions` pc ON pc.`taskId` = ppt.`taskId`"
+                )
+                connection.execSQL("DROP TABLE `package_prompt_tasks`")
+
+                // 10–11. A history and a Todo each gain one field with a behaviour-preserving
+                // default: no part records (read fail-closed), and one question per Task.
+                connection.execSQL(
+                    "ALTER TABLE `dissolved_task_state` " +
+                        "ADD COLUMN `partRecords` TEXT NOT NULL DEFAULT ''"
+                )
+                connection.execSQL(
+                    "ALTER TABLE `sources` ADD COLUMN `composition` TEXT NOT NULL DEFAULT 'prompt'"
+                )
+
+                Log.i("ListeaDatabase", "32 -> 33")
+            }
+        }
+
         /** One row of [MIGRATION_30_31]'s backfill, held until every response has been read. */
         private data class BackfilledEvent(
             val reviewEventId: String,
@@ -2371,19 +2613,23 @@ abstract class ListeaDatabase : RoomDatabase() {
          * so a built-in that only the migration wrote would be missing for exactly the people who had
          * never upgraded. [onCreate] is that second writer.
          *
-         * **[onOpen]'s guard is not belt and braces; it is the reason this can be a callback at all.**
-         * The property was found broken in the field — a database at 24 with both tables and no rows,
-         * created by a build that predated the callback, which no migration will ever visit again and
-         * no seed will ever reach. Two writers that each have to remember is not an invariant, it is a
-         * convention; a guard that repairs the empty state is the invariant. It costs one count per
-         * open and it is a no-op in every state the app can reach — the migration has already run by
-         * the time [onOpen] is called, so an upgraded database counts one and is left alone.
+         * **[onOpen] is the third, and it is why this can be a callback at all.** The property was
+         * found broken in the field twice: once as a database at 24 with both tables and no rows,
+         * created by a build that predated the callback; and once, during the v0.8.4 acceptance walk,
+         * as a database that held the built-ins of an earlier release but not the ones this release
+         * added. Neither state is reachable by a migration — the first because no step will ever
+         * visit it again, the second because the release's own step ran before the new built-ins
+         * existed in [Templates.StoredTaskReviews]. Two writers that each have to remember is not an
+         * invariant, it is a convention; an open that fills in what is missing is the invariant.
          *
-         * **The guard is "no templates at all", not "no built-in".** Nothing in the app deletes a
-         * template — there is no delete, and `TemplateStore` has no method that could become one — so
-         * the only way to reach an empty table is to have never been given the built-in. That is what
-         * makes reseeding safe, and it is the thing to re-read on the day a template can be deleted:
-         * at that point this becomes a resurrection and the guard has to go, or narrow to the id.
+         * **What it repairs is a row, keyed by id and version, and the writes are `INSERT OR
+         * IGNORE`.** An existing row is never overwritten, so a template the user renamed keeps its
+         * name and a version they edited keeps its contents. Nothing in the app deletes a template —
+         * there is no delete, and `TemplateStore` has no method that could become one — so an absent
+         * built-in can only mean this database was written by a build that did not have it. That is
+         * what makes the repair safe, and it is the thing to re-read on the day a template can be
+         * deleted: at that point a deleted built-in would be resurrected here, and the repair has to
+         * narrow to something the user did not choose.
          */
         internal val SeedBuiltIn: RoomDatabase.Callback =
             object : RoomDatabase.Callback() {
@@ -2394,7 +2640,32 @@ abstract class ListeaDatabase : RoomDatabase() {
 
                 override fun onOpen(db: SupportSQLiteDatabase) {
                     if (countTemplates(db) == 0L) writeBuiltIn(db)
+                    repairMissingTaskReviews(db)
                     repairEarlierNames(db)
+                }
+
+                /**
+                 * Adds the built-in Task Reviews a database does not already hold, version by
+                 * version.
+                 *
+                 * This is the upgrade half of the seed. `MIGRATION_29_30` and `MIGRATION_31_32`
+                 * each seeded the built-ins *their* release shipped, which was the whole list at the
+                 * time; a release that adds a built-in to the list gets no such step, and without
+                 * this a person who upgraded would not see the new template while a fresh install
+                 * would. The round that added `builtin.structured.single-choice@2` and
+                 * `builtin.structured.form@1` is exactly that case.
+                 *
+                 * It is not a second copy of [writeBuiltIn] because it does not rewrite the
+                 * asset-control lineage: a 23 → 24 database still holds that row, and the repair's
+                 * subject is the Task Reviews that the same lineage keeps growing. Running it on
+                 * every open is a handful of ignored inserts, and it is the reason an install
+                 * cannot be left one release's built-ins behind.
+                 */
+                private fun repairMissingTaskReviews(db: SupportSQLiteDatabase) {
+                    val now = System.currentTimeMillis()
+                    for ((sql, args) in builtInTaskReviewRows(now)) {
+                        db.execSQL(sql, args.toTypedArray())
+                    }
                 }
 
                 /**
@@ -2468,7 +2739,8 @@ abstract class ListeaDatabase : RoomDatabase() {
                     MIGRATION_28_29,
                     MIGRATION_29_30,
                     MIGRATION_30_31,
-                    MIGRATION_31_32
+                    MIGRATION_31_32,
+                    MIGRATION_32_33
                 )
                     .build()
                     .also { instance = it }

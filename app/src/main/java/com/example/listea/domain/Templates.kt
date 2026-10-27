@@ -365,9 +365,74 @@ object Templates {
         )
     )
 
+    /**
+     * The same Viewer over a Task that presents several Prompts: answer each, and the Task is done
+     * when every required part has an answer.
+     *
+     * Version 2 of the same lineage rather than a new template id, because it is the same
+     * judgment — one choice per Prompt — under a completion rule the single-part version could not
+     * express. [CompletionPolicy.AllRequiredParts] is what makes a Task that presents three
+     * questions stay open until the third is answered, instead of completing on the first.
+     */
+    val StructuredMultiPart: StoredTemplateVersion = StoredTemplateVersion(
+        ref = TemplateVersionRef(TemplateId("builtin.structured.single-choice"), 2),
+        name = "Headless Template for Several Choices",
+        scope = TemplateScope(emptyList()),
+        buttons = emptyList(),
+        kind = TemplateKind.TASK_REVIEW,
+        taskReview = TaskReviewDefinition(
+            viewer = Viewers.Profile.ref,
+            accepts = setOf(ViewerEventType.CHOICE_SELECT),
+            commit = CommitPolicy.Immediate(ViewerEventType.CHOICE_SELECT),
+            revisable = true,
+            completesTask = true,
+            advanceAfterCommit = true,
+            completion = CompletionPolicy.AllRequiredParts
+        )
+    )
+
+    /** The conditional questionnaire's own Submit control. */
+    const val FORM_SUBMIT_ID = "submit"
+
+    /**
+     * The `form` Viewer's template: answer the visible fields, press Submit.
+     *
+     * A form catches no viewer *events*, so the completion checkbox would be a control that
+     * completes the Task without the answers. The template names its own Submit button instead,
+     * and the write boundary refuses a submission whose visible required fields are unanswered —
+     * there is no state in which `completed` is on record without the fields it signed off on.
+     */
+    val StructuredForm: StoredTemplateVersion = StoredTemplateVersion(
+        ref = TemplateVersionRef(TemplateId("builtin.structured.form"), 1),
+        name = "Headless Template for a Form",
+        scope = TemplateScope(emptyList()),
+        buttons = listOf(
+            TemplateButton(
+                id = FORM_SUBMIT_ID,
+                name = "Submit",
+                type = ButtonType.ACTION,
+                recordValue = ""
+            )
+        ),
+        kind = TemplateKind.TASK_REVIEW,
+        taskReview = TaskReviewDefinition(
+            viewer = Viewers.Form.ref,
+            accepts = emptySet(),
+            commit = CommitPolicy.ConfirmControl(FORM_SUBMIT_ID),
+            revisable = true,
+            completesTask = true,
+            advanceAfterCommit = true
+        )
+    )
+
     /** The Task Reviews every install starts with, in picker order. */
-    val StoredTaskReviews: List<StoredTemplateVersion> =
-        listOf(MediaRapidReviewStored, ImageSampleReview, StructuredSingleChoice)
+    val StoredTaskReviews: List<StoredTemplateVersion> = listOf(
+        MediaRapidReviewStored,
+        ImageSampleReview,
+        StructuredSingleChoice,
+        StructuredMultiPart,
+        StructuredForm
+    )
 
     /**
      * The names the built-in Task Reviews shipped under before the vocabulary said *headless*.

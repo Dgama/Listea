@@ -39,6 +39,8 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import com.example.listea.data.TaskResourceView
+import com.example.listea.domain.FormField
+import com.example.listea.domain.FormPrompt
 import com.example.listea.domain.ProfilePrompt
 import com.example.listea.domain.PromptContent
 import com.example.listea.domain.PromptOption
@@ -68,7 +70,11 @@ internal fun PromptContentPage(
     onSelect: (PromptOption) -> Unit,
     modifier: Modifier = Modifier,
     notice: String? = null,
-    player: ExoPlayer? = null
+    player: ExoPlayer? = null,
+    // A form's draft lives with the caller, because the Submit control is the frame's and must
+    // read the same answers the card is drawing. Every other Viewer ignores these.
+    answers: Map<String, String> = emptyMap(),
+    onAnswer: (FormField, String) -> Unit = { _, _ -> }
 ) {
     when (content) {
         is ProfilePrompt -> {
@@ -109,6 +115,17 @@ internal fun PromptContentPage(
                 notice = notice,
                 player = player,
                 onSelect = onSelect,
+                modifier = modifier
+            )
+        }
+
+        is FormPrompt -> {
+            FormPromptPage(
+                prompt = content,
+                answers = answers,
+                interactive = interactive,
+                onAnswer = onAnswer,
+                notice = notice,
                 modifier = modifier
             )
         }

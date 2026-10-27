@@ -600,9 +600,24 @@ internal fun catalogTaskDetail(
     block: ReviewBlock?,
     hasAddOn: Boolean = false
 ): String {
-    val content = countLabel(row.assetCount, "Asset") +
-        (if (row.missingAssets > 0) ", " + row.missingAssets + " missing" else "") +
-        (if (hasAddOn) ", " + countLabel(1, "add-on") else "")
+    // Questions before Assets, because the questions are what the Task is *for* and the files are
+    // what it shows. A media Task is one question and reads exactly as it did: "4 Assets". A Task
+    // presenting three Prompts says "3 questions, 2 Assets", so a row that used to report only the
+    // files no longer looks like a Task with nothing but files in it.
+    //
+    // A vocabulary Task has no files at all, so its part count is the *only* count that says there
+    // is something to do; it is printed even when it is one. "1 question, 0 Assets" gives the file
+    // count its explanation beside it rather than leaving "0 Assets" to read as an empty Task.
+    // A media Task keeps its old line, because "1 question, 1 Asset" for a photo is the same fact
+    // said twice.
+    val content = buildList {
+        if (row.partCount > 1 || (row.partCount == 1 && row.assetCount == 0)) {
+            add(countLabel(row.partCount, "question"))
+        }
+        add(countLabel(row.assetCount, "Asset"))
+        if (row.missingAssets > 0) add(row.missingAssets.toString() + " missing")
+        if (hasAddOn) add(countLabel(1, "add-on"))
+    }.joinToString(", ")
     return if (block == null) content else content + " · " + block.label
 }
 

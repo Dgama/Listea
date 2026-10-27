@@ -17,10 +17,10 @@ android {
         // The version is the round the code is at — the same name the iteration docs and the git
         // tag use. versionCode is the numeric part flattened to one integer, so it cannot drift
         // from it. A suffix names a step on the same line and keeps that line's code: 0.8.2f still
-        // installs over 0.8.2, and the 0.8.3 preview (803) still installs over both. The hyphen
-        // suffix says the sub-version is not frozen yet; the numeric prefix is what the installer
-        // and the About page measure.
-        val version = "0.8.3-preview"
+        // installs over 0.8.2, and the 0.8.4 preview (804) still installs over 0.8.3 (803). The
+        // hyphen suffix says the sub-version is not frozen yet; the numeric prefix is what the
+        // installer and the About page measure.
+        val version = "0.8.4-preview"
         versionName = version
         versionCode = version.takeWhile { it.isDigit() || it == '.' }
             .split(".")

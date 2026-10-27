@@ -373,7 +373,7 @@ private fun AddOnCard(
 private fun reviewLine(version: TemplateVersionEntity): String {
     val definition = decodeTaskReviewDefinition(version.definition, version.definitionVersion)
         ?: return "Headless template · unreadable"
-    return reviewCatchLine(definition.accepts)
+    return reviewCatchLine(definition)
 }
 
 /**

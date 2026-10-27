@@ -12,16 +12,31 @@ import com.example.listea.domain.StoredAddOnVersion
  * Content page *and* no Asset page. This list is now the one source for the count, the step, the
  * entries and which page is showing.
  *
- * The order is fixed: Content first, then the Task's Assets in declared order, then the Add-on.
- * A media Task has no Content page and is exactly as many pages as it always was.
+ * The order is fixed per part, and parts keep composition order: each present part contributes its
+ * Content page (when it has a Viewer body) followed by its own Assets. The Add-on is last. A media
+ * Task is one part with no body and is exactly as many pages as it always was.
  */
 sealed interface ReviewPage {
 
-    /** The Prompt body: the description a Viewer draws. Never a file, never an Asset. */
-    data class Content(val taskId: String) : ReviewPage
+    /**
+     * One part's Viewer body: the description a Viewer draws. Never a file, never an Asset.
+     *
+     * [partKey] is carried because the body is read per part; a Task may have several Content
+     * pages and they are not the same document.
+     */
+    data class Content(val taskId: String, val partKey: String) : ReviewPage
 
-    /** One of the Task's files. */
-    data class Asset(val asset: com.example.listea.data.ReviewAsset) : ReviewPage
+    /**
+     * One of the Task's files, belonging to [partKey].
+     *
+     * [assetIndex] is its position among the Task's Asset pages, which is the index [AssetRun]
+     * expects and the value a surface writes back when the user chooses a file within it.
+     */
+    data class Asset(
+        val partKey: String,
+        val asset: com.example.listea.data.ReviewAsset,
+        val assetIndex: Int
+    ) : ReviewPage
 
     /** The questionnaire attached to the Task, after everything else. */
     data object AddOn : ReviewPage
@@ -32,38 +47,25 @@ sealed interface ReviewPage {
  *
  * [hasAddOn] is the caller's resolved answer — this build can read the questionnaire the Task was
  * stamped with — and not a re-resolution: the session already resolves it once to draw the page.
+ *
+ * Absent parts are skipped: a part the latest Package revision no longer names keeps its history
+ * but is not a page. A Task no read resolved parts for has no pages, which is the honest shape of a
+ * manual item.
  */
 internal fun reviewPages(item: ReviewItem, hasAddOn: Boolean): List<ReviewPage> = buildList {
-    if (item.payloadKind != null) add(ReviewPage.Content(item.taskId))
-    item.assets.forEach { add(ReviewPage.Asset(it)) }
+    var assetIndex = 0
+    for (part in item.parts.filter { it.present }) {
+        if (part.payloadKind != null) add(ReviewPage.Content(item.taskId, part.partKey))
+        for (asset in part.assets) {
+            add(ReviewPage.Asset(part.partKey, asset, assetIndex))
+            assetIndex++
+        }
+    }
     if (hasAddOn) add(ReviewPage.AddOn)
 }
 
-/** Whether a queue item has a page that is content rather than a file. */
-internal fun ReviewItem.hasContentPage(): Boolean = payloadKind != null
-
-/**
- * The Asset index a unified page index names.
- *
- * [ReviewPage]'s order puts Content first, so a Prompt Task carrying both a body and files has its
- * Assets one page to the right of the indices an Asset-only surface expects. Surfaces that hand the
- * unified index to [AssetRun] — whose `selectedIndex` counts Assets — must convert, or a Prompt
- * opens on its second file. The Content page names no Asset and converts to `-1`, which [AssetRun]
- * reads as *show the first asset without claiming a position*; the add-on page converts to
- * `assets.size`, the sentinel that page is recognised by. (Before v0.8.2f the queue was Asset-only
- * whenever a file was involved, so the bug was latent rather than visible.)
- */
-internal fun assetIndexOf(page: Int, hasContent: Boolean): Int =
-    if (hasContent) page - 1 else page
-
-/**
- * The unified page index an Asset index names, the inverse of [assetIndexOf].
- *
- * Used when a surface reports a file chosen within [AssetRun] and the caller has to write it back
- * as a page.
- */
-internal fun pageOfAsset(assetIndex: Int, hasContent: Boolean): Int =
-    if (hasContent) assetIndex + 1 else assetIndex
+/** Whether a queue item has any page that is content rather than a file. */
+internal fun ReviewItem.hasContentPage(): Boolean = parts.any { it.payloadKind != null }
 
 /**
  * One Task's page list and where on it a surface is standing.
@@ -71,12 +73,14 @@ internal fun pageOfAsset(assetIndex: Int, hasContent: Boolean): Int =
  * Every surface that shows a Task — Review, Quick Review, the List item viewer and the Todo
  * preview — asks this instead of computing a count and an Asset index of its own. v0.8.2f's fix
  * round found what duplicated arithmetic does: two readers silently dropped the add-on page and
- * one guide row was off by the Content page, while Review was right. The derived properties exist so
- * the count, the current page and the Asset index cannot drift apart again.
+ * one guide row was off by the Content page, while Review was right. v0.8.4 added a second Content
+ * page class, which is why the Asset index is now read off the page list rather than converted from
+ * a boolean: with several parts there is no single offset a boolean could name.
  *
  * [pageIndex] is already clamped, because a resync can take a page away under a selection that was
- * already made. [assetIndex] is the value [AssetRun] expects: [assetIndexOf], so `-1` on the
- * Content page and `assets.size` on the add-on page — the sentinel that page is recognised by.
+ * already made. [assetIndex] is the value [AssetRun] expects: the Asset page's own index, `-1` on
+ * a Content page, and the Asset page count on the add-on page — the sentinel that page is
+ * recognised by.
  */
 internal data class TaskPageState(
     val pages: List<ReviewPage>,
@@ -84,12 +88,23 @@ internal data class TaskPageState(
 ) {
     val pageCount: Int get() = pages.size
     val current: ReviewPage? get() = pages.getOrNull(pageIndex)
-    val hasContentPage: Boolean get() = pages.firstOrNull() is ReviewPage.Content
+    val hasContentPage: Boolean get() = pages.any { it is ReviewPage.Content }
     val hasAddOnPage: Boolean get() = pages.lastOrNull() is ReviewPage.AddOn
     val hasPageLevel: Boolean get() = pages.size > 1
     val onContentPage: Boolean get() = current is ReviewPage.Content
     val onAddOnPage: Boolean get() = current is ReviewPage.AddOn
-    val assetIndex: Int get() = assetIndexOf(pageIndex, hasContentPage)
+    val assetPageCount: Int get() = pages.count { it is ReviewPage.Asset }
+    val assetIndex: Int get() = when (current) {
+        is ReviewPage.Asset -> (current as ReviewPage.Asset).assetIndex
+        is ReviewPage.Content -> -1
+        ReviewPage.AddOn -> assetPageCount
+        null -> -1
+    }
+
+    /** The page an Asset index names, or the current page when no page holds it. */
+    fun pageOfAssetIndex(assetIndex: Int): Int =
+        pages.indexOfFirst { it is ReviewPage.Asset && it.assetIndex == assetIndex }
+            .takeIf { it >= 0 } ?: pageIndex
 }
 
 /**
@@ -112,31 +127,44 @@ internal fun taskPageState(
 }
 
 /** Where an accepted commit goes, or null when the template keeps the reviewer on the page. */
-internal enum class CommitArrival { AddOnPage, NextTask }
+internal sealed interface CommitArrival {
+
+    /** A page of this Task: the next part's Content page, or the Add-on. */
+    data class Page(val index: Int) : CommitArrival
+
+    /** The next Task in the queue. */
+    data object NextTask : CommitArrival
+}
 
 /**
  * Where a commit lands when the template advances.
  *
- * The add-on page is the Task's **last** page, and the documented place a Task is left from: the
- * add-on contract says a forward move off the questionnaire completes the Task, so a commit made
- * anywhere before it — a Prompt's Like/Dislike, a sampled point's Submit — must arrive there
- * rather than advance the queue. Before v0.8.2f it advanced directly, which silently skipped the
- * questionnaire: a Todo with an add-on could be reviewed end to end without the page ever being
- * shown, and no answer was recorded. v0.8.2f records the fix.
+ * Three destinations, in order: **the next part's first page**, then **the add-on**, then the next
+ * Task. Answering one Prompt of a Task that presents three must show the second question rather
+ * than skip the whole Task; and the add-on remains the Task's last page and the documented place a
+ * Task is left from. Before v0.8.2f a commit advanced straight past the questionnaire; v0.8.4
+ * extends the same arrival rule across parts.
  *
  * A commit made while already on the add-on page advances, exactly as it always did, so the page
- * never holds the queue up. A template that declares `advanceAfterCommit = false` stays put: that
- * is the template's choice about its own confirmation step, and the add-on is still reachable
- * with the inner arrow.
+ * never holds the queue up. A template that declares `advanceAfterCommit = false` stays put: that is
+ * the template's choice about its own confirmation step, and the rest is still reachable with the
+ * inner arrow.
  */
 internal fun commitArrival(
     advanceAfterCommit: Boolean,
-    hasAddOnPage: Boolean,
-    currentPage: Int,
-    pageCount: Int
-): CommitArrival? = when {
-    !advanceAfterCommit -> null
-    !hasAddOnPage -> CommitArrival.NextTask
-    currentPage != pageCount - 1 -> CommitArrival.AddOnPage
-    else -> CommitArrival.NextTask
+    pages: List<ReviewPage>,
+    currentPage: Int
+): CommitArrival? {
+    if (!advanceAfterCommit) return null
+    if (pages.getOrNull(currentPage) is ReviewPage.AddOn) return CommitArrival.NextTask
+
+    // The next Content page after this one is another part's first page. Assets between them
+    // belong to the part just answered, and the judgment has already been made about them.
+    val nextContent = pages.withIndex()
+        .firstOrNull { (index, page) -> index > currentPage && page is ReviewPage.Content }
+    if (nextContent != null) return CommitArrival.Page(nextContent.index)
+
+    val addOn = pages.indexOfFirst { it is ReviewPage.AddOn }
+    if (addOn > currentPage) return CommitArrival.Page(addOn)
+    return CommitArrival.NextTask
 }

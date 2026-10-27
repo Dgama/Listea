@@ -5,11 +5,16 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
+import androidx.room.Upsert
+import com.example.listea.CompositionChoice
 import com.example.listea.ContentDecision
 import com.example.listea.ContentPolicy
+import com.example.listea.domain.CompletionPolicy
 import com.example.listea.ImporterKind
 import com.example.listea.ImportPlan
+import com.example.listea.PlannedPart
 import com.example.listea.PlannedTask
+import com.example.listea.allAssets
 import com.example.listea.assetViewerAvailable
 import com.example.listea.childRelativePath
 import com.example.listea.decideContentDecision
@@ -19,6 +24,7 @@ import com.example.listea.normalizeKeepTree
 import com.example.listea.taskChanges
 import com.example.listea.domain.AssetKind
 import com.example.listea.domain.EXPORT_CHOICE_NONE
+import com.example.listea.domain.FieldAnswer
 import com.example.listea.domain.ReviewContext
 import com.example.listea.domain.ReviewEventId
 import com.example.listea.domain.ReviewEventKind
@@ -28,6 +34,7 @@ import com.example.listea.domain.ViewerEvent
 import com.example.listea.domain.assetUri
 import com.example.listea.domain.completesTask
 import com.example.listea.domain.encode
+import com.example.listea.domain.structuredFields
 import com.example.listea.domain.viewerEvents
 import java.util.UUID
 import kotlinx.coroutines.flow.Flow
@@ -187,20 +194,28 @@ abstract class ListsDao {
     @Query(
         """
         SELECT ti.taskId AS taskId, ti.assetControls AS assetControls, ti.addOn AS addOn,
-               ti.taskReview AS taskReview, ppt.packageKey AS packageKey,
-               pc.title AS packageTitle, ppt.promptKey AS promptKey,
-               tp.kind AS payloadKind, tp.schemaVersion AS payloadSchema,
-               tp.revision AS payloadRevision
+               ti.taskReview AS taskReview, cmp.packageKey AS packageKey,
+               pc.title AS packageTitle,
+               COALESCE(p.partKey, 'local:0') AS partKey,
+               COALESCE(p.position, 0) AS position,
+               p.promptKey AS promptKey,
+               COALESCE(p.required, 1) AS required,
+               COALESCE(p.present, 1) AS present,
+               p.availability AS availability,
+               pp.kind AS payloadKind, pp.schemaVersion AS payloadSchema,
+               pp.revision AS payloadRevision
         FROM task_imports ti
         JOIN list_items i ON i.taskId = ti.taskId
-        LEFT JOIN package_prompt_tasks ppt ON ppt.taskId = ti.taskId
+        LEFT JOIN package_compositions cmp ON cmp.taskId = ti.taskId
         -- The checkpoint is keyed by (sourceId, packageKey), so this join is one row and the
         -- title is the same one the Catalog names the Package scope by. Only the title is read:
         -- the Task's paths stay the synthetic catalog key.
         LEFT JOIN package_checkpoints pc
-               ON pc.sourceId = ti.sourceId AND pc.packageKey = ppt.packageKey
-        LEFT JOIN task_payloads tp ON tp.taskId = ti.taskId
+               ON pc.sourceId = ti.sourceId AND pc.packageKey = cmp.packageKey
+        LEFT JOIN task_parts p ON p.taskId = ti.taskId
+        LEFT JOIN task_part_payloads pp ON pp.taskId = p.taskId AND pp.partKey = p.partKey
         WHERE i.listId = :listId
+        ORDER BY ti.taskId, p.position
         """
     )
     abstract fun observeAssetControlsForList(listId: Long): Flow<List<TaskAssetControls>>
@@ -258,20 +273,28 @@ abstract class ListsDao {
     @Query(
         """
         SELECT ti.taskId AS taskId, ti.assetControls AS assetControls, ti.addOn AS addOn,
-               ti.taskReview AS taskReview, ppt.packageKey AS packageKey,
-               pc.title AS packageTitle, ppt.promptKey AS promptKey,
-               tp.kind AS payloadKind, tp.schemaVersion AS payloadSchema,
-               tp.revision AS payloadRevision
+               ti.taskReview AS taskReview, cmp.packageKey AS packageKey,
+               pc.title AS packageTitle,
+               COALESCE(p.partKey, 'local:0') AS partKey,
+               COALESCE(p.position, 0) AS position,
+               p.promptKey AS promptKey,
+               COALESCE(p.required, 1) AS required,
+               COALESCE(p.present, 1) AS present,
+               p.availability AS availability,
+               pp.kind AS payloadKind, pp.schemaVersion AS payloadSchema,
+               pp.revision AS payloadRevision
         FROM task_imports ti
         JOIN list_items i ON i.taskId = ti.taskId
-        LEFT JOIN package_prompt_tasks ppt ON ppt.taskId = ti.taskId
+        LEFT JOIN package_compositions cmp ON cmp.taskId = ti.taskId
         -- The checkpoint is keyed by (sourceId, packageKey), so this join is one row and the
         -- title is the same one the Catalog names the Package scope by. Only the title is read:
         -- the Task's paths stay the synthetic catalog key.
         LEFT JOIN package_checkpoints pc
-               ON pc.sourceId = ti.sourceId AND pc.packageKey = ppt.packageKey
-        LEFT JOIN task_payloads tp ON tp.taskId = ti.taskId
+               ON pc.sourceId = ti.sourceId AND pc.packageKey = cmp.packageKey
+        LEFT JOIN task_parts p ON p.taskId = ti.taskId
+        LEFT JOIN task_part_payloads pp ON pp.taskId = p.taskId AND pp.partKey = p.partKey
         WHERE i.listId = :listId
+        ORDER BY ti.taskId, p.position
         """
     )
     abstract suspend fun getAssetControlsForList(listId: Long): List<TaskAssetControls>
@@ -317,7 +340,7 @@ abstract class ListsDao {
         WHERE taskId IN (:taskIds)
         """
     )
-    abstract suspend fun getAssetControls(taskIds: List<String>): List<TaskAssetControls>
+    abstract suspend fun getAssetControls(taskIds: List<String>): List<TaskImportFacts>
 
     /**
      * The Tasks a payload is about: their public id, their imported name, and what governs them.
@@ -347,15 +370,39 @@ abstract class ListsDao {
      */
     @Query(
         """
-        SELECT tp.taskId AS taskId, ppt.packageKey AS packageKey,
-               ppt.promptKey AS promptKey, tp.kind AS kind,
-               tp.schemaVersion AS schemaVersion, tp.revision AS revision
-        FROM task_payloads tp
-        LEFT JOIN package_prompt_tasks ppt ON ppt.taskId = tp.taskId
-        WHERE tp.taskId IN (:taskIds)
+        SELECT p.taskId AS taskId, cmp.packageKey AS packageKey,
+               p.partKey AS partKey, p.promptKey AS promptKey, pp.kind AS kind,
+               pp.schemaVersion AS schemaVersion, pp.revision AS revision
+        FROM task_parts p
+        JOIN task_part_payloads pp ON pp.taskId = p.taskId AND pp.partKey = p.partKey
+        LEFT JOIN package_compositions cmp ON cmp.taskId = p.taskId
+        WHERE p.taskId IN (:taskIds)
+        ORDER BY p.taskId, p.position
         """
     )
     abstract suspend fun getPayloadPrompts(taskIds: List<String>): List<PayloadPromptRow>
+
+    /**
+     * The round's parts, with their optional bodies and current answers, in composition order.
+     *
+     * The v6 writer's one read. Both joins are `LEFT`: a degenerate part has no payload row, and a
+     * pending part has no response — omitting either row would turn *nothing to answer yet* into
+     * *nothing was asked*, which is the one distinction the v6 body exists to keep.
+     */
+    @Query(
+        """
+        SELECT p.taskId AS taskId, p.partKey AS partKey, p.position AS position,
+               p.promptKey AS promptKey, p.required AS required, p.present AS present,
+               pp.kind AS kind, pp.schemaVersion AS schemaVersion, pp.revision AS revision,
+               ps.response AS response
+        FROM task_parts p
+        LEFT JOIN task_part_payloads pp ON pp.taskId = p.taskId AND pp.partKey = p.partKey
+        LEFT JOIN task_part_state ps ON ps.taskId = p.taskId AND ps.partKey = p.partKey
+        WHERE p.taskId IN (:taskIds)
+        ORDER BY p.taskId, p.position
+        """
+    )
+    abstract suspend fun getPayloadParts(taskIds: List<String>): List<PayloadPartRow>
 
     /**
      * The newest submission of each Task in the round, as stored text.
@@ -390,7 +437,7 @@ abstract class ListsDao {
         SELECT a.taskId AS taskId, a.id AS assetId, a.publicId AS publicId,
                a.relativePath AS relativePath, a.sourceMissing AS sourceMissing,
                a.sortOrder AS sortOrder, tas.selections AS selections,
-               a.sourceUri AS sourceUri
+               a.sourceUri AS sourceUri, a.partKey AS partKey
         FROM assets a
         LEFT JOIN task_asset_state tas ON tas.assetId = a.id
         WHERE a.taskId IN (:taskIds)
@@ -533,9 +580,20 @@ abstract class ListsDao {
     @Transaction
     open suspend fun submitReview(
         taskId: String,
+        partKey: String?,
         response: ReviewResponse,
         template: TemplateVersionRef,
         context: ReviewContext?,
+        completion: CompletionPolicy,
+        /**
+         * Whether this commit is allowed to complete the Task, **already resolved by the caller**:
+         * a SinglePart commit passes `response.completesTask`, which is the rule every definition
+         * before v0.8.4 stated; the part policies pass the template's own `completesTask`, because
+         * their answer is computed from the parts rather than from the response's shape.
+         */
+        completesTask: Boolean,
+        /** True when a person pressed the completion control, false for a part's own answer. */
+        explicitCompletion: Boolean,
         now: Long
     ): List<Long> {
         // A Task whose content cannot be presented is not reviewable: a judgment recorded against
@@ -544,10 +602,49 @@ abstract class ListsDao {
         // control in the UI is a courtesy; this is the guarantee.
         if (!contentPresentable(taskId)) return emptyList()
 
+        // A part this build cannot present, or one the Package detached, is not an answerable
+        // decision: writing an answer to it would be recording a judgment on a page nobody could
+        // have been shown.
+        if (partKey != null) {
+            val part = partRow(taskId, partKey) ?: return emptyList()
+            if (!part.present || part.availability != null) return emptyList()
+        }
+
         val affected = listsContainingTask(taskId)
         val wasComplete = affected.filter { isComplete(it) == true }.toSet()
 
-        val written = writeTaskState(taskId, now) { response.completesTask }
+        // The part's current answer, written before completion is recomputed: completion reads the
+        // parts, so a policy must see this answer rather than the one it replaced.
+        if (partKey != null) {
+            upsertTaskPartState(
+                TaskPartStateEntity(
+                    taskId = taskId,
+                    partKey = partKey,
+                    response = response.encode(),
+                    answeredAt = now,
+                    revision = partPayload(taskId, partKey)?.revision,
+                    updatedAt = now
+                )
+            )
+        }
+        val partsComplete = partKey != null && partsCompletionSatisfied(taskId, completion)
+
+        val source = if (explicitCompletion) COMPLETION_EXPLICIT else COMPLETION_AUTOMATIC
+        val written = writeTaskState(taskId, now, source = source) { existing ->
+            when (completion) {
+                CompletionPolicy.SinglePart ->
+                    // The completion control is a person saying the Task is done; a part's own
+                    // answer completes only if the response itself does.
+                    if (explicitCompletion) true else completesTask
+
+                CompletionPolicy.AllRequiredParts,
+                CompletionPolicy.AnyPart ->
+                    if (explicitCompletion) true else completesTask && partsComplete
+
+                // Answering a part never completes this Task: only the completion control does.
+                CompletionPolicy.ExplicitOnly -> if (explicitCompletion) true else existing
+            }
+        }
 
         // A write that found no state row is a submission about a Task that no longer exists, and
         // nothing is recorded against it: an event naming a Task nobody can reach would be a
@@ -565,7 +662,8 @@ abstract class ListsDao {
                     templateVersion = template.version,
                     response = response.encode(),
                     contextKind = kind,
-                    contextRef = ref
+                    contextRef = ref,
+                    partKey = partKey
                 )
             )
             // The events are split into rows in the same transaction, so a submission is either
@@ -573,9 +671,41 @@ abstract class ListsDao {
             // record at all. A child row that could outlive a failed write would be an event whose
             // submission nobody made.
             writeReviewEventAnswers(eventId, taskId, response.viewerEvents)
+            // Structured fields share the table, distinguished by `fieldKey`, and continue the
+            // same ordinal space: one submission's rows are ordered as one list.
+            writeReviewEventFields(
+                eventId,
+                response.structuredFields,
+                startOrdinal = response.viewerEvents.size
+            )
         }
 
         return refreshAffected(affected, wasComplete, now)
+    }
+
+    /**
+     * Whether the parts the policy counts are answered, as of the rows written just now.
+     *
+     * Only required, present parts are counted. A part the Package detached is no longer part of
+     * the judgment and must not hold it open; a required part this build cannot present is still
+     * required, so it stays unanswered and blocks — the same refusal an unviewable file makes.
+     */
+    protected suspend fun partsCompletionSatisfied(
+        taskId: String,
+        policy: CompletionPolicy
+    ): Boolean {
+        val required = partsForTask(taskId).filter { it.present && it.required }
+        if (required.isEmpty()) return false
+        val answered = partStates(taskId)
+            .filter { it.answeredAt != null || it.response.isNotEmpty() }
+            .map { it.partKey }
+            .toSet()
+        return when (policy) {
+            CompletionPolicy.AllRequiredParts -> required.all { it.partKey in answered }
+            CompletionPolicy.AnyPart -> required.any { it.partKey in answered }
+            CompletionPolicy.SinglePart,
+            CompletionPolicy.ExplicitOnly -> false
+        }
     }
 
     /**
@@ -604,6 +734,29 @@ abstract class ListsDao {
                     reviewEventId = reviewEventId,
                     ordinal = ordinal,
                     assetId = event.assetUri()?.let { assetsByUri[it] }
+                )
+            )
+        }
+    }
+
+    /**
+     * One submission's structured fields, as rows of the same table the caught events use.
+     *
+     * [fieldKey] is what tells the two families apart; a field's `type` is the body's declared type
+     * rather than a viewer-event key, and its `value` is the option id or the text the person wrote.
+     * Written in the submission's transaction for the reason the event rows are: an answer whose
+     * projection is missing would be readable only by decoding history.
+     */
+    private suspend fun writeReviewEventFields(
+        reviewEventId: String,
+        fields: List<FieldAnswer>,
+        startOrdinal: Int
+    ) {
+        fields.forEachIndexed { index, field ->
+            insertReviewEventAnswer(
+                field.toReviewEventAnswer(
+                    reviewEventId = reviewEventId,
+                    ordinal = startOrdinal + index
                 )
             )
         }
@@ -1863,6 +2016,7 @@ abstract class ListsDao {
         """
         UPDATE task_state
         SET isCompleted = :isCompleted,
+            completionSource = :completionSource,
             updatedAt = :updatedAt
         WHERE taskId = :taskId
         """
@@ -1870,6 +2024,7 @@ abstract class ListsDao {
     protected abstract suspend fun updateTaskState(
         taskId: String,
         isCompleted: Boolean,
+        completionSource: String,
         updatedAt: Long
     )
 
@@ -1895,15 +2050,33 @@ abstract class ListsDao {
      *
      * Returns null when there was no row to update, so [submitReview] can tell a no-op from a
      * write and decline to record an event against a Task that no longer exists.
+     *
+     * [source] says how this completion was reached. An automatic recompute never clears an
+     * explicit completion: the person signed off, and a part answer arriving afterwards is not a
+     * retraction of that sign-off. The value is written either way, so an explicit completion that
+     * is later cleared by the control carries [COMPLETION_EXPLICIT] again.
      */
     protected open suspend fun writeTaskState(
         taskId: String,
         now: Long,
+        source: String = COMPLETION_EXPLICIT,
         change: (Boolean) -> Boolean
     ): Boolean? {
         val existing = getTaskState(taskId) ?: return null
-        val next = change(existing.isCompleted)
-        updateTaskState(taskId = taskId, isCompleted = next, updatedAt = now)
+        val computed = change(existing.isCompleted)
+        // An automatic write cannot take a sign-off away, and it cannot take its *provenance*
+        // away either: writing `true` under `automatic` would let the next recompute — a part
+        // reset, a detached Prompt — clear a completion a person made explicitly. The marker
+        // moves only when a person moves it.
+        val keepExplicit = source == COMPLETION_AUTOMATIC &&
+            existing.completionSource == COMPLETION_EXPLICIT
+        val next = if (keepExplicit && !computed) existing.isCompleted else computed
+        updateTaskState(
+            taskId = taskId,
+            isCompleted = next,
+            completionSource = if (keepExplicit) COMPLETION_EXPLICIT else source,
+            updatedAt = now
+        )
         return next
     }
 
@@ -2121,9 +2294,11 @@ abstract class ListsDao {
         // The Package tables name the Todo with NO ACTION foreign keys, like `task_imports`, so
         // they have to fall before the Source row. `PackageImportTest` found this on device: a
         // Package Todo refused to delete and the app could only say "Nothing was changed".
-        // Prompt links usually went with their Tasks by cascade; this also clears links whose
-        // Task is already gone, which is the state reconciliation leaves behind.
-        deletePackagePromptTasksOfTodo(sourceId)
+        // Composition prompts usually went with their Tasks by cascade and with their composition
+        // by cascade; this also clears rows whose Task is already gone, which is the state
+        // reconciliation leaves behind.
+        deleteCompositionPromptsOfTodo(sourceId)
+        deleteCompositionsOfTodo(sourceId)
         deletePackageResourcesOfTodo(sourceId)
         deletePackageCheckpointsOfTodo(sourceId)
         deleteSourceRow(sourceId)
@@ -2213,6 +2388,27 @@ abstract class ListsDao {
     )
     protected abstract suspend fun dissolvedSnapshotRows(sourceId: String): List<DissolvedSnapshotRow>
 
+    /**
+     * The same Todo's present parts, with their current answers, in composition order.
+     *
+     * A second read rather than more columns on the file rows: [dissolvedSnapshotRows] is one row
+     * per Asset, and repeating each part on every file row would multiply the payload by the file
+     * count and leave the snapshot deciding which repetition to believe. Present parts only — a
+     * detached part is not one of the decisions being kept.
+     */
+    @Query(
+        """
+        SELECT p.taskId AS taskId, p.partKey AS partKey, p.required AS required,
+               COALESCE(ps.response, '') AS response
+        FROM task_parts p
+        JOIN task_imports ti ON ti.taskId = p.taskId
+        LEFT JOIN task_part_state ps ON ps.taskId = p.taskId AND ps.partKey = p.partKey
+        WHERE ti.sourceId = :sourceId AND p.present = 1
+        ORDER BY p.taskId, p.position
+        """
+    )
+    protected abstract suspend fun dissolvedPartRows(sourceId: String): List<DissolvedPartRow>
+
     @Insert
     protected abstract suspend fun insertDissolvedState(row: DissolvedTaskStateEntity)
 
@@ -2237,9 +2433,12 @@ abstract class ListsDao {
      */
     @Transaction
     open suspend fun snapshotDissolvedState(sourceId: String, now: Long) {
+        // Read both payloads before writing either: the parts are keyed by Task and the file rows
+        // are one per Asset, so the two are joined here rather than in SQL.
+        val partsByTask = dissolvedPartRows(sourceId).groupBy { it.taskId }
         dissolvedSnapshotRows(sourceId)
             .groupBy { it.taskId }
-            .forEach { (_, rows) ->
+            .forEach { (taskId, rows) ->
                 val task = rows.first()
                 insertDissolvedState(
                     DissolvedTaskStateEntity(
@@ -2261,6 +2460,15 @@ abstract class ListsDao {
                                         )
                                     )
                                 }
+                            }
+                        ),
+                        partRecords = encodeDissolvedParts(
+                            partsByTask[taskId].orEmpty().map { part ->
+                                DissolvedPartRecord(
+                                    partKey = part.partKey,
+                                    required = part.required,
+                                    response = part.response
+                                )
                             }
                         ),
                         dissolvedAt = now
@@ -2355,8 +2563,11 @@ abstract class ListsDao {
     )
     protected abstract suspend fun deleteTasksOfTodo(sourceId: String)
 
-    @Query("DELETE FROM package_prompt_tasks WHERE sourceId = :sourceId")
-    protected abstract suspend fun deletePackagePromptTasksOfTodo(sourceId: String)
+    @Query("DELETE FROM package_composition_prompts WHERE sourceId = :sourceId")
+    protected abstract suspend fun deleteCompositionPromptsOfTodo(sourceId: String)
+
+    @Query("DELETE FROM package_compositions WHERE sourceId = :sourceId")
+    protected abstract suspend fun deleteCompositionsOfTodo(sourceId: String)
 
     @Query("DELETE FROM package_resources WHERE sourceId = :sourceId")
     protected abstract suspend fun deletePackageResourcesOfTodo(sourceId: String)
@@ -2473,9 +2684,35 @@ abstract class ListsDao {
         val matches = recoveryMatches(dissolvedSourceId, newSourceId)
         for (row in matches) {
             writeRecoveredState(row.taskId, row.isCompleted, now)
-            // An unknown version, or a payload this build did not write, ends this Task here:
-            // completion is restored and nothing is guessed at. That is also the whole answer a
-            // history written before v0.5.2 gets, its payload being empty by construction.
+            // The parts first, because they are the decisions the Task is now made of: a recovered
+            // part answer is what the new Task's review surface will draw beside its Prompt.
+            //
+            // An unreadable payload, or none at all, restores no part answers — the same fail-closed
+            // answer an unknown file-payload version gets below. A part key the new composition does
+            // not name recovers nothing, exactly as a file path the new import did not produce does.
+            val parts = decodeDissolvedParts(row.partRecords) ?: emptyList()
+            if (parts.isNotEmpty()) {
+                val byKey = partsForTask(row.taskId).associateBy { it.partKey }
+                for (record in parts) {
+                    val part = byKey[record.partKey]?.takeIf { it.present } ?: continue
+                    upsertTaskPartState(
+                        TaskPartStateEntity(
+                            taskId = row.taskId,
+                            partKey = part.partKey,
+                            response = record.response,
+                            answeredAt = if (record.response.isEmpty()) null else now,
+                            // The answer was made against the dissolved Task's body, not this one;
+                            // null says so rather than claiming the current revision.
+                            revision = null,
+                            updatedAt = now
+                        )
+                    )
+                }
+            }
+            // An unknown version, or a payload this build did not write, ends the file restore here:
+            // completion and any part answers are restored and nothing is guessed at. That is also
+            // the whole answer a history written before v0.5.2 gets, its payload being empty by
+            // construction.
             val records = decodeDissolvedRecords(row.records, row.recordVersion) ?: continue
             // And `''` is an answer rather than a gap — the Task had no file to record — so there is
             // nothing to look up and nothing to write.
@@ -2507,7 +2744,8 @@ abstract class ListsDao {
         SELECT ti.taskId AS taskId,
                d.isCompleted AS isCompleted,
                d.recordVersion AS recordVersion,
-               d.records AS records
+               d.records AS records,
+               d.partRecords AS partRecords
         FROM task_imports ti
         JOIN sources s ON s.id = ti.sourceId
         JOIN dissolved_task_state d
@@ -2605,6 +2843,7 @@ abstract class ListsDao {
                s.lastImportAt AS lastImportAt,
                s.lastImportStatus AS lastImportStatus,
                s.assetControls AS assetControls,
+               s.composition AS composition,
                s.addOn AS addOn,
                COALESCE(MAX(ti.assetControls), '') AS taskAssetControls,
                COUNT(ti.taskId) AS taskCount
@@ -2634,6 +2873,7 @@ abstract class ListsDao {
                s.lastImportAt AS lastImportAt,
                s.lastImportStatus AS lastImportStatus,
                s.assetControls AS assetControls,
+               s.composition AS composition,
                s.addOn AS addOn,
                COALESCE(MAX(ti.assetControls), '') AS taskAssetControls,
                COUNT(ti.taskId) AS taskCount
@@ -2712,7 +2952,8 @@ abstract class ListsDao {
         exportKind: String = EXPORT_CHOICE_NONE,
         keepStateOnDelete: Boolean = false,
         webhookUrl: String = "",
-        webhookFromDefault: Boolean = false
+        webhookFromDefault: Boolean = false,
+        composition: CompositionChoice = CompositionChoice.Default
     ): SourceEntity {
         val source = SourceEntity(
             id = UUID.randomUUID().toString(),
@@ -2731,7 +2972,8 @@ abstract class ListsDao {
             taskReview = taskReview,
             exportKind = exportKind,
             webhookUrl = webhookUrl,
-            webhookFromDefault = webhookFromDefault
+            webhookFromDefault = webhookFromDefault,
+            composition = composition.key
         )
         insertSource(source)
         return source
@@ -2782,7 +3024,8 @@ abstract class ListsDao {
         followUpstream: Boolean = false,
         keepStateOnDelete: Boolean = false,
         webhookUrl: String = "",
-        webhookFromDefault: Boolean = false
+        webhookFromDefault: Boolean = false,
+        composition: CompositionChoice = CompositionChoice.Default
     ) = setSourceConfig(
         id,
         displayName,
@@ -2796,7 +3039,8 @@ abstract class ListsDao {
         followUpstream,
         keepStateOnDelete,
         webhookUrl,
-        webhookFromDefault
+        webhookFromDefault,
+        composition.key
     )
 
     /**
@@ -2958,7 +3202,19 @@ abstract class ListsDao {
         contentPolicy: ContentPolicy? = null,
         assetControls: String = "",
         addOn: String = "",
-        taskReview: String = ""
+        taskReview: String = "",
+        /**
+         * The completion rule the run's Task Review states, or [CompletionPolicy.SinglePart] for a
+         * run that stamps no multi-part review.
+         *
+         * A re-import can change the set of parts a Task holds — a Prompt added to its Section, a
+         * Prompt removed from it — and completion is a fact about those parts. Without this, the
+         * Task's checkbox would keep the answer the previous membership gave it: a Task left
+         * completed with a new required part pending, or left incomplete after its last pending
+         * part was detached. The recompute is only for the part policies; [SinglePart] completion
+         * is a statement about the Task or its Assets and is not derived from parts at all.
+         */
+        completion: CompletionPolicy = CompletionPolicy.SinglePart
     ): ImportResult = runImportInternal(
         sourceId,
         coverage,
@@ -2968,7 +3224,8 @@ abstract class ListsDao {
         contentPolicy,
         assetControls,
         addOn,
-        taskReview
+        taskReview,
+        completion
     )
 
     /**
@@ -2997,7 +3254,8 @@ abstract class ListsDao {
         contentPolicy: ContentPolicy? = null,
         assetControls: String = "",
         addOn: String = "",
-        taskReview: String = ""
+        taskReview: String = "",
+        completion: CompletionPolicy = CompletionPolicy.SinglePart
     ): ImportResult {
         val source = getSource(sourceId) ?: return ImportResult(outcome = ImportOutcome.FAILED)
         val importer = ImporterKind.fromKey(source.importerKind)
@@ -3011,13 +3269,16 @@ abstract class ListsDao {
 
         val imports = taskImportsForSource(sourceId)
         val owned = imports.associateBy { it.groupPath }.toMutableMap()
-        val plannedPaths = plan.tasks.flatMap { it.assets }.map { it.rootRelativePath }.toSet()
+        val plannedPaths = plan.tasks.flatMap { it.allAssets() }.map { it.rootRelativePath }.toSet()
 
         var created = 0
         var adopted = 0
         var reconciled = 0
         var reset = 0
         var dropped = 0
+        // Tasks this run re-examined whose completion may be a fact about a part set that just
+        // changed. A created Task needs no entry: it starts incomplete and has no answer yet.
+        val touched = mutableSetOf<String>()
         var assetsCreated = 0
         var assetsUpdated = 0
         var assetsMissing = 0
@@ -3060,6 +3321,7 @@ abstract class ListsDao {
             val existing = owned[task.groupPath]
             if (existing != null) {
                 reconciled++
+                touched += existing.taskId
                 val delta = reconcileTask(
                     source, existing.taskId, task, now, assetControls, addOn, taskReview
                 )
@@ -3086,6 +3348,10 @@ abstract class ListsDao {
         for ((change, decision) in decisions) {
             if (decision != ContentDecision.RESET) continue
             clearTaskState(change.taskId, now)
+            // Its parts were cleared above, but it is still a Task whose membership may have
+            // moved; the recompute below is what makes the cleared checkbox true again when every
+            // remaining required part was answered by the run that follows.
+            touched += change.taskId
             reset++
         }
 
@@ -3093,6 +3359,17 @@ abstract class ListsDao {
         // Resource use all name one. Each Package classifies itself against its own checkpoint and
         // either advances or refuses without touching the Tasks above.
         val packages = applyPackages(source, plan, now)
+
+        // Completion is derived from the parts under the part policies, and a re-import is the one
+        // path that can change the part set without a submission. Recompute after [applyPackages]
+        // so a Prompt the Package added or detached is already visible in `task_parts`; an explicit
+        // completion survives, because [writeTaskState] only lets a person take one away.
+        if (completion != CompletionPolicy.SinglePart) {
+            for (taskId in touched) {
+                val satisfied = partsCompletionSatisfied(taskId, completion)
+                writeTaskState(taskId, now, source = COMPLETION_AUTOMATIC) { satisfied }
+            }
+        }
 
         // A file the plan no longer names, inside the scope that was authoritatively scanned, has
         // gone missing. Marked, never deleted, and never for an Asset outside the coverage: a
@@ -3181,20 +3458,22 @@ abstract class ListsDao {
             ) {
                 return true
             }
-            val linked = packagePromptTasks(sourceId, plannedPackage.packageKey)
+            val linked = compositionPrompts(sourceId, plannedPackage.packageKey)
                 .filter { it.present }
                 .map { it.promptKey }
                 .toSet()
             val planned = plan.tasks
-                .filter { it.prompt?.packageKey == plannedPackage.packageKey }
-                .mapNotNull { it.prompt?.promptKey }
+                .filter { task ->
+                    task.parts.any { it.prompt?.packageKey == plannedPackage.packageKey }
+                }
+                .flatMap { task -> task.parts.mapNotNull { it.prompt?.promptKey } }
                 .toSet()
             if (!linked.containsAll(planned)) return true
         }
 
         val imports = taskImportsForSource(sourceId)
         if (imports.isEmpty()) return plan.tasks.isNotEmpty()
-        val plannedPaths = plan.tasks.flatMap { it.assets }.map { it.rootRelativePath }.toSet()
+        val plannedPaths = plan.tasks.flatMap { it.allAssets() }.map { it.rootRelativePath }.toSet()
         return hasSourceChanges(
             changes = taskChanges(
                 coverage = coverage,
@@ -3292,6 +3571,9 @@ abstract class ListsDao {
         lastModified: Long?
     )
 
+    @Query("UPDATE assets SET sortOrder = :sortOrder WHERE id = :id")
+    protected abstract suspend fun updateAssetSortOrder(id: String, sortOrder: Int)
+
     @Query("UPDATE assets SET sourceMissing = 1 WHERE id = :id")
     protected abstract suspend fun setAssetMissing(id: String)
 
@@ -3304,7 +3586,8 @@ abstract class ListsDao {
             "assetControls = :assetControls, addOn = :addOn, taskReview = :taskReview, " +
             "exportKind = :exportKind, " +
             "followUpstream = :followUpstream, keepStateOnDelete = :keepStateOnDelete, " +
-            "webhookUrl = :webhookUrl, webhookFromDefault = :webhookFromDefault WHERE id = :id"
+            "webhookUrl = :webhookUrl, webhookFromDefault = :webhookFromDefault, " +
+            "composition = :composition WHERE id = :id"
     )
     protected abstract suspend fun setSourceConfig(
         id: String,
@@ -3319,7 +3602,8 @@ abstract class ListsDao {
         followUpstream: Boolean,
         keepStateOnDelete: Boolean,
         webhookUrl: String,
-        webhookFromDefault: Boolean
+        webhookFromDefault: Boolean,
+        composition: String
     )
 
     /**
@@ -3345,19 +3629,14 @@ abstract class ListsDao {
                COALESCE(SUM(a.sourceMissing), 0) AS missingAssets,
                SUM(a.sizeBytes) AS sizeBytes,
                MAX(a.lastModified) AS lastModified,
-               ppt.packageKey AS packageKey,
-               pc.title AS packageTitle,
-               ppt.promptKey AS promptKey,
-               tp.kind AS payloadKind,
-               tp.schemaVersion AS payloadSchema,
-               tp.revision AS payloadRevision
+               cmp.packageKey AS packageKey,
+               pc.title AS packageTitle
         FROM task_imports ti
         JOIN task_state ts ON ts.taskId = ti.taskId
         LEFT JOIN assets a ON a.taskId = ti.taskId
-        LEFT JOIN package_prompt_tasks ppt ON ppt.taskId = ti.taskId
+        LEFT JOIN package_compositions cmp ON cmp.taskId = ti.taskId
         LEFT JOIN package_checkpoints pc
-               ON pc.sourceId = ti.sourceId AND pc.packageKey = ppt.packageKey
-        LEFT JOIN task_payloads tp ON tp.taskId = ti.taskId
+               ON pc.sourceId = ti.sourceId AND pc.packageKey = cmp.packageKey
         WHERE ti.sourceId = :sourceId
         GROUP BY ti.taskId
         """
@@ -3394,14 +3673,86 @@ abstract class ListsDao {
                 hasUnviewableAsset = assets.any { asset ->
                     !assetViewerAvailable(asset.relativePath?.substringAfterLast('/').orEmpty())
                 },
-                assets = assets.map { it.toReviewAsset(pairs[it.id]?.decisions ?: AssetDecisions()) },
+                parts = resolveParts(projection.taskId, assets, pairs),
                 packageKey = projection.packageKey,
-                packageTitle = projection.packageTitle,
-                promptKey = projection.promptKey,
-                payloadKind = projection.payloadKind,
-                payloadSchema = projection.payloadSchema,
-                payloadRevision = projection.payloadRevision
+                packageTitle = projection.packageTitle
             )
+        }
+    }
+
+    /** The part rows of one Task, envelope included. Used wherever a surface needs the page model. */
+    @Query(
+        """
+        SELECT p.taskId AS taskId, p.partKey AS partKey, p.position AS position,
+               p.promptKey AS promptKey, p.required AS required, p.present AS present,
+               p.availability AS availability, pp.kind AS payloadKind,
+               pp.schemaVersion AS payloadSchema, pp.revision AS payloadRevision
+        FROM task_parts p
+        LEFT JOIN task_part_payloads pp ON pp.taskId = p.taskId AND pp.partKey = p.partKey
+        WHERE p.taskId = :taskId
+        ORDER BY p.position, p.partKey
+        """
+    )
+    protected abstract suspend fun partRows(taskId: String): List<TaskPartRow>
+
+    /** Every part row of a set of Tasks, in Task then composition order. */
+    @Query(
+        """
+        SELECT p.taskId AS taskId, p.partKey AS partKey, p.position AS position,
+               p.promptKey AS promptKey, p.required AS required, p.present AS present,
+               p.availability AS availability, pp.kind AS payloadKind,
+               pp.schemaVersion AS payloadSchema, pp.revision AS payloadRevision
+        FROM task_parts p
+        LEFT JOIN task_part_payloads pp ON pp.taskId = p.taskId AND pp.partKey = p.partKey
+        WHERE p.taskId IN (:taskIds)
+        ORDER BY p.taskId, p.position, p.partKey
+        """
+    )
+    protected abstract suspend fun partRowsForTasks(taskIds: List<String>): List<TaskPartRow>
+
+    /**
+     * A Task's [ReviewPart]s, with its Assets hung where they were presented.
+     *
+     * Assets carry `partKey`, and that is the only thing that decides grouping — an Asset whose
+     * part row is gone (a part detached by a Package revision, or a row written before the column
+     * existed) still belongs to the Task and must not vanish from its catalog card. Such Assets are
+     * attached to the first part; a Task with no part rows at all reads as one degenerate part, the
+     * shape every v0.8.4 Task has before a Package speaks for it.
+     */
+    private suspend fun resolveParts(
+        taskId: String,
+        assets: List<AssetEntity>,
+        pairs: Map<String, AssetStateEntity>
+    ): List<ReviewPart> {
+        val rows = partRows(taskId)
+        fun reviewAsset(asset: AssetEntity) =
+            asset.toReviewAsset(pairs[asset.id]?.decisions ?: AssetDecisions())
+
+        val byPart = assets.groupBy { it.partKey }.toMutableMap()
+        val unassigned = byPart.remove(null).orEmpty()
+        val parts = rows.map { row ->
+            ReviewPart(
+                partKey = row.partKey,
+                position = row.position,
+                promptKey = row.promptKey,
+                payloadKind = row.payloadKind,
+                payloadSchema = row.payloadSchema,
+                payloadRevision = row.payloadRevision,
+                required = row.required,
+                present = row.present,
+                availability = row.availability,
+                assets = byPart[row.partKey].orEmpty().map(::reviewAsset)
+            )
+        }
+        val fallback = unassigned.map(::reviewAsset)
+        return when {
+            parts.isEmpty() -> listOf(
+                ReviewPart(partKey = "local:0", position = 0, assets = assets.map(::reviewAsset))
+            )
+            fallback.isEmpty() -> parts
+            else -> parts.mapIndexed { index, part ->
+                if (index == 0) part.copy(assets = part.assets + fallback) else part
+            }
         }
     }
 
@@ -3442,7 +3793,18 @@ abstract class ListsDao {
 
     private class ReconcileDelta(val created: Int, val updated: Int)
 
-    /** A Task this Source already owns: update it in place, adding new Assets and measuring old ones. */
+    /**
+     * A Task this Source already owns: update it in place, adding new Assets and measuring old ones.
+     *
+     * Parts are reconciled by `partKey`, not rebuilt. A part the plan still names keeps its row, its
+     * answer and its history; only its `position` and its Assets are refreshed. A part the plan no
+     * longer names is marked absent and keeps everything else, which is how a Package revision that
+     * drops a Prompt leaves a reviewable record behind.
+     *
+     * An Asset is matched by `(partKey, relativePath)`. A file that moves from one part to another
+     * is the same row with a new `partKey` — not a new Asset — so its decisions and marks follow it
+     * rather than being re-created under a second row.
+     */
     private suspend fun reconcileTask(
         source: SourceEntity,
         taskId: String,
@@ -3452,39 +3814,105 @@ abstract class ListsDao {
         addOn: String,
         taskReview: String
     ): ReconcileDelta {
-        val existing = assetsForTask(taskId).associateBy { it.relativePath }
+        val existing = assetsForTask(taskId)
+            .associateBy { partAndPath(it.partKey, it.relativePath) }
+            .toMutableMap()
         var created = 0
         var updated = 0
 
-        for (asset in task.assets) {
-            val current = existing[asset.rootRelativePath]
-            if (current == null) {
-                insertAssetWithState(
-                    AssetEntity(
-                        id = UUID.randomUUID().toString(),
-                        taskId = taskId,
-                        sortOrder = asset.sortOrder,
-                        rootUri = source.rootUri,
-                        relativePath = asset.rootRelativePath,
-                        sourceUri = asset.uri,
-                        sizeBytes = asset.sizeBytes,
-                        lastModified = asset.lastModified,
-                        publicId = newItemPublicId(
-                            assetIdentity(taskId, asset.rootRelativePath),
+        for (part in task.parts) {
+            writePart(taskId, part, now)
+            for (asset in part.assets) {
+                val current = existing[partAndPath(part.partKey, asset.rootRelativePath)]
+                if (current == null) {
+                    val moved = existing.values.firstOrNull {
+                        it.relativePath == asset.rootRelativePath && it.partKey != part.partKey
+                    }
+                    if (moved != null) {
+                        setAssetPart(moved.id, part.partKey)
+                        existing.remove(partAndPath(moved.partKey, moved.relativePath))
+                        existing[partAndPath(part.partKey, asset.rootRelativePath)] =
+                            moved.copy(partKey = part.partKey)
+                        updateAssetMetrics(moved.id, asset.uri, asset.sizeBytes, asset.lastModified)
+                        updated++
+                    } else {
+                        insertAssetWithState(
+                            AssetEntity(
+                                id = UUID.randomUUID().toString(),
+                                taskId = taskId,
+                                sortOrder = asset.sortOrder,
+                                rootUri = source.rootUri,
+                                relativePath = asset.rootRelativePath,
+                                sourceUri = asset.uri,
+                                sizeBytes = asset.sizeBytes,
+                                lastModified = asset.lastModified,
+                                publicId = newItemPublicId(
+                                    assetIdentity(taskId, part.partKey, asset.rootRelativePath),
+                                    now
+                                ),
+                                partKey = part.partKey
+                            ),
                             now
                         )
-                    ),
-                    now
-                )
-                created++
-            } else {
-                updateAssetMetrics(current.id, asset.uri, asset.sizeBytes, asset.lastModified)
-                updated++
+                        created++
+                    }
+                } else {
+                    if (current.sortOrder != asset.sortOrder) {
+                        updateAssetSortOrder(current.id, asset.sortOrder)
+                    }
+                    updateAssetMetrics(current.id, asset.uri, asset.sizeBytes, asset.lastModified)
+                    updated++
+                }
+            }
+        }
+
+        val plannedKeys = task.parts.map { it.partKey }.toSet()
+        for (part in partsForTask(taskId)) {
+            if (part.partKey !in plannedKeys && part.present) {
+                setTaskPartPresent(taskId, part.partKey, false, now)
             }
         }
 
         touchTaskImport(taskId, now, assetControls, addOn, taskReview)
         return ReconcileDelta(created, updated)
+    }
+
+    private fun partAndPath(partKey: String?, relativePath: String?): Pair<String?, String?> =
+        partKey to relativePath
+
+    /**
+     * One planned part, written into a Task that already exists.
+     *
+     * The part's answer is created only when there is none. A state row is the record of what a
+     * person decided, and a refresh of unchanged content must not blank it — which is also why this
+     * upserts the part row instead of replacing it: `INSERT OR REPLACE` deletes first, and the
+     * deletion would cascade into that very answer.
+     *
+     * **A Prompt's payload is deliberately not written here.** It is Package content, and the
+     * Package's revision decides whether this run may write it at all: [applyPackages] is where the
+     * stale and same-revision checks live. Writing the body from the ordinary Task loop — which
+     * runs first and knows nothing about a checkpoint — would let a lower revision overwrite a
+     * higher revision's payload while the checkpoint correctly refused the round.
+     */
+    private suspend fun writePart(taskId: String, part: PlannedPart, now: Long) {
+        upsertTaskPart(
+            TaskPartEntity(
+                taskId = taskId,
+                partKey = part.partKey,
+                position = part.position,
+                origin = part.origin.key,
+                promptKey = part.prompt?.promptKey,
+                required = part.required,
+                present = true,
+                availability = null,
+                updatedAt = now
+            )
+        )
+        if (partState(taskId, part.partKey) == null) {
+            upsertTaskPartState(
+                TaskPartStateEntity(taskId = taskId, partKey = part.partKey, updatedAt = now)
+            )
+        }
     }
 
     private class NewTaskDelta(
@@ -3508,6 +3936,11 @@ abstract class ListsDao {
      * under a Task whose grouping rule now puts that file elsewhere. That is a real contradiction
      * and it is settled the same way it always was, by not writing the Task and saying which one
      * holds the file.
+     *
+     * **A Package is exempt from both ownership questions.** Its files are material a Prompt
+     * presents, not a grouping the importer assigned; two Prompts in one Package may name the same
+     * picture, and a Package Todo may be planned over a file a local Todo already holds. Refusing
+     * those would be enforcing a rule about local grouping on material that never made that claim.
      */
     private suspend fun resolveNewTask(
         source: SourceEntity,
@@ -3518,16 +3951,23 @@ abstract class ListsDao {
         addOn: String,
         taskReview: String
     ): NewTaskDelta {
+        val assets = task.allAssets()
         var adoptTaskId: String? = null
-        for (asset in task.assets) {
-            assetOfSourceAt(source.id, source.rootUri, asset.rootRelativePath)?.let { owned ->
-                return NewTaskDelta(
-                    conflict = ImportConflict(
-                        relativePath = asset.rootRelativePath,
-                        ownerLabel = "this Source",
-                        taskId = owned.taskId
+        for (asset in assets) {
+            // A Package's files are its Prompts' material, not a grouping the file was assigned
+            // to: two Prompts may legitimately present the same picture, and a Package Task may
+            // be planned over a file a local Task in the same Todo already holds. Only the local
+            // importers keep the one-file-one-Task claim that makes this a conflict.
+            if (importer != ImporterKind.PACKAGE) {
+                assetOfSourceAt(source.id, source.rootUri, asset.rootRelativePath)?.let { owned ->
+                    return NewTaskDelta(
+                        conflict = ImportConflict(
+                            relativePath = asset.rootRelativePath,
+                            ownerLabel = "this Source",
+                            taskId = owned.taskId
+                        )
                     )
-                )
+                }
             }
 
             val existing = assetByLocator(source.rootUri, asset.rootRelativePath) ?: continue
@@ -3537,11 +3977,12 @@ abstract class ListsDao {
                 // sharing the file and sharing nothing else.
                 continue
             }
+            if (importer == ImporterKind.PACKAGE) continue
             // A free file-backed Task: legacy-claimed, or minted by an older migration before the
             // claim set existed. A file-as-Task run planning exactly this one file can adopt it; a
             // folder-as-Task run would fold it into a group and take a reviewed Task's identity
             // with it.
-            if (importer == ImporterKind.FILE_AS_TASK && task.assets.size == 1) {
+            if (importer == ImporterKind.FILE_AS_TASK && assets.size == 1) {
                 adoptTaskId = ownerTaskId
             } else {
                 return NewTaskDelta(
@@ -3565,12 +4006,16 @@ abstract class ListsDao {
                 )
             )
             deleteLegacyClaim(adoptTaskId)
-            val asset = task.assets.single()
+            val asset = assets.single()
             // The adopted Task's *own* Asset, not whichever row the locator happens to return now
             // that a file may sit under several Tasks at once.
             assetsForTask(adoptTaskId)
                 .firstOrNull { it.rootUri == source.rootUri && it.relativePath == asset.rootRelativePath }
-                ?.let { updateAssetMetrics(it.id, asset.uri, asset.sizeBytes, asset.lastModified) }
+                ?.let { owned ->
+                    setAssetPart(owned.id, task.parts.single().partKey)
+                    updateAssetMetrics(owned.id, asset.uri, asset.sizeBytes, asset.lastModified)
+                }
+            for (part in task.parts) writePart(adoptTaskId, part, now)
             return NewTaskDelta(adopted = true, assetsUpdated = 1)
         }
 
@@ -3594,23 +4039,30 @@ abstract class ListsDao {
                 taskReview = taskReview
             )
         )
-        for (asset in task.assets) {
-            insertAssetWithState(
-                AssetEntity(
-                    id = UUID.randomUUID().toString(),
-                    taskId = taskId,
-                    sortOrder = asset.sortOrder,
-                    rootUri = source.rootUri,
-                    relativePath = asset.rootRelativePath,
-                    sourceUri = asset.uri,
-                    sizeBytes = asset.sizeBytes,
-                    lastModified = asset.lastModified,
-                    publicId = newItemPublicId(assetIdentity(taskId, asset.rootRelativePath), now)
-                ),
-                now
-            )
+        for (part in task.parts) {
+            writePart(taskId, part, now)
+            for (asset in part.assets) {
+                insertAssetWithState(
+                    AssetEntity(
+                        id = UUID.randomUUID().toString(),
+                        taskId = taskId,
+                        sortOrder = asset.sortOrder,
+                        rootUri = source.rootUri,
+                        relativePath = asset.rootRelativePath,
+                        sourceUri = asset.uri,
+                        sizeBytes = asset.sizeBytes,
+                        lastModified = asset.lastModified,
+                        publicId = newItemPublicId(
+                            assetIdentity(taskId, part.partKey, asset.rootRelativePath),
+                            now
+                        ),
+                        partKey = part.partKey
+                    ),
+                    now
+                )
+            }
         }
-        return NewTaskDelta(assetsCreated = task.assets.size)
+        return NewTaskDelta(assetsCreated = assets.size)
     }
 
     // --- Packages (v0.8.2) --------------------------------------------------------------------
@@ -3627,28 +4079,130 @@ abstract class ListsDao {
     protected abstract suspend fun upsertPackageCheckpoint(checkpoint: PackageCheckpointEntity)
 
     @Query(
-        "SELECT * FROM package_prompt_tasks WHERE sourceId = :sourceId AND packageKey = :packageKey"
+        "SELECT * FROM package_compositions WHERE sourceId = :sourceId AND packageKey = :packageKey"
     )
-    protected abstract suspend fun packagePromptTasks(
+    protected abstract suspend fun packageCompositions(
         sourceId: String,
         packageKey: String
-    ): List<PackagePromptTaskEntity>
+    ): List<PackageCompositionEntity>
+
+    @Query("SELECT * FROM package_compositions WHERE taskId = :taskId")
+    abstract suspend fun compositionForTask(taskId: String): PackageCompositionEntity?
+
+    @Upsert
+    protected abstract suspend fun upsertPackageComposition(composition: PackageCompositionEntity)
+
+    @Query(
+        "UPDATE package_compositions SET present = :present, updatedAt = :now WHERE taskId = :taskId"
+    )
+    protected abstract suspend fun setCompositionPresent(taskId: String, present: Boolean, now: Long)
+
+    @Query(
+        """
+        SELECT * FROM package_composition_prompts
+        WHERE sourceId = :sourceId AND packageKey = :packageKey
+        """
+    )
+    protected abstract suspend fun compositionPrompts(
+        sourceId: String,
+        packageKey: String
+    ): List<PackageCompositionPromptEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    protected abstract suspend fun insertPackagePromptTask(link: PackagePromptTaskEntity)
+    protected abstract suspend fun insertCompositionPrompt(prompt: PackageCompositionPromptEntity)
 
-    @Query("UPDATE package_prompt_tasks SET present = :present WHERE taskId = :taskId")
-    protected abstract suspend fun setPackagePromptPresent(taskId: String, present: Boolean)
+    @Query(
+        """
+        UPDATE package_composition_prompts SET present = :present
+        WHERE taskId = :taskId AND promptKey = :promptKey
+        """
+    )
+    protected abstract suspend fun setCompositionPromptPresent(
+        taskId: String,
+        promptKey: String,
+        present: Boolean
+    )
+
+    /** `@Upsert`, not `REPLACE`: replacing a part row would cascade away its answer and history. */
+    @Upsert
+    protected abstract suspend fun upsertTaskPart(part: TaskPartEntity)
+
+    @Query("SELECT * FROM task_parts WHERE taskId = :taskId ORDER BY position, partKey")
+    protected abstract suspend fun partsForTask(taskId: String): List<TaskPartEntity>
+
+    /** One part, for the write boundary: a commit names a part and must find it. */
+    @Query("SELECT * FROM task_parts WHERE taskId = :taskId AND partKey = :partKey")
+    protected abstract suspend fun partRow(taskId: String, partKey: String): TaskPartEntity?
+
+    @Query(
+        "UPDATE task_parts SET present = :present, updatedAt = :now " +
+            "WHERE taskId = :taskId AND partKey = :partKey"
+    )
+    protected abstract suspend fun setTaskPartPresent(
+        taskId: String,
+        partKey: String,
+        present: Boolean,
+        now: Long
+    )
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    protected abstract suspend fun upsertTaskPayload(payload: TaskPayloadEntity)
+    protected abstract suspend fun upsertTaskPartPayload(payload: TaskPartPayloadEntity)
 
-    @Query("SELECT * FROM task_payloads WHERE taskId = :taskId")
-    abstract suspend fun taskPayload(taskId: String): TaskPayloadEntity?
+    /** The part's body, read once: the Content page observes it rather than carrying it in a queue. */
+    @Query("SELECT * FROM task_part_payloads WHERE taskId = :taskId AND partKey = :partKey")
+    abstract suspend fun partPayload(taskId: String, partKey: String): TaskPartPayloadEntity?
 
-    /** The same row, watched: the Content page re-reads its body rather than carrying it in a queue. */
-    @Query("SELECT * FROM task_payloads WHERE taskId = :taskId")
-    abstract fun observeTaskPayload(taskId: String): Flow<TaskPayloadEntity?>
+    @Query("SELECT * FROM task_part_payloads WHERE taskId = :taskId AND partKey = :partKey")
+    abstract fun observePartPayload(taskId: String, partKey: String): Flow<TaskPartPayloadEntity?>
+
+    @Query("SELECT * FROM task_part_state WHERE taskId = :taskId AND partKey = :partKey")
+    abstract suspend fun partState(taskId: String, partKey: String): TaskPartStateEntity?
+
+    /**
+     * The part's current answer, live.
+     *
+     * The Content page observes its own part rather than the Task's latest response: a Task may
+     * present several Prompts, and the newest submission may be the *other* part's — drawing it
+     * under this page would show an answer this question never received.
+     */
+    @Query("SELECT * FROM task_part_state WHERE taskId = :taskId AND partKey = :partKey")
+    abstract fun observePartState(taskId: String, partKey: String): Flow<TaskPartStateEntity?>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    protected abstract suspend fun upsertTaskPartState(state: TaskPartStateEntity)
+
+    /** Every part's current answer for a Task, in composition order. */
+    @Query(
+        """
+        SELECT ps.* FROM task_part_state ps
+        JOIN task_parts p ON p.taskId = ps.taskId AND p.partKey = ps.partKey
+        WHERE ps.taskId = :taskId
+        ORDER BY p.position, p.partKey
+        """
+    )
+    abstract suspend fun partStates(taskId: String): List<TaskPartStateEntity>
+
+    /**
+     * Which parts of a Task hold a current answer, live: the completion bar's pending count.
+     *
+     * The same two conditions [partsCompletionSatisfied] counts, expressed as one query so the
+     * number the reviewer is shown and the number completion is computed from cannot drift.
+     */
+    @Query(
+        "SELECT partKey FROM task_part_state WHERE taskId = :taskId " +
+            "AND (answeredAt IS NOT NULL OR response != '')"
+    )
+    abstract fun observeAnsweredPartKeys(taskId: String): Flow<List<String>>
+
+    /** The part's Assets, in presentation order. */
+    @Query(
+        "SELECT * FROM assets WHERE taskId = :taskId AND partKey = :partKey ORDER BY sortOrder, id"
+    )
+    protected abstract suspend fun assetsForPart(taskId: String, partKey: String): List<AssetEntity>
+
+    /** Moves an Asset to the part that presents it now; the Task is unchanged. */
+    @Query("UPDATE assets SET partKey = :partKey WHERE id = :id")
+    protected abstract suspend fun setAssetPart(id: String, partKey: String)
 
     @Query("SELECT * FROM package_resources WHERE sourceId = :sourceId AND packageKey = :packageKey")
     protected abstract suspend fun packageResources(
@@ -3662,14 +4216,14 @@ abstract class ListsDao {
     @Query("UPDATE package_resources SET missing = 1, updatedAt = :now WHERE id = :id")
     protected abstract suspend fun markPackageResourceMissing(id: String, now: Long)
 
-    @Query("DELETE FROM task_resources WHERE taskId = :taskId")
-    protected abstract suspend fun clearTaskResources(taskId: String)
+    @Query("DELETE FROM task_part_resources WHERE taskId = :taskId AND partKey = :partKey")
+    protected abstract suspend fun clearPartResources(taskId: String, partKey: String)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    protected abstract suspend fun insertTaskResource(link: TaskResourceEntity)
+    protected abstract suspend fun insertPartResource(link: TaskPartResourceEntity)
 
-    @Query("SELECT * FROM task_resources WHERE taskId = :taskId")
-    abstract suspend fun taskResources(taskId: String): List<TaskResourceEntity>
+    @Query("SELECT * FROM task_part_resources WHERE taskId = :taskId AND partKey = :partKey")
+    abstract suspend fun partResources(taskId: String, partKey: String): List<TaskPartResourceEntity>
 
     @Query("SELECT * FROM package_resources WHERE id = :id")
     abstract suspend fun packageResource(id: String): PackageResourceEntity?
@@ -3686,20 +4240,43 @@ abstract class ListsDao {
         """
         SELECT pr.resourceKey AS resourceKey, pr.kind AS kind, pr.rootUri AS uri,
                pr.relativePath AS relativePath, pr.missing AS missing, tr.required AS required
-        FROM task_resources tr
+        FROM task_part_resources tr
         JOIN package_resources pr ON pr.id = tr.resourceId
-        WHERE tr.taskId = :taskId
+        WHERE tr.taskId = :taskId AND tr.partKey = :partKey
         ORDER BY pr.resourceKey
         """
     )
-    abstract fun observeTaskResourceViews(taskId: String): Flow<List<TaskResourceView>>
+    abstract fun observePartResourceViews(
+        taskId: String,
+        partKey: String
+    ): Flow<List<TaskResourceView>>
 
-    /** The same rows once, for the submission boundary's synchronous check. */
+    /**
+     * The same rows once, for the submission boundary's synchronous check — scoped to the part
+     * being answered, because requiredness is the part's and a photo another Prompt requires must
+     * not refuse this one.
+     */
     @Query(
         """
         SELECT pr.resourceKey AS resourceKey, pr.kind AS kind, pr.rootUri AS uri,
                pr.relativePath AS relativePath, pr.missing AS missing, tr.required AS required
-        FROM task_resources tr
+        FROM task_part_resources tr
+        JOIN package_resources pr ON pr.id = tr.resourceId
+        WHERE tr.taskId = :taskId AND tr.partKey = :partKey
+        ORDER BY pr.resourceKey
+        """
+    )
+    abstract suspend fun partResourceViews(
+        taskId: String,
+        partKey: String
+    ): List<TaskResourceView>
+
+    /** Every Resource the Task's parts use, for the Task-level presentability check. */
+    @Query(
+        """
+        SELECT pr.resourceKey AS resourceKey, pr.kind AS kind, pr.rootUri AS uri,
+               pr.relativePath AS relativePath, pr.missing AS missing, tr.required AS required
+        FROM task_part_resources tr
         JOIN package_resources pr ON pr.id = tr.resourceId
         WHERE tr.taskId = :taskId
         ORDER BY pr.resourceKey
@@ -3738,12 +4315,18 @@ abstract class ListsDao {
      * adds only what is Package-specific — payloads, links, Resources, and the checkpoint — and
      * therefore never mints a Task of its own.
      *
-     * The reconciliation identity is `(sourceId, packageKey, promptKey)`, read through
-     * `package_prompt_tasks`, and not `groupPath`. The two agree for every Package this build
-     * writes, but only the link row is the promise: changing a title keeps the Task, and only a
-     * changed `promptKey` creates another one. A Prompt the revision no longer names is marked
-     * absent and keeps everything else; a Prompt that comes back is marked present again by the
-     * ordinary upsert. Nothing here deletes a Task, a payload, an event, or a Resource row.
+     * The reconciliation identity is `(sourceId, packageKey, compositionKey)`, read through
+     * `package_compositions`, and not `groupPath`. The two agree for every Package this build
+     * writes, but only the composition row is the promise: changing a title keeps the Task, and only
+     * a changed Composition — a Prompt replaced by a Section, or the reverse — creates another one.
+     * A Prompt the revision no longer names is marked absent and keeps everything else; a Prompt
+     * that comes back is marked present again by the ordinary upsert. Nothing here deletes a Task, a
+     * payload, an event, or a Resource row.
+     *
+     * A Prompt's payload and Resource uses are written per part, because a part is the decision
+     * unit: two Prompts grouped into one Section Task must not share a body or a requiredness
+     * answer. The part rows themselves are written by the ordinary Task loop — this function reads
+     * those tasks back by `groupPath` and only adds what is Package-specific.
      */
     private suspend fun applyPackages(
         source: SourceEntity,
@@ -3755,17 +4338,23 @@ abstract class ListsDao {
 
         for (plannedPackage in plan.packages) {
             val checkpoint = packageCheckpoint(source.id, plannedPackage.packageKey)
-            val links = packagePromptTasks(source.id, plannedPackage.packageKey)
-            val planned = plan.tasks.filter { it.prompt?.packageKey == plannedPackage.packageKey }
-            val plannedKeys = planned.mapNotNull { it.prompt?.promptKey }.toSet()
+            val compositions = packageCompositions(source.id, plannedPackage.packageKey)
+            val compositionPromptRows = compositionPrompts(source.id, plannedPackage.packageKey)
+            val planned = plan.tasks.filter { task ->
+                task.parts.any { it.prompt?.packageKey == plannedPackage.packageKey }
+            }
+            val plannedKeys = planned
+                .flatMap { task -> task.parts.mapNotNull { it.prompt?.promptKey } }
+                .toSet()
+            val plannedCompositions = planned.mapNotNull { it.compositionKey }.toSet()
 
             val sameFingerprint = checkpoint != null &&
                 checkpoint.revision == plannedPackage.revision &&
                 checkpoint.fingerprint == plannedPackage.fingerprint
             if (sameFingerprint) {
-                val linked = links.filter { it.present }.map { it.promptKey }.toSet()
+                val linked = compositionPromptRows.filter { it.present }.map { it.promptKey }.toSet()
                 val complete = linked.containsAll(plannedKeys) &&
-                    links.none { it.present && it.promptKey !in plannedKeys }
+                    compositionPromptRows.none { it.present && it.promptKey !in plannedKeys }
                 if (complete) continue
             } else if (checkpoint != null) {
                 val stale = plannedPackage.revision < checkpoint.revision
@@ -3815,49 +4404,79 @@ abstract class ListsDao {
 
             var advanced = false
             for (task in planned) {
-                val prompt = task.prompt ?: continue
-                val link = links.firstOrNull { it.promptKey == prompt.promptKey }
-                val taskId = link?.taskId
+                val compositionKey = task.compositionKey
+                    ?: task.parts.firstNotNullOfOrNull { it.prompt?.promptKey }
+                        ?.let { "prompt:$it" }
+                    ?: continue
+                val composition = compositions.firstOrNull { it.compositionKey == compositionKey }
+                val taskId = composition?.taskId
                     ?: taskImportForGroupPath(source.id, task.groupPath)?.taskId
                     ?: continue
-                if (link == null) {
-                    insertPackagePromptTask(
-                        PackagePromptTaskEntity(
+                if (composition == null) {
+                    upsertPackageComposition(
+                        PackageCompositionEntity(
                             taskId = taskId,
                             sourceId = source.id,
                             packageKey = plannedPackage.packageKey,
+                            compositionKey = compositionKey,
+                            present = true,
+                            updatedAt = now
+                        )
+                    )
+                } else if (!composition.present) {
+                    setCompositionPresent(taskId, true, now)
+                }
+
+                for (part in task.parts) {
+                    val prompt = part.prompt ?: continue
+                    insertCompositionPrompt(
+                        PackageCompositionPromptEntity(
+                            taskId = taskId,
+                            sourceId = source.id,
+                            packageKey = plannedPackage.packageKey,
+                            compositionKey = compositionKey,
                             promptKey = prompt.promptKey,
                             present = true
                         )
                     )
-                } else if (!link.present) {
-                    setPackagePromptPresent(taskId, true)
-                }
-
-                upsertTaskPayload(
-                    TaskPayloadEntity(
-                        taskId = taskId,
-                        kind = prompt.kind,
-                        schemaVersion = prompt.schema,
-                        payload = prompt.payload,
-                        revision = prompt.revision,
-                        updatedAt = now
+                    upsertTaskPartPayload(
+                        TaskPartPayloadEntity(
+                            taskId = taskId,
+                            partKey = part.partKey,
+                            kind = prompt.kind,
+                            schemaVersion = prompt.schema,
+                            payload = prompt.payload,
+                            revision = prompt.revision,
+                            updatedAt = now
+                        )
                     )
-                )
 
-                clearTaskResources(taskId)
-                for (use in prompt.resources) {
-                    val resourceId = resourceIds[use.resourceKey] ?: continue
-                    insertTaskResource(
-                        TaskResourceEntity(taskId = taskId, resourceId = resourceId, required = use.required)
-                    )
+                    clearPartResources(taskId, part.partKey)
+                    for (use in prompt.resources) {
+                        val resourceId = resourceIds[use.resourceKey] ?: continue
+                        insertPartResource(
+                            TaskPartResourceEntity(
+                                taskId = taskId,
+                                partKey = part.partKey,
+                                resourceId = resourceId,
+                                required = use.required
+                            )
+                        )
+                    }
+                    advanced = true
                 }
-                advanced = true
             }
 
-            for (link in links) {
-                if (link.present && link.promptKey !in plannedKeys) {
-                    setPackagePromptPresent(link.taskId, false)
+            for (composition in compositions) {
+                val keep = composition.compositionKey in plannedCompositions
+                if (composition.present != keep) {
+                    setCompositionPresent(composition.taskId, keep, now)
+                    advanced = true
+                }
+            }
+            for (row in compositionPromptRows) {
+                if (row.present && row.promptKey !in plannedKeys) {
+                    setCompositionPromptPresent(row.taskId, row.promptKey, false)
                     advanced = true
                 }
             }

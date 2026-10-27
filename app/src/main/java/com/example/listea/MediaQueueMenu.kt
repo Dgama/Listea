@@ -50,8 +50,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
-import com.example.listea.data.ReviewAsset
 import com.example.listea.data.ReviewItem
+import com.example.listea.data.ReviewPart
 import com.example.listea.domain.StoredAddOnVersion
 
 /**
@@ -463,22 +463,56 @@ internal fun reviewQueueEntries(
 }
 
 /**
- * A Task's pages as the guide names them: its files, then the add-on page.
+ * A Task's pages as the guide names them: each part's Content page and files, then the add-on page.
  *
- * The files come first, in the Task's own order, because that is the order the inner arrows walk.
- * The add-on page follows them because it is a page of the Task like any other, but it is not one
- * of the folder's files, and a questionnaire sitting in the list under a file's name would read as
- * something the source holds. Its row says "add-on" first for exactly that reason.
+ * Walked by parts rather than by a flat Asset list, because that is the order the inner arrows walk
+ * once a Task may present more than one Prompt: a part with a body shows its Content page first,
+ * then the files it presents, then the next part begins. A Task with one Prompt therefore names
+ * exactly the pages it always did — "Question", then its files, then the add-on.
+ *
+ * The Content row says "Question" rather than borrowing a file's name, exactly as the add-on's row
+ * says "add-on": it is the taker's word for the decision unit, and the guide is a taker's surface.
+ * When a Task holds several Content pages every one of them is a question, and "Question" three
+ * times would be three rows a reader cannot tell apart, so each is numbered against the others.
+ *
+ * **The part boundary is drawn on the files.** In a Task of several parts a file's row says which
+ * part it belongs to in its second line, so the run of pictures under the second question reads as
+ * that question's material rather than as a continuation of the first. The word there is *part*,
+ * not *question*, because a media part is degenerate and asks nothing; it is still a boundary. A
+ * one-part Task says nothing, exactly as it did.
+ *
+ * The add-on page follows the parts because it is a page of the Task like any other, but it is not
+ * one of the folder's files, and a questionnaire sitting in the list under a file's name would
+ * read as something the source holds.
  */
 internal fun reviewPageEntries(
-    assets: List<ReviewAsset>,
-    addOn: StoredAddOnVersion?,
-    content: Boolean = false
+    parts: List<ReviewPart>,
+    addOn: StoredAddOnVersion?
 ): List<MediaQueueEntry> = buildList {
-    // The Content page is first because it is what the Prompt is; its row says so rather than
-    // borrowing a file's name, exactly as the add-on's does.
-    if (content) add(MediaQueueEntry("Prompt"))
-    assets.forEach { add(MediaQueueEntry(it.name)) }
+    val present = parts.filter { it.present }
+    val contentCount = present.count { it.hasContent }
+    var contentIndex = 0
+    for ((partIndex, part) in present.withIndex()) {
+        val partBoundary = if (present.size > 1) {
+            "Part ${partIndex + 1} of ${present.size}"
+        } else {
+            null
+        }
+        if (part.hasContent) {
+            contentIndex++
+            add(
+                MediaQueueEntry(
+                    label = if (contentCount > 1) {
+                        "Question $contentIndex of $contentCount"
+                    } else {
+                        "Question"
+                    },
+                    detail = partBoundary
+                )
+            )
+        }
+        part.assets.forEach { add(MediaQueueEntry(it.name, detail = partBoundary)) }
+    }
     addOn?.let { add(MediaQueueEntry("add-on ${it.name}")) }
 }
 

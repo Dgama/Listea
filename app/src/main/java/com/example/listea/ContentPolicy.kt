@@ -173,7 +173,9 @@ fun taskChanges(
             path != null && isAncestorOrSame(coverage, path) &&
                 path !in plannedPaths && !asset.sourceMissing
         }
-        val added = task?.assets?.count { it.rootRelativePath !in heldPaths } ?: 0
+        val added = task?.parts
+            ?.sumOf { part -> part.assets.count { it.rootRelativePath !in heldPaths } }
+            ?: 0
 
         TaskChange(
             taskId = import.taskId,

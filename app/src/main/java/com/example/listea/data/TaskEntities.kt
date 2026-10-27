@@ -67,9 +67,9 @@ data class TaskEntity(
  * One piece of content presented for a [TaskEntity].
  *
  * [rootUri] and [relativePath] are the same identity [FileReviewStateEntity] uses — the SAF grant
- * the file sits under, then where it sits beneath that. They are unique *per Task*: one Task holds
- * at most one Asset per file, which is the invariant worth keeping, because two Assets of one Task
- * at one path would be two answers to the same question.
+ * the file sits under, then where it sits beneath that. They are unique *per Task part*: one part
+ * holds at most one Asset per file, which is the invariant worth keeping, because two Assets of one
+ * part at one path would be two answers to the same question.
  *
  * They are deliberately **not** unique across Tasks. A file may be the content of several Tasks —
  * the same folder imported under two intentions — and that is a fact about the Tasks rather than a
@@ -109,7 +109,7 @@ data class TaskEntity(
     ],
     indices = [
         Index("taskId"),
-        Index(value = ["taskId", "rootUri", "relativePath"], unique = true),
+        Index(value = ["taskId", "partKey", "rootUri", "relativePath"], unique = true),
         Index(value = ["rootUri", "relativePath"])
     ]
 )
@@ -133,7 +133,22 @@ data class AssetEntity(
      * `ListItemEntity.publicId` for why the row id is not the wire id.
      */
     @ColumnInfo(defaultValue = "''")
-    val publicId: String = ""
+    val publicId: String = "",
+
+    /**
+     * The part of [taskId] this Asset is presented for: a [TaskPartEntity.partKey].
+     *
+     * Null only for a row this build did not write — schema 33 backfills every Asset that existed
+     * before it, and every write path names the part from the moment the part exists. It is
+     * deliberately not part of the unique index's *identity* beyond scoping: the same file may be
+     * an Asset of two parts of one Task, because the two parts ask different questions about it.
+     *
+     * No foreign key: SQLite cannot add one to an existing table without rebuilding it, and the
+     * invariant is enforced at the write boundary, which is where a part and its Assets are planned
+     * together. The migration invariant asserts the data side — every non-null value names a part
+     * of the same Task.
+     */
+    val partKey: String? = null
 )
 
 /**
@@ -182,8 +197,26 @@ data class TaskStateEntity(
     /** Dead since v0.5.1. See [isFavorite]. */
     val customActions: String = "",
 
+    /**
+     * How the current completion was reached: [COMPLETION_AUTOMATIC], [COMPLETION_EXPLICIT], or
+     * `""` for every row written before v0.8.4.
+     *
+     * The distinction is what keeps a sign-off a sign-off. Once a person has explicitly completed
+     * a Task, a later part answer may recompute *automatic* completion but must not un-complete
+     * it: the judgment was made, and a policy changing its mind afterwards would retract an
+     * answer nobody retracted. Conversely an automatic completion is recomputed freely, because it
+     * is a conclusion from the parts rather than an act of its own.
+     */
+    val completionSource: String = "",
+
     val updatedAt: Long
 )
+
+/** A completion a template's policy reached from the parts. */
+const val COMPLETION_AUTOMATIC = "automatic"
+
+/** A completion a person made with the completion control. */
+const val COMPLETION_EXPLICIT = "explicit"
 
 /**
  * What is true about one **Task–Asset pair** now: the instance of the asset control that governs
@@ -278,10 +311,17 @@ val AssetStateEntity.decisions: AssetDecisions
  * thing it is about. A Task could only be deleted here by a bug — nothing in v0.2 deletes a
  * reviewed Task — and if one were, the honest outcome is a review event that has outlived what it
  * was about, not a silently vanishing record of somebody's work.
+ *
+ * [partKey] names the part the submission answered, once a Task may hold several. Null on every
+ * row written before schema 33: those answered the Task as a whole, and the migration does not
+ * invent a part for them. A reader that groups history by part treats a null row as the Task's own.
  */
 @Entity(
     tableName = "review_events",
-    indices = [Index("taskId", "at")]
+    indices = [
+        Index(value = ["taskId", "at"]),
+        Index(value = ["taskId", "partKey", "at"])
+    ]
 )
 data class ReviewEventEntity(
     @PrimaryKey val id: String,
@@ -297,7 +337,10 @@ data class ReviewEventEntity(
     val templateVersion: Int,
     val response: String,
     val contextKind: String?,
-    val contextRef: String?
+    val contextRef: String?,
+
+    /** The part this submission answered; null for a submission that answered the whole Task. */
+    val partKey: String? = null
 )
 
 /**

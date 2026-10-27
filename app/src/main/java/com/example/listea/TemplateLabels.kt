@@ -1,6 +1,8 @@
 package com.example.listea
 
+import com.example.listea.domain.TaskReviewDefinition
 import com.example.listea.domain.ViewerEventType
+import com.example.listea.domain.Viewers
 
 /**
  * The vocabulary a headless template is described in.
@@ -21,12 +23,17 @@ internal fun viewerEventNouns(types: Set<ViewerEventType>): String =
 /**
  * One line for a Task Review in a picker: what the template is, and what it catches.
  *
- * The empty set is not "nothing": it is the headless default, which records the Task's own file
- * decisions instead of an answer the Viewer reported.
+ * The empty set is not "nothing": it is a headless definition, which records the Task's own file
+ * decisions instead of an answer the Viewer reported. The Form Viewer also emits no events — its
+ * answer is a structured record — so the line names that answer rather than the file decisions a
+ * media Task would make. Reading the Viewer is what keeps the two empty-event cases apart.
  */
-internal fun reviewCatchLine(accepts: Set<ViewerEventType>): String =
-    if (accepts.isEmpty()) {
-        "Headless template · records the Task's file decisions"
-    } else {
-        "Headless template · catches " + viewerEventNouns(accepts)
+internal fun reviewCatchLine(definition: TaskReviewDefinition): String =
+    when {
+        definition.accepts.isNotEmpty() ->
+            "Headless template · catches " + viewerEventNouns(definition.accepts)
+        definition.viewer == Viewers.Form.ref ->
+            "Headless template · records the form's answer"
+        else ->
+            "Headless template · records the Task's file decisions"
     }

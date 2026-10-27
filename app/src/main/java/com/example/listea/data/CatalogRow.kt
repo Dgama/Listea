@@ -27,28 +27,49 @@ data class CatalogProjection(
     val sizeBytes: Long?,
     val lastModified: Long?,
     val packageKey: String? = null,
-    val packageTitle: String? = null,
-    val promptKey: String? = null,
-    val payloadKind: String? = null,
-    val payloadSchema: Int? = null,
-    val payloadRevision: Int? = null
+    val packageTitle: String? = null
 )
 
 /**
- * One Task's recorded attachments, for the queries that need them beside something else rather than
- * on a row of its own. Query result, not a table — see `ListsDao.observeAssetControlsForList`.
+ * One Task's import stamps, as `task_imports` holds them: what governs the Task, not its parts.
  *
- * [addOn] and [taskReview] are the Task's stamped questionnaire and review references, raw as
- * `task_imports` holds them. They travel with the asset controls because all three are facts about
- * the same import and are read by the same review surface; they are still separate columns, because
- * one is a list of file templates, one is a single Task-level add-on and one is the Task Review the
- * Task was judged under.
+ * The queries that need nothing but the stamps — the export's per-Task metadata, the add-on a Task
+ * was imported with — read this rather than [TaskAssetControls], which is a part's row and exists
+ * for the page model. Keeping the two apart is what lets either grow a column without the other
+ * having to answer for it.
+ */
+data class TaskImportFacts(
+    val taskId: String,
+    val assetControls: String,
+    val addOn: String = "",
+    val taskReview: String = ""
+)
+
+/**
+ * One **part's** recorded attachments and envelope, for the queries that need them beside something
+ * else rather than on a row of its own. Query result, not a table — see
+ * `ListsDao.observeAssetControlsForList`.
+ *
+ * One row per part, because a Task may hold several. The Task-level stamps ([assetControls],
+ * [addOn], [taskReview]) repeat on each of its rows, exactly as `task_imports` holds them: they are
+ * facts about the import and every part of that Task shares them. [partKey] and [position] are what
+ * put the rows back in order.
+ *
+ * [promptKey] and the `payload*` fields are the part's own. A row with no payload is a local or
+ * degenerate part, and reads as *no Content page* rather than as a gap.
  */
 data class TaskAssetControls(
     val taskId: String,
     val assetControls: String,
     val addOn: String = "",
     val taskReview: String = "",
+
+    /** The part this row describes; `local:0` for a Task a local importer made. */
+    val partKey: String = "local:0",
+    val position: Int = 0,
+    val required: Boolean = true,
+    val present: Boolean = true,
+    val availability: String? = null,
 
     /**
      * The Prompt envelope, for a Task that came from a Package. Null on a media Task and on a Task
@@ -168,23 +189,41 @@ data class CatalogRow(
     /** True when at least one required Asset has no viewer in this build — e.g. a text file. */
     val hasUnviewableAsset: Boolean,
 
-    /** The Assets themselves, resolved for the viewer boundary rather than re-read per card. */
-    val assets: List<ReviewAsset> = emptyList(),
+    /**
+     * The Task's decision units, each with its Assets and stored envelope.
+     *
+     * Resolved with the row rather than re-read per card: a Quick Review queue, a preview and an
+     * export all need the same page model, and a catalog that carried only a flat Asset list could
+     * not say where one Prompt's files end and the next begins.
+     */
+    val parts: List<ReviewPart> = emptyList(),
 
     /**
-     * The Prompt this Task answers, if it came from a Package; all null for a media Task.
+     * The Package a composition came from, and its title, if any.
      *
      * [packageTitle] is the manifest's title, carried so a catalog scope can be named by what the
-     * producer called the Package rather than by its key. The three `payload*` fields are the
-     * stored envelope; the body itself is deliberately not read on this path.
+     * producer called the Package rather than by its key. The Prompt envelope is per part and lives
+     * inside [parts]; the body itself is deliberately not read on this path.
      */
     val packageKey: String? = null,
-    val packageTitle: String? = null,
-    val promptKey: String? = null,
-    val payloadKind: String? = null,
-    val payloadSchema: Int? = null,
-    val payloadRevision: Int? = null
-)
+    val packageTitle: String? = null
+) {
+    /** Every Asset the Task presents, across its parts, in page order. */
+    val assets: List<ReviewAsset> get() = parts.flatMap { it.assets }
+
+    /** How many decision units this Task holds; what a catalog row reports beside its file count. */
+    val partCount: Int get() = parts.size
+
+    /**
+     * The first part with a Viewer body. The convenience the single-body readers use — the
+     * submission gate and export v5 — so a Task with one Prompt answers exactly as it did.
+     */
+    val payloadPart: ReviewPart? get() = parts.firstOrNull { it.payloadKind != null }
+    val promptKey: String? get() = payloadPart?.promptKey
+    val payloadKind: String? get() = payloadPart?.payloadKind
+    val payloadSchema: Int? get() = payloadPart?.payloadSchema
+    val payloadRevision: Int? get() = payloadPart?.payloadRevision
+}
 
 /**
  * One registered Source as a row a screen reads: where it is, what imports it, how its last run
@@ -239,6 +278,16 @@ data class SourceSummary(
      * is visible in the type rather than only in a comment.
      */
     val assetControls: String = "",
+
+    /**
+     * How this Todo groups a Package's Prompts, as `sources.composition` holds it.
+     *
+     * Read here for the same reason [contentPolicy] is: the next run's dialog opens on this value,
+     * and a refresh has to repeat the taker's rule rather than reverting to the default. The raw
+     * word is decoded by [com.example.listea.CompositionChoice]; an unrecognised one reads as
+     * `prompt`, which is the only rule any build before v0.8.4 had.
+     */
+    val composition: String = com.example.listea.CompositionChoice.Default.key,
 
     /**
      * The same, as the Todo's **Tasks** hold it: what a user will actually see on opening one.

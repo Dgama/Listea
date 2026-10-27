@@ -574,7 +574,7 @@ private fun WebhookConfirmDialog(
                 Text(
                     "This would post to " + confirmation.destinationLabel +
                         ". If you do not send it now, it is kept in the export history and " +
-                        "nothing about the items changes.",
+                        "nothing about the Tasks changes.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -676,7 +676,7 @@ private fun WebhookNoticeDialog(current: WebhookNotice, viewModel: ListsViewMode
                         // Singular when it is one. The same helper the progress dialog and the
                         // history rows use, so a round of one item reads the same wherever it is
                         // reported.
-                        current.itemCount?.let { add(countOfItems(it)) }
+                        current.itemCount?.let { add(countOfTasks(it)) }
                         current.host?.let { add(it) }
                         add(current.timeLabel)
                     }.joinToString(" · "),
@@ -752,7 +752,7 @@ private fun PostWebhookDeleteDialog(
                     )
                     Spacer(Modifier.height(ListeaDimens.RowGap))
                     Text(
-                        "The items stay in their Lists, marked as missing, so what you decided " +
+                        "The Tasks stay in their Lists, marked as missing, so what you decided " +
                             "about them is kept.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1531,6 +1531,8 @@ internal fun importRunIdentity(request: ImportFolderRequest.Confirm): String {
         seed.displayName,
         seed.keepTree,
         seed.importer.key,
+        seed.composition.key,
+        request.compositionOffered,
         seed.contentPolicy.key,
         encodeExportChoice(seed.exportChoice),
         seed.webhookUrl,
@@ -1564,6 +1566,11 @@ private fun ImportConfirmDialogBody(
     var keepTree by rememberSaveable(runKey) { mutableStateOf(seed.keepTree) }
     var importer by rememberSaveable(runKey) { mutableStateOf(seed.importer) }
     var policy by rememberSaveable(runKey) { mutableStateOf(seed.contentPolicy) }
+    // Held as the stored word, like the export choice below: a [CompositionChoice] is an enum and
+    // that is a shape the bundle does know, but the word is what the Source will record, so the
+    // draft and the write stay one expression. Seeded from the run, which is the stored answer on a
+    // refresh and the default on Create.
+    var compositionWord by rememberSaveable(runKey) { mutableStateOf(seed.composition.key) }
     // Held as the stored word rather than as the [ExportChoice] itself, for the same reason the
     // attachment draft is held encoded: nothing in that sealed type is a shape the bundle knows,
     // and the word is the identical value the Todo will record.
@@ -1722,6 +1729,7 @@ private fun ImportConfirmDialogBody(
             ?.let { reviewAttachment = encodeTemplateAttachments(listOf(it.ref)) }
     }
 
+    val composition = CompositionChoice.fromKey(compositionWord)
     val method = decodeExportChoice(exportWord, inheritable = false)
     val address = when (addressMode) {
         ADDRESS_KEEP -> seed.webhookUrl.trim()
@@ -1789,6 +1797,9 @@ private fun ImportConfirmDialogBody(
                 displayName = name,
                 keepTree = keepTree,
                 contentPolicy = policy,
+                // A refresh repeats the stored rule and the dialog did not offer another; the
+                // seeded word is that rule, so passing it is a copy rather than a second answer.
+                composition = CompositionChoice.fromKey(compositionWord),
                 templates = attached,
                 // Carried from the run the dialog was opened for: a refresh adopts the offered
                 // version of what it still holds; Create has already picked current versions and
@@ -1858,6 +1869,17 @@ private fun ImportConfirmDialogBody(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    // The composition is part of the grouping, so a refresh says which one it is
+                    // repeating. The choice itself is not offered here: changing it would be a
+                    // different Source wearing this row, exactly as changing the importer would.
+                    if (request.compositionOffered && importer == ImporterKind.PACKAGE) {
+                        Spacer(Modifier.height(ListeaDimens.RowGap))
+                        Text(
+                            "Its Prompts become " + compositionSummary(composition) + ".",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 } else {
                     OutlinedTextField(
                         value = name,
@@ -1869,7 +1891,12 @@ private fun ImportConfirmDialogBody(
                     Spacer(Modifier.height(ListeaDimens.RowGap))
                     ImportSection(
                         title = "Grouping",
-                        summary = groupingSummary(importer, keepTree),
+                        summary = groupingSummary(
+                            importer = importer,
+                            keepTree = keepTree,
+                            composition = composition,
+                            compositionOffered = request.compositionOffered
+                        ),
                         expanded = groupingOpen,
                         onToggle = { groupingOpen = !groupingOpen }
                     ) {
@@ -1894,7 +1921,24 @@ private fun ImportConfirmDialogBody(
                                         onToggle = { keepTree = !keepTree }
                                     )
                                 }
-                            }
+                            },
+                            // The same shape as keep-the-tree, and for the same reason: the
+                            // composition is a sub-option of *Package Prompts*, and only that rule
+                            // has a set of questions to group. It is hidden rather than disabled
+                            // when the folder declares no Sections, because a choice between two
+                            // rules that produce identical Tasks is a question with one answer.
+                            underPackageChoice = {
+                                if (importer == ImporterKind.PACKAGE && request.compositionOffered) {
+                                    ImportCompositionChoice(
+                                        selected = composition,
+                                        onSelect = { compositionWord = it.key }
+                                    )
+                                }
+                            },
+                            packageDetail = packageRowDetail(
+                                composition = composition,
+                                offered = request.compositionOffered
+                            )
                         )
                     }
                 }
@@ -2214,11 +2258,20 @@ private const val ADDRESS_KEEP = "keep"
 private const val ADDRESS_DEFAULT = "default"
 private const val ADDRESS_CUSTOM = "custom"
 
-private fun groupingSummary(importer: ImporterKind, keepTree: Boolean): String = when (importer) {
+private fun groupingSummary(
+    importer: ImporterKind,
+    keepTree: Boolean,
+    composition: CompositionChoice = CompositionChoice.PROMPT,
+    compositionOffered: Boolean = false
+): String = when (importer) {
     ImporterKind.FILE_AS_TASK ->
         if (keepTree) "One Task per file · keep the folder tree" else "One Task per file"
     ImporterKind.FOLDER_AS_TASK -> "One Task per folder"
-    ImporterKind.PACKAGE -> "One Task per Prompt in each Package"
+    ImporterKind.PACKAGE -> if (compositionOffered && composition == CompositionChoice.SECTION) {
+        "One Task per Section in each Package"
+    } else {
+        "One Task per Prompt in each Package"
+    }
 }
 
 /**
@@ -2669,7 +2722,7 @@ private fun ImportReviewRow(
         Column(Modifier.weight(1f)) {
             Text(choice.name, style = MaterialTheme.typography.bodyMedium)
             Text(
-                choice.taskReview?.let { reviewCatchLine(it.accepts) }
+                choice.taskReview?.let { reviewCatchLine(it) }
                     ?: "Headless template · unreadable",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -2739,7 +2792,10 @@ internal fun importScope(request: ImportFolderRequest.Confirm): String =
 private fun ImportImporterChoice(
     selected: ImporterKind,
     onSelect: (ImporterKind) -> Unit,
-    underFileChoice: @Composable () -> Unit = {}
+    underFileChoice: @Composable () -> Unit = {},
+    underPackageChoice: @Composable () -> Unit = {},
+    packageDetail: String = "package · every .listea Package under this folder becomes one Task " +
+        "per Prompt"
 ) {
     Column {
         ImportImporterRow(
@@ -2762,11 +2818,64 @@ private fun ImportImporterChoice(
         )
         ImportImporterRow(
             label = "Package Prompts",
-            detail = "package · every .listea Package under this folder becomes one Task per Prompt",
+            detail = packageDetail,
             selected = selected == ImporterKind.PACKAGE,
             onSelect = { onSelect(ImporterKind.PACKAGE) }
         )
+        underPackageChoice()
     }
+}
+
+/**
+ * How a Package's Prompts become Tasks — the taker's rule over a setter's declared Sections.
+ *
+ * Drawn as a sub-option under *Package Prompts* and indented like [ImportKeepTreeChoice], because
+ * it is not a fourth importer: the importer says *where* Tasks come from and this says *how many
+ * questions go into one*. Two rows rather than a dropdown, for the reason every choice in this
+ * dialog is rows: the difference is the sentence the user has to read in order to answer.
+ */
+@Composable
+private fun ImportCompositionChoice(
+    selected: CompositionChoice,
+    onSelect: (CompositionChoice) -> Unit
+) {
+    Column(Modifier.padding(start = 48.dp)) {
+        ImportImporterRow(
+            label = "One Task per question",
+            detail = "each Prompt is its own Task, answered on its own",
+            selected = selected == CompositionChoice.PROMPT,
+            onSelect = { onSelect(CompositionChoice.PROMPT) }
+        )
+        ImportImporterRow(
+            label = "One Task per Section",
+            detail = "questions tagged with a Section are answered as one Task; questions " +
+                "without one stay their own Task",
+            selected = selected == CompositionChoice.SECTION,
+            onSelect = { onSelect(CompositionChoice.SECTION) }
+        )
+    }
+}
+
+/**
+ * The Package importer's detail line, which has to state the rule actually chosen.
+ *
+ * The row is read before the sub-option beneath it, so a row that said *one Task per Prompt* while
+ * *One Task per Section* was ticked would be the dialog contradicting itself. [offered] is false for
+ * v1 Packages and Packages without Sections, where the sub-option is hidden and the rule is Prompt
+ * composition whatever the stored word says.
+ */
+private fun packageRowDetail(composition: CompositionChoice, offered: Boolean): String =
+    if (offered && composition == CompositionChoice.SECTION) {
+        "package · every .listea Package under this folder becomes one Task per Section"
+    } else {
+        "package · every .listea Package under this folder becomes one Task per Prompt"
+    }
+
+/** What a stored composition means, as the middle of a sentence ("Its Prompts become …"). */
+internal fun compositionSummary(composition: CompositionChoice): String = when (composition) {
+    CompositionChoice.PROMPT -> "one Task each"
+    CompositionChoice.SECTION ->
+        "one Task per Section, with untagged questions staying their own Task"
 }
 
 /**

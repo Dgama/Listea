@@ -5,6 +5,7 @@ import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import com.example.listea.CompositionChoice
 import com.example.listea.ContentPolicy
 import com.example.listea.domain.EXPORT_CHOICE_NONE
 
@@ -68,6 +69,21 @@ data class SourceEntity(
     val importerVersion: Int,
     val createdAt: Long,
     val keepTree: Boolean = true,
+
+    /**
+     * The taker's standing composition rule for this Todo's Packages, as [CompositionChoice.key].
+     *
+     * `prompt` is one Task per question and the only behaviour any build before v0.8.4 had, which
+     * is why it is the column default and what `MIGRATION_32_33` writes into every existing row. A
+     * refresh opens on this value; the import dialog writes it back. It is the *Todo's* answer, not
+     * a manifest field — the Package never says how its Prompts should be grouped.
+     *
+     * `section` groups Section-tagged Prompts into one Task per Section. It has no effect on a v1
+     * Package, which cannot declare Sections, so a Todo that holds both kinds reads the same field
+     * two ways without a second column.
+     */
+    @ColumnInfo(defaultValue = "'prompt'")
+    val composition: String = CompositionChoice.Default.key,
 
     /**
      * Whether dissolving this Todo writes its Tasks' decisions into `dissolved_task_state` first.
@@ -406,7 +422,18 @@ data class DissolvedTaskStateEntity(
      * honest per-file answer. See [decodeDissolvedRecords] for what a reader does with either.
      */
     val records: String,
-    val dissolvedAt: Long
+    val dissolvedAt: Long,
+
+    /**
+     * Each present part's key, response and requiredness, as schema 33's dissolution writes them.
+     *
+     * A second payload rather than columns, for the same reason [records] is one: a Task now holds
+     * 1..N parts and a column per part is a model that changes shape with the count. `''` on every
+     * history written before schema 33 — those are read fail-closed to the Task-level completion
+     * and [records], exactly as an unrecognised [recordVersion] already is.
+     */
+    @ColumnInfo(defaultValue = "''")
+    val partRecords: String = ""
 )
 
 /**
@@ -478,7 +505,27 @@ data class RecoveredTaskState(
     val taskId: String,
     val isCompleted: Boolean,
     val recordVersion: Int,
-    val records: String
+    val records: String,
+    /**
+     * The dissolved Task's present parts and their current answers, or `''` for a history written
+     * before schema 33. See [decodeDissolvedParts] for what a reader does with either.
+     */
+    val partRecords: String = ""
+)
+
+/**
+ * One dissolved Task's part, as the snapshot reads it before encoding. Query result, not a table —
+ * see `ListsDao.dissolvedPartRows`.
+ *
+ * Detached parts are absent from the snapshot: a part the composition no longer asked is not one of
+ * the decisions being kept. [response] is `''` for a part nobody answered, which the restore keeps
+ * as pending rather than inventing an answer.
+ */
+data class DissolvedPartRow(
+    val taskId: String,
+    val partKey: String,
+    val required: Boolean,
+    val response: String
 )
 
 /**

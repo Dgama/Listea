@@ -116,6 +116,23 @@ fun assetIdentity(taskId: String, rootRelativePath: String?): String =
     if (rootRelativePath != null) "asset:$taskId/$rootRelativePath" else "asset:$taskId"
 
 /**
+ * The v0.8.4 identity: the Task, the part that presents the file, then the path.
+ *
+ * The part joins the key because a file may be an Asset of two parts of one Task — two Prompts
+ * asking different questions about the same picture — and those are two presentations, exactly as
+ * the same file under two Tasks is. An empty part keeps the older string's shape, so a row written
+ * without a part does not produce a third form.
+ */
+fun assetIdentity(taskId: String, partKey: String?, rootRelativePath: String?): String =
+    if (rootRelativePath == null) {
+        "asset:$taskId"
+    } else if (partKey.isNullOrEmpty()) {
+        "asset:$taskId/$rootRelativePath"
+    } else {
+        "asset:$taskId/$partKey/$rootRelativePath"
+    }
+
+/**
  * What a stored item row is about, chosen the way the insert sites choose it: a source-backed row
  * is its file, and a manual one — which has no file — is the list it was typed into and its title.
  *

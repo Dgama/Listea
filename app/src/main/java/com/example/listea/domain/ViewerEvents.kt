@@ -194,6 +194,39 @@ sealed interface CommitPolicy {
 const val TASK_REVIEW_COMPLETE_CONTROL = "complete"
 
 /**
+ * When a Task counts as complete once its parts are answered.
+ *
+ * A Task is 1..N parts since v0.8.4, so "this submission completes the Task" stopped being one
+ * rule. The policy is the template's answer, stored with it and read at the write boundary:
+ *
+ * - [SinglePart] — a commit completes the Task if the template says it does. Every template
+ *   written before v0.8.4 reads as this, which is what they meant: the Task was one decision.
+ * - [AllRequiredParts] — the Task completes when every required, present part has an answer.
+ *   Unavailable required parts block, exactly as an unviewable file does; a part the Package
+ *   detached does not block, because it is no longer part of the judgment.
+ * - [AnyPart] — one required answer is enough. A checklist whose items are alternatives.
+ * - [ExplicitOnly] — answering never completes the Task; only the completion control does. The
+ *   questionnaire a person must finish and then sign off on.
+ *
+ * The policy decides **automatic** completion. An explicit completion is recorded as such and is
+ * never silently cleared by a later part change — see `task_state.completionSource`.
+ */
+enum class CompletionPolicy(val key: String) {
+    SinglePart("single-part"),
+    AllRequiredParts("all-required"),
+    AnyPart("any-part"),
+    ExplicitOnly("explicit-only");
+
+    companion object {
+        val Default = SinglePart
+
+        /** The policy a stored word names, or null when this build has never written it. */
+        fun fromKey(key: String?): CompletionPolicy? =
+            entries.firstOrNull { it.key == key }
+    }
+}
+
+/**
  * The stored half of a Task Review: what it catches, when it commits, and what a commit does.
  *
  * A separate type from [TemplateDefinition.TaskReview] on purpose. The code-defined definitions
@@ -205,6 +238,9 @@ const val TASK_REVIEW_COMPLETE_CONTROL = "complete"
  * [accepts] empty means this review catches no viewer events: it is the rapid media template, and
  * an empty commit is its ordinary answer. A non-empty set means a commit must carry at least one
  * event — checked at the write boundary, not only by a disabled control.
+ *
+ * [completion] is how a Task made of several parts becomes complete; a definition written before
+ * v0.8.4 defaults to [CompletionPolicy.SinglePart], which is what those definitions did.
  */
 data class TaskReviewDefinition(
     val viewer: TemplateVersionRef,
@@ -212,11 +248,12 @@ data class TaskReviewDefinition(
     val commit: CommitPolicy,
     val revisable: Boolean,
     val completesTask: Boolean,
-    val advanceAfterCommit: Boolean
+    val advanceAfterCommit: Boolean,
+    val completion: CompletionPolicy = CompletionPolicy.Default
 )
 
 /** The encoding below's version, written as the first line of every newly stored definition. */
-const val TASK_REVIEW_DEFINITION_VERSION = 2
+const val TASK_REVIEW_DEFINITION_VERSION = 3
 
 private const val DEFINITION_TAG = "v"
 private const val VIEWER_TAG = "viewer"
@@ -225,6 +262,7 @@ private const val COMMIT_TAG = "commit"
 private const val REVISABLE_TAG = "revisable"
 private const val COMPLETES_TAG = "completes"
 private const val ADVANCE_TAG = "advance"
+private const val COMPLETION_TAG = "completion"
 private const val COMMIT_IMMEDIATE = "immediate:"
 private const val COMMIT_CONFIRM_CONTROL = "confirm:control:"
 private const val COMMIT_CONFIRM_INTENT = "confirm:intent:"
@@ -234,18 +272,22 @@ private const val COMMIT_LEGACY_EXPLICIT = "explicit:"
  * A Task Review definition as one string, one fact per line.
  *
  * ```text
- * v=2
+ * v=3
  * viewer=builtin.media.viewer@1
  * accepts=image.point
  * commit=confirm:control:submit
  * revisable=true
  * completes=true
  * advance=true
+ * completion=single-part
  * ```
  *
  * Canonical: accepted event keys are sorted, and the line order is fixed, so the same definition
  * always produces the same bytes. Hand-written for the reason [ReviewResponse.encode] gives — the
  * domain package does not depend on Android's `org.json`.
+ *
+ * The `completion` line arrived in v3. A v1 or v2 payload has none and reads as
+ * [CompletionPolicy.SinglePart], which is what those definitions meant: one Task, one decision.
  */
 fun encodeTaskReviewDefinition(definition: TaskReviewDefinition): String = listOf(
     "$DEFINITION_TAG=$TASK_REVIEW_DEFINITION_VERSION",
@@ -254,7 +296,8 @@ fun encodeTaskReviewDefinition(definition: TaskReviewDefinition): String = listO
     "$COMMIT_TAG=${encodeCommit(definition.commit)}",
     "$REVISABLE_TAG=${definition.revisable}",
     "$COMPLETES_TAG=${definition.completesTask}",
-    "$ADVANCE_TAG=${definition.advanceAfterCommit}"
+    "$ADVANCE_TAG=${definition.advanceAfterCommit}",
+    "$COMPLETION_TAG=${definition.completion.key}"
 ).joinToString("\n")
 
 private fun encodeCommit(commit: CommitPolicy): String = when (commit) {
@@ -281,7 +324,7 @@ fun decodeTaskReviewDefinition(
     text: String,
     version: Int
 ): TaskReviewDefinition? {
-    if (version != TASK_REVIEW_DEFINITION_VERSION && version != 1) return null
+    if (version !in 1..TASK_REVIEW_DEFINITION_VERSION) return null
     if (text.isEmpty()) return null
 
     val fields = mutableMapOf<String, String>()
@@ -294,7 +337,11 @@ fun decodeTaskReviewDefinition(
         if (key in fields) return null
         fields[key] = value
     }
-    val knownTags = if (version == 1) KNOWN_TAGS_V1 else KNOWN_TAGS
+    val knownTags = when (version) {
+        1 -> KNOWN_TAGS_V1
+        2 -> KNOWN_TAGS_V2
+        else -> KNOWN_TAGS_V3
+    }
     if (fields.keys.any { it !in knownTags }) return null
     if (fields[DEFINITION_TAG] != version.toString()) return null
 
@@ -315,6 +362,13 @@ fun decodeTaskReviewDefinition(
     val revisable = if (version == 1) true else booleanField(fields[REVISABLE_TAG]) ?: return null
     val completes = booleanField(fields[COMPLETES_TAG]) ?: return null
     val advance = booleanField(fields[ADVANCE_TAG]) ?: return null
+    // v1 and v2 predate multiple parts, so their only reading is the one they had: a commit that
+    // completes three parts' worth of nothing is a commit that completes the Task.
+    val completion = if (version < 3) {
+        CompletionPolicy.SinglePart
+    } else {
+        CompletionPolicy.fromKey(fields[COMPLETION_TAG] ?: return null) ?: return null
+    }
 
     return TaskReviewDefinition(
         viewer = viewer,
@@ -322,7 +376,8 @@ fun decodeTaskReviewDefinition(
         commit = commit,
         revisable = revisable,
         completesTask = completes,
-        advanceAfterCommit = advance
+        advanceAfterCommit = advance,
+        completion = completion
     )
 }
 
@@ -346,7 +401,8 @@ private fun parseCommit(value: String): CommitPolicy? = when {
 private val KNOWN_TAGS_V1 = setOf(
     DEFINITION_TAG, VIEWER_TAG, ACCEPTS_TAG, COMMIT_TAG, COMPLETES_TAG, ADVANCE_TAG
 )
-private val KNOWN_TAGS = KNOWN_TAGS_V1 + REVISABLE_TAG
+private val KNOWN_TAGS_V2 = KNOWN_TAGS_V1 + REVISABLE_TAG
+private val KNOWN_TAGS_V3 = KNOWN_TAGS_V2 + COMPLETION_TAG
 
 private fun booleanField(value: String?): Boolean? = when (value) {
     "true" -> true

@@ -671,12 +671,15 @@ data class ReviewItem(
     val isCompleted: Boolean = false,
 
     /**
-     * The Assets this Task is presented through, resolved once when the queue was built and carried
-     * here so the viewer boundary reads a collection rather than inventing one from the one-Asset
-     * shape. Empty for a Task with nothing to present — a manual item — and one-per-Asset for a
-     * multi-Asset Task.
+     * The Task's decision units, in composition order, each with the Assets it presents.
+     *
+     * The model v0.8.4 puts under every surface: a media Task is one part with its files, a Package
+     * Task is one part per Prompt or per Section, and a migrated Task is one legacy part. Resolved
+     * once when the queue was built, like the Assets before it.
+     *
+     * Empty only for a Task no read has resolved — a manual item — which has nothing to present.
      */
-    val assets: List<ReviewAsset> = emptyList(),
+    val parts: List<ReviewPart> = emptyList(),
 
     /**
      * The Task's position in the source tree, as `task_imports.groupPath`. Null for a Task that is
@@ -749,12 +752,33 @@ data class ReviewItem(
      * Catalog calls the same Package (`Dating demo`). Null when the checkpoint is gone, and then
      * nothing is shown in its place.
      */
-    val packageTitle: String? = null,
-    val promptKey: String? = null,
-    val payloadKind: String? = null,
-    val payloadSchema: Int? = null,
-    val payloadRevision: Int? = null
-)
+    val packageTitle: String? = null
+) {
+    /**
+     * Every Asset the Task presents, across its parts, in page order.
+     *
+     * Derived rather than stored, so a reader that only needs the files — a recorded point's source
+     * name, a payload's asset list, a review block — cannot see a different set from the one the
+     * pages are built from.
+     */
+    val assets: List<ReviewAsset> get() = parts.flatMap { it.assets }
+
+    /** How many decision units this Task holds; the count a catalog row reports. */
+    val partCount: Int get() = parts.size
+
+    /**
+     * The first part with a Viewer body, and its envelope.
+     *
+     * A convenience for the readers that predate multiple bodies — export v5, the submission gate,
+     * the Info sheet's Content line. v6 reads every part; this pair exists so a single-body Task
+     * (every Task before v0.8.4, and every media Task since) answers exactly as it did.
+     */
+    val payloadPart: ReviewPart? get() = parts.firstOrNull { it.payloadKind != null }
+    val promptKey: String? get() = payloadPart?.promptKey
+    val payloadKind: String? get() = payloadPart?.payloadKind
+    val payloadSchema: Int? get() = payloadPart?.payloadSchema
+    val payloadRevision: Int? get() = payloadPart?.payloadRevision
+}
 
 /**
  * A Task's pair records, together: what a surface with no file on screen draws.
@@ -789,10 +813,7 @@ fun ListItemEntity.toReviewItem(
     taskReview: String = "",
     packageKey: String? = null,
     packageTitle: String? = null,
-    promptKey: String? = null,
-    payloadKind: String? = null,
-    payloadSchema: Int? = null,
-    payloadRevision: Int? = null
+    parts: List<ReviewPart> = emptyList()
 ): ReviewItem = ReviewItem(
     id = id,
     // The row's own column, not a projection: `list_items.taskId` is where membership records
@@ -825,14 +846,11 @@ fun ListItemEntity.toReviewItem(
     // And the same again for the review: a Task is judged by the template its own import stamped,
     // not by whatever the Todo or the List says today.
     taskReview = taskReview,
-    // The Prompt envelope travels with the rest of the import facts: a List review builds its
-    // queue from membership rows and must still know whether this Task has a Content page.
+    // The Package a composition came from travels with the import facts; the Prompt envelope is
+    // per part and arrives inside [parts].
     packageKey = packageKey,
     packageTitle = packageTitle,
-    promptKey = promptKey,
-    payloadKind = payloadKind,
-    payloadSchema = payloadSchema,
-    payloadRevision = payloadRevision
+    parts = parts
 )
 
 /**

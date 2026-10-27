@@ -179,8 +179,8 @@ fun ListDetailScreen(
             settings = settings,
             resolver = resolver,
             addOnResolver = addOnResolver,
-            observePayload = viewModel::observeTaskPayload,
-            observeResources = viewModel::observeTaskResources,
+            observePayload = viewModel::observePartPayload,
+            observeResources = viewModel::observePartResources,
             observeAnswers = viewModel::observeTaskAnswers,
             onClose = { viewingItemId = null }
         )
@@ -274,17 +274,17 @@ fun ListDetailScreen(
                 // decide what is shown must not themselves disappear when the filter they set
                 // happens to match nothing.
                 ArrangeableSectionHeader(
-                    title = "Items",
+                    title = "Tasks",
                     arrangement = arrangement,
                     onSort = { sortOpen = true },
                     onFilter = { filterOpen = true },
-                    noun = "items"
+                    noun = "Tasks"
                 )
                 if (!arrangement.isFilterDefault) {
                     FilterSummary(
                         shown = shownItems.size,
                         total = current.items.size,
-                        noun = "item"
+                        noun = "Task"
                     )
                 }
                 Spacer(Modifier.height(ListeaDimens.CompactGap))
@@ -294,7 +294,7 @@ fun ListDetailScreen(
                 item {
                     Spacer(Modifier.height(ListeaDimens.RowGap))
                     Text(
-                        if (current.items.isEmpty()) "No items yet" else "No items match the filter",
+                        if (current.items.isEmpty()) "No Tasks yet" else "No Tasks match the filter",
                         style = MaterialTheme.typography.bodyMedium
                     )
                 }
@@ -338,7 +338,7 @@ fun ListDetailScreen(
             showCheckedSort = true,
             onDismiss = { sortOpen = false },
             onApply = ::applyArrangement,
-            noun = "items"
+            noun = "Tasks"
         )
     }
     if (filterOpen) {
@@ -347,7 +347,7 @@ fun ListDetailScreen(
             showCheckedGroup = true,
             onDismiss = { filterOpen = false },
             onApply = ::applyArrangement,
-            noun = "items"
+            noun = "Tasks"
         )
     }
 
@@ -444,11 +444,11 @@ private fun ResyncDialogs(viewModel: ListsViewModel) {
 
         is ResyncRequest.CleanupMissing -> AlertDialog(
             onDismissRequest = { viewModel.dismissResyncRequest() },
-            title = { Text("Remove missing items?") },
+            title = { Text("Remove missing Tasks?") },
             text = {
                 Column {
                     Text(
-                        countLine(current.missingCount, "item") +
+                        countLine(current.missingCount, "Task") +
                             if (current.missingCount == 1) {
                                 " no longer exists in the source folder."
                             } else {
@@ -465,11 +465,11 @@ private fun ResyncDialogs(viewModel: ListsViewModel) {
             },
             confirmButton = {
                 TextButton(onClick = { viewModel.confirmRemoveMissingItems() }) {
-                    Text("Remove ${countLine(current.missingCount, "item")}")
+                    Text("Remove ${countLine(current.missingCount, "Task")}")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { viewModel.dismissResyncRequest() }) { Text("Keep items") }
+                TextButton(onClick = { viewModel.dismissResyncRequest() }) { Text("Keep Tasks") }
             }
         )
 
@@ -883,7 +883,7 @@ private fun ItemRow(
         IconButton(onClick = onDelete) {
             Icon(
                 Icons.Filled.Close,
-                contentDescription = "Delete item",
+                contentDescription = "Delete Task",
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.size(ListeaDimens.IconSize)
             )

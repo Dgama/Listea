@@ -257,7 +257,7 @@ data class WebhookNotice(
             // default is a preference now, not a gate, and a Todo's address is an address rather
             // than a switch. A round with no address at all fails as a failure, and says so above.
             NoticeOutcome.DISABLED -> "Nothing was sent · this export is switched off"
-            NoticeOutcome.EMPTY -> "Nothing was sent · there were no items to send"
+            NoticeOutcome.EMPTY -> "Nothing was sent · there were no Tasks to send"
             NoticeOutcome.DECLINED -> "Nothing was sent · you chose not to send it"
             // Not *you chose*: the user was in the middle of another review and was never asked.
             // Saying it was their decision would be telling them they did something they did not.
@@ -294,7 +294,7 @@ data class WebhookProgress(
     val summaryLabel: String
         get() = buildList {
             add(eventLabel)
-            add(countOfItems(itemCount))
+            add(countOfTasks(itemCount))
             destinationSummary(host, severalDestinations)?.let { add(it) }
         }.joinToString(" - ")
 }
@@ -340,7 +340,7 @@ data class WebhookConfirmation(
      */
     val factsLabel: String
         get() = buildList {
-            add(countOfItems(itemCount))
+            add(countOfTasks(itemCount))
             destinationSummary(host, severalDestinations)?.let { add(it) }
         }.joinToString(" - ")
 
@@ -369,8 +369,8 @@ private fun destinationSummary(host: String?, severalDestinations: Boolean): Str
     else -> host
 }
 
-/** "1 item" / "42 items", used wherever a payload is sized in front of the user. */
-fun countOfItems(count: Int): String = "$count item" + if (count == 1) "" else "s"
+/** "1 Task" / "42 Tasks", used wherever a payload is sized in front of the user. */
+fun countOfTasks(count: Int): String = countLabel(count, "Task")
 
 /**
  * What an event is called in front of the user. One mapping, so a live result and a record of an
@@ -502,18 +502,22 @@ internal fun buildWebhookPayload(mapping: ExportMapping): String =
     describePayload(mapping).toString()
 
 /**
- * The version this body claims: 5 when any Task is a structured Prompt, else 4 when any Task
- * carries answers, else 3 when any Asset carries a mark, else 2.
+ * The version this body claims: 6 when any Task has more than one part or a structured part
+ * result, else 5 when any Task is a structured Prompt, else 4 when any Task carries answers, else
+ * 3 when any Asset carries a mark, else 2.
  *
  * Each number introduces one key that a receiver can rely on being present; nothing is claimed that
- * the body does not contain. The order is supersets all the way down — a v5 body may still carry
- * marks and answers, each under its own rule.
+ * the body does not contain. Up to 5 the order is supersets all the way down; 6 is a shape change
+ * rather than a superset — a v6 Task carries `parts[]` instead of `content`/`result` — which is why
+ * it is decided first and why a v5 body's bytes are never touched to make room for it.
  */
 internal fun exportVersion(
     carriesMarks: Boolean,
     carriesAddOn: Boolean,
-    carriesContent: Boolean = false
+    carriesContent: Boolean = false,
+    carriesParts: Boolean = false
 ): Int = when {
+    carriesParts -> EXPORT_VERSION_PARTS
     carriesContent -> EXPORT_VERSION_CONTENT
     carriesAddOn -> EXPORT_VERSION_ADD_ON
     carriesMarks -> EXPORT_VERSION_MARKS
@@ -531,7 +535,23 @@ private fun describePayload(mapping: ExportMapping): JSONObject = JSONObject()
             .put("title", mapping.listTitle)
             .put("completedAt", mapping.completedAt ?: JSONObject.NULL)
     )
-    .put("tasks", JSONArray().apply { mapping.tasks.forEach { put(taskJson(it)) } })
+    .put(
+        "tasks",
+        JSONArray().apply {
+            mapping.tasks.forEach {
+                // One body, one shape. A v6 round renders every Task with `parts[]`, including the
+                // media Tasks that would have been v5 on their own: the version line describes the
+                // document, and a receiver branching on it must see one Task grammar throughout.
+                put(
+                    if (mapping.version >= EXPORT_VERSION_PARTS) {
+                        taskPartsJson(it)
+                    } else {
+                        taskJson(it)
+                    }
+                )
+            }
+        }
+    )
 
 /**
  * One Task as the receiver sees it. `isCompleted` is here rather than on an Asset because checking
@@ -546,51 +566,8 @@ private fun taskJson(task: ExportTaskView): JSONObject {
         .put("id", task.publicId)
         .put("title", task.title)
         .put("isCompleted", task.isCompleted)
-        .put(
-            "templates",
-            JSONArray().apply {
-                task.templates.forEach { template ->
-                    put(
-                        JSONObject()
-                            .put("id", template.id)
-                            .put("name", template.name ?: JSONObject.NULL)
-                            .put("version", template.version)
-                    )
-                }
-            }
-        )
-        .put(
-            "assets",
-            JSONArray().apply {
-                task.assets.forEach { asset ->
-                    put(
-                        JSONObject()
-                            .put("id", asset.publicId)
-                            .put("title", asset.title)
-                            .put("relativePath", asset.relativePath ?: JSONObject.NULL)
-                            .put("sourceMissing", asset.sourceMissing)
-                            .put(
-                                "actions",
-                                JSONArray().apply { asset.actions.forEach { put(it) } }
-                            )
-                            .apply {
-                                // The key is present only where the array is. An empty `marks` on
-                                // an image would be a shape v2 receivers have never seen, and the
-                                // version line is allowed to say 2 precisely because nothing new is
-                                // here.
-                                if (asset.marks.isNotEmpty()) {
-                                    put(
-                                        "marks",
-                                        JSONArray().apply {
-                                            asset.marks.forEach { put(markJson(it)) }
-                                        }
-                                    )
-                                }
-                            }
-                    )
-                }
-            }
-        )
+        .put("templates", templatesJson(task))
+        .put("assets", assetsJson(task.assets))
     // After `assets`, because it is a sibling of it: the answers are about the Task, not about any
     // one file. Absent when the Task answered nothing, which is what keeps its body the v2/v3 shape.
     task.addOn?.let { json.put("addOn", addOnJson(it)) }
@@ -625,6 +602,122 @@ private fun taskJson(task: ExportTaskView): JSONObject {
         )
     }
     return json
+}
+
+/**
+ * One Task as a version-6 body sees it: its decisions, not one decision.
+ *
+ * `completed` replaces v5's `isCompleted` because v6 is a new shape, not a superset — a receiver
+ * must refuse the document on the version line rather than half-read it. `templates` stays at Task
+ * level: a v6 round may also contain media Tasks, and their file controls are still the Task's.
+ * Assets move under the part that presents them.
+ *
+ * The Add-on is unchanged and stays after `parts`, because it is one optional questionnaire about
+ * the whole Task and not one of its decisions.
+ */
+private fun taskPartsJson(task: ExportTaskView): JSONObject {
+    val json = JSONObject()
+        .put("id", task.publicId)
+        .put("title", task.title)
+        .put("completed", task.isCompleted)
+        .put("templates", templatesJson(task))
+        .put("parts", JSONArray().apply { task.parts.forEach { put(partJson(it)) } })
+    task.addOn?.let { json.put("addOn", addOnJson(it)) }
+    return json
+}
+
+/**
+ * One TaskPart as a version-6 body sees it.
+ *
+ * Key order is the contract, pinned by the export tests: identity (`partKey`), provenance
+ * (`promptKey`, `kind`, `schema`, `revision`), the composition's current claim (`required`), the
+ * answer (`result`), and the material (`assets`). The four provenance keys are `null` together for
+ * a degenerate part — the one a local file or folder import creates, whose decision is its Assets.
+ */
+private fun partJson(part: ExportPartView): JSONObject = JSONObject()
+    .put("partKey", part.partKey)
+    .put("promptKey", part.promptKey ?: JSONObject.NULL)
+    .put("kind", part.kind ?: JSONObject.NULL)
+    .put("schema", part.schema ?: JSONObject.NULL)
+    .put("revision", part.revision ?: JSONObject.NULL)
+    .put("required", part.required)
+    .put("result", partResultJson(part.result))
+    .put("assets", assetsJson(part.assets))
+
+/**
+ * A part's answer as the receiver sees it: `null` pending, `""` answered-empty, or an object.
+ *
+ * The three cases are the design check's *pending is not empty*: a part nobody has answered sends
+ * `null`, and a part somebody answered without a typed value sends `""`. Neither is ever spelled
+ * the other way, and a pending part is never omitted — the part is part of the Task whatever has
+ * been decided about it.
+ */
+private fun partResultJson(result: ExportPartResult?): Any = when (result) {
+    null -> JSONObject.NULL
+    ExportPartResult.AnsweredEmpty -> ""
+    is ExportPartResult.Choice -> JSONObject().put(
+        "choice",
+        JSONObject()
+            .put("id", result.id)
+            .put("label", result.label)
+    )
+
+    is ExportPartResult.Fields -> JSONObject().put(
+        "fields",
+        JSONArray().apply {
+            result.fields.forEach { field ->
+                put(
+                    JSONObject()
+                        .put("key", field.fieldKey)
+                        .put("type", field.type)
+                        .put("value", field.value)
+                )
+            }
+        }
+    )
+}
+
+/** The Task's template identities, in the order they were attached. */
+private fun templatesJson(task: ExportTaskView): JSONArray = JSONArray().apply {
+    task.templates.forEach { template ->
+        put(
+            JSONObject()
+                .put("id", template.id)
+                .put("name", template.name ?: JSONObject.NULL)
+                .put("version", template.version)
+        )
+    }
+}
+
+/**
+ * One Task's Assets as the receiver sees them — shared by the v5 Task and the v6 part, so the two
+ * shapes cannot spell a file differently.
+ */
+private fun assetsJson(assets: List<ExportAssetView>): JSONArray = JSONArray().apply {
+    assets.forEach { asset ->
+        put(
+            JSONObject()
+                .put("id", asset.publicId)
+                .put("title", asset.title)
+                .put("relativePath", asset.relativePath ?: JSONObject.NULL)
+                .put("sourceMissing", asset.sourceMissing)
+                .put(
+                    "actions",
+                    JSONArray().apply { asset.actions.forEach { put(it) } }
+                )
+                .apply {
+                    // The key is present only where the array is. An empty `marks` on an image
+                    // would be a shape v2 receivers have never seen, and the version line is
+                    // allowed to say 2 precisely because nothing new is here.
+                    if (asset.marks.isNotEmpty()) {
+                        put(
+                            "marks",
+                            JSONArray().apply { asset.marks.forEach { put(markJson(it)) } }
+                        )
+                    }
+                }
+        )
+    }
 }
 
 /**

@@ -213,10 +213,21 @@ fun taskReviewQueue(rootUri: String, rows: List<CatalogRow>): List<ReviewItem> =
         .sortedWith(catalogOrder)
         .map { reviewItemFor(rootUri, it, null, null) }
 
-/** Whether a catalog Task may be put in a queue at all: §6.4, the content-presentation half. */
+/**
+ * Whether a catalog Task may be put in a queue at all: §6.4, the content-presentation half.
+ *
+ * Asked of every part rather than of the first Prompt: a Task presenting three Prompts is one
+ * judgment short if this build can draw two of them, so one unviewable body — or one part this
+ * build cannot present at all — keeps the whole Task out, exactly as one unviewable file always
+ * has.
+ */
 private fun reviewable(row: CatalogRow): Boolean =
     row.missingAssets == 0 && !row.hasUnviewableAsset &&
-        (row.payloadKind == null || payloadViewerAvailable(row.payloadKind, row.payloadSchema))
+        row.parts.none { part ->
+            part.present && (part.availability != null ||
+                (part.payloadKind != null &&
+                    !payloadViewerAvailable(part.payloadKind, part.payloadSchema)))
+        }
 
 /**
  * A queue with each item's decisions taken from the state as it stands now, rather than from
@@ -253,11 +264,20 @@ fun withLiveDecisions(
     val byAsset = assetStates.associateBy { it.assetId }
     return queue.map { item ->
         val live = byTask[item.taskId]?.isCompleted
-        val assets = item.assets.map { it.copy(decisions = byAsset[it.assetId]?.decisions ?: it.decisions) }
-        if (live == null && assets == item.assets) {
+        // The pair records live on the Assets, and the Assets live on the parts, so the re-read
+        // walks the parts and leaves every other part field — its key, its envelope, its
+        // availability — exactly as the queue resolved it.
+        val parts = item.parts.map { part ->
+            part.copy(
+                assets = part.assets.map {
+                    it.copy(decisions = byAsset[it.assetId]?.decisions ?: it.decisions)
+                }
+            )
+        }
+        if (live == null && parts == item.parts) {
             item
         } else {
-            item.copy(isCompleted = live ?: item.isCompleted, assets = assets)
+            item.copy(isCompleted = live ?: item.isCompleted, parts = parts)
         }
     }
 }
@@ -289,7 +309,7 @@ private fun reviewItemFor(
     isCompleted = row.isCompleted,
     sizeBytes = file?.sizeBytes ?: row.sizeBytes,
     lastModified = file?.lastModified ?: row.lastModified,
-    assets = row.assets,
+    parts = row.parts,
     rootRelativePath = row.groupPath,
     // Off the catalog row, which is where an import's own answers live — the same place the name,
     // the measurements and the block come from, and frozen for the same reason as those: a round
@@ -304,12 +324,9 @@ private fun reviewItemFor(
     // under *Sample a point* would open with the built-in's completion checkbox instead of the
     // template's own Submit.
     taskReview = row.taskReview,
-    // And the Prompt envelope, for the same reason: a queue item that dropped it would present a
-    // Package Prompt as a Task with no pages at all.
+    // And the Package the composition came from, for the same reason: the Info sheet names it.
+    // Each part's own Prompt envelope travels inside [parts], so a queue item that dropped the
+    // parts would present a Package Prompt as a Task with no pages at all.
     packageKey = row.packageKey,
-    packageTitle = row.packageTitle,
-    promptKey = row.promptKey,
-    payloadKind = row.payloadKind,
-    payloadSchema = row.payloadSchema,
-    payloadRevision = row.payloadRevision
+    packageTitle = row.packageTitle
 )

@@ -7,6 +7,7 @@ import com.example.listea.data.ListItemEntity
 import com.example.listea.data.PayloadAnswerRow
 import com.example.listea.data.PayloadAssetRow
 import com.example.listea.data.PayloadMarkRow
+import com.example.listea.data.PayloadPartRow
 import com.example.listea.data.PayloadPromptRow
 import com.example.listea.data.PayloadTaskRow
 import com.example.listea.data.ReviewItem
@@ -16,6 +17,7 @@ import com.example.listea.domain.AddOnAnswerValue
 import com.example.listea.domain.AddOnQuestionType
 import com.example.listea.domain.ExportChoice
 import com.example.listea.domain.ExportKind
+import com.example.listea.domain.FieldAnswer
 import com.example.listea.domain.MarkKind
 import com.example.listea.domain.ReviewResponse
 import com.example.listea.domain.StoredAddOnVersion
@@ -102,6 +104,23 @@ const val EXPORT_VERSION_ADD_ON = 4
  * `docs/iterations/v0.8.2-plan.md`. A receiver that needs to read the Prompt asks the Package.
  */
 const val EXPORT_VERSION_CONTENT = 5
+
+/**
+ * The version a body carries **only when a Task has more than one part, or a part answered with a
+ * structured result**.
+ *
+ * Version 6 replaces a Task's single `content`/`result` pair with a `parts[]` array, one entry per
+ * present TaskPart in composition order. It is not a superset of 5 by shape: a v6 Task says
+ * `completed` instead of `isCompleted`, and its Assets sit under the part that presents them. The
+ * version line is therefore the only safe branch, and an old receiver must refuse the document.
+ *
+ * **A single-part Task with no structured answer still exports v5, byte for byte.** That is the
+ * compatibility promise: the media, file and single-Prompt rounds that make up almost every round
+ * keep the body their receivers already parse, and v6 appears only on the rounds that genuinely
+ * hold more than one decision or a structured one. A round is one document, so one Task that needs
+ * v6 puts every Task in it into the v6 shape.
+ */
+const val EXPORT_VERSION_PARTS = 6
 
 /** One template a Task was imported under: identity only, never its controls. */
 data class ExportTemplateView(
@@ -200,8 +219,61 @@ data class ExportTaskView(
     /** The Prompt's identity when this Task is structured content, else null. */
     val content: ExportContentView? = null,
     /** The structured answer, present exactly when [content] is. */
-    val result: ExportResultView? = null
+    val result: ExportResultView? = null,
+    /**
+     * The Task's **present** parts, in composition order — the v6 Task's decisions.
+     *
+     * Detached parts are excluded from the body by design: their answer and history stay on the
+     * device, and exporting a part the current composition no longer asks would describe a Task
+     * that never existed. [hasMultipleParts] still counts them, because a Task that *held* two
+     * decisions is a v6 Task even when one has since been detached.
+     */
+    val parts: List<ExportPartView> = emptyList(),
+    /** Whether the Task holds more than one part row, detached included. */
+    val hasMultipleParts: Boolean = false
 )
+
+/**
+ * One TaskPart as the v6 body sees it.
+ *
+ * [promptKey], [kind], [schema] and [revision] are the part's provenance and its stored envelope;
+ * all four are null for a degenerate part — the one a local file or folder import creates, which
+ * has Assets but no body. [required] is the composition's current claim about the part.
+ *
+ * [result] is the part's current answer: null while pending, an object when the answer has a typed
+ * shape, and [ExportPartResult.AnsweredEmpty] when somebody answered without one. The three are
+ * deliberately distinct — S9 in the design check, *pending is not empty* — so a receiver never has
+ * to guess whether silence means *not yet* or *nothing to say*.
+ */
+data class ExportPartView(
+    val partKey: String,
+    val promptKey: String?,
+    val kind: String?,
+    val schema: Int?,
+    val revision: Int?,
+    val required: Boolean,
+    val result: ExportPartResult?,
+    val assets: List<ExportAssetView>
+)
+
+/**
+ * A part's typed answer, when this build can read one.
+ *
+ * Two shapes ship with v6 because two Viewers do: a choice Prompt's decision is the option it
+ * recorded, a `form` Prompt's is the set of visible fields that were answered. Anything else an
+ * answer could be — an unreadable row, a media judgment with no typed result — is
+ * [AnsweredEmpty], which is the honest statement *answered, with nothing this body can spell*.
+ */
+sealed interface ExportPartResult {
+    /** Answered, with no typed value to send. Serialised as `""`. */
+    data object AnsweredEmpty : ExportPartResult
+
+    /** The newest choice on record, with the label as it was when the person chose. */
+    data class Choice(val id: String, val label: String) : ExportPartResult
+
+    /** A structured answer's visible fields, in the order the response stored them. */
+    data class Fields(val fields: List<FieldAnswer>) : ExportPartResult
+}
 
 /**
  * What kind of Prompt a Task is, without being the Prompt.
@@ -256,8 +328,15 @@ fun mapExport(payload: ExportPayload): ExportMapping {
     val carriesContent = payload.tasks.any { it.content != null }
     val carriesAddOn = payload.tasks.any { it.addOn != null }
     val carriesMarks = payload.tasks.any { task -> task.assets.any { it.marks.isNotEmpty() } }
+    // A Task needs the v6 shape when it holds more than one decision, or when one of its decisions
+    // is structured. The count is over stored parts, not present ones: a Task whose second part was
+    // detached still was — and in its history still is — a multi-part Task.
+    val carriesParts = payload.tasks.any { task ->
+        task.hasMultipleParts ||
+            task.parts.any { part -> part.result is ExportPartResult.Fields }
+    }
     return ExportMapping(
-        version = exportVersion(carriesMarks, carriesAddOn, carriesContent),
+        version = exportVersion(carriesMarks, carriesAddOn, carriesContent, carriesParts),
         event = payload.event,
         listId = payload.listId,
         listTitle = payload.listTitle,
@@ -300,7 +379,8 @@ fun exportTaskViews(
     addOnResolver: AddOnResolver = AddOnResolver.Empty,
     answersByTask: Map<String, List<PayloadAnswerRow>> = emptyMap(),
     promptsByTask: Map<String, PayloadPromptRow> = emptyMap(),
-    responseByTask: Map<String, String> = emptyMap()
+    responseByTask: Map<String, String> = emptyMap(),
+    partsByTask: Map<String, List<PayloadPartRow>> = emptyMap()
 ): List<ExportTaskView> = rows.distinctBy { it.taskId }.map { row ->
     val task = tasks[row.taskId]
     // A structured Prompt Task answers in a Viewer: its pen is the Task-level Headless Template,
@@ -318,12 +398,48 @@ fun exportTaskViews(
         )
     }
     val content = exportContentView(promptsByTask[row.taskId])
+    val partRows = partsByTask[row.taskId].orEmpty()
+    // A legacy Asset row with no part is attached to a single-part Task's only part. Schema 33
+    // backfills every row and every write path names the part, so this is a defensive join rather
+    // than a second model; with several parts there is no honest place to put such a row.
+    val assetRows = assetsByTask[row.taskId].orEmpty()
+    val parts = partRows.filter { it.present }.map { part ->
+        ExportPartView(
+            partKey = part.partKey,
+            promptKey = part.promptKey,
+            kind = part.kind,
+            schema = part.schemaVersion,
+            revision = part.revision,
+            required = part.required,
+            result = exportPartResult(
+                response = partResponse(
+                    part = part,
+                    singlePartTask = partRows.size == 1,
+                    responseByTask = responseByTask[row.taskId]
+                )
+            ),
+            assets = assetRows
+                .filter { asset ->
+                    asset.partKey == part.partKey ||
+                        (asset.partKey == null && partRows.size == 1)
+                }
+                .map { asset ->
+                    exportAssetView(
+                        asset = asset,
+                        attachments = attachments,
+                        resolver = resolver,
+                        markRows = marksByAsset[asset.assetId].orEmpty(),
+                        documentFingerprint = fingerprintByAsset[asset.assetId]
+                    )
+                }
+        )
+    }
     ExportTaskView(
         publicId = task?.publicId.orEmpty(),
         title = row.title.ifBlank { task?.displayName.orEmpty() },
         isCompleted = row.isCompleted,
         templates = templates,
-        assets = assetsByTask[row.taskId].orEmpty().map { asset ->
+        assets = assetRows.map { asset ->
             exportAssetView(
                 asset = asset,
                 attachments = attachments,
@@ -342,8 +458,53 @@ fun exportTaskViews(
                 completed = row.isCompleted,
                 choice = exportChoiceView(responseByTask[row.taskId])
             )
-        }
+        },
+        parts = parts,
+        hasMultipleParts = partRows.size > 1
     )
+}
+
+/**
+ * A part's current answer, with the one compatibility fallback the schema-33 migration needs.
+ *
+ * The migration gave every existing Task a part row but left its `task_part_state.response` empty:
+ * the answer a pre-v0.8.4 Task holds lives in `review_events`, and rewriting it into part state
+ * would have been a reinterpretation of history. On a single-part Task that answer is unambiguously
+ * this part's, so the v6 writer falls back to it; on a multi-part Task the newest event names no
+ * part and guessing would attribute one decision to another.
+ */
+private fun partResponse(
+    part: PayloadPartRow,
+    singlePartTask: Boolean,
+    responseByTask: String?
+): String? {
+    if (!part.response.isNullOrEmpty()) return part.response
+    return if (singlePartTask) responseByTask?.takeIf { it.isNotEmpty() } else null
+}
+
+/**
+ * A stored part response as the v6 body's `result`: null pending, `""` answered-empty, or the typed
+ * value the response family carries.
+ *
+ * The reader is the same fail-closed one every other surface uses. A response this build cannot
+ * read is *answered* — the part state row proves somebody committed — and its value is withheld
+ * rather than guessed, which is exactly what [ExportPartResult.AnsweredEmpty] says.
+ */
+private fun exportPartResult(response: String?): ExportPartResult? {
+    if (response.isNullOrEmpty()) return null
+    return when (val parsed = ReviewResponse.parse(response)) {
+        is ReviewResponse.StructuredReview ->
+            parsed.fields.takeIf { it.isNotEmpty() }
+                ?.let { ExportPartResult.Fields(it) }
+                ?: ExportPartResult.AnsweredEmpty
+
+        is ReviewResponse.PrimaryReview ->
+            parsed.events.filterIsInstance<ViewerEvent.Choice>().lastOrNull()
+                ?.let { ExportPartResult.Choice(it.optionId, it.label) }
+                ?: ExportPartResult.AnsweredEmpty
+
+        is ReviewResponse.MediaReview, null -> ExportPartResult.AnsweredEmpty
+    }
 }
 
 /**

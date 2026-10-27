@@ -672,7 +672,16 @@ fun TaskCompletionBar(
     item: ReviewItem,
     onToggleCompleted: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
-    reviewBlocked: ReviewBlock? = null
+    reviewBlocked: ReviewBlock? = null,
+    /**
+     * Required parts this Task still has unanswered, when its template completes from them.
+     *
+     * Zero for every other template — a SinglePart media Task has no parts to count — so its band
+     * is byte-identical to the one before v0.8.4. When it is not zero the count is said under the
+     * checkbox: a completion control that can finish a Task with open questions has to show that
+     * it would, before the tap rather than in a refusal afterwards.
+     */
+    pendingParts: Int = 0
 ) {
     Column(
         modifier = modifier.fillMaxWidth(),
@@ -684,6 +693,14 @@ fun TaskCompletionBar(
         if (reviewBlocked != null) {
             Text(
                 reviewBlocked.label,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        if (pendingParts > 0 && !item.isCompleted) {
+            Text(
+                if (pendingParts == 1) "1 part not answered"
+                else "$pendingParts parts not answered",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -841,7 +858,7 @@ fun ReviewAssetControls(
         }
 
         IconButton(onClick = onInfo) {
-            Icon(Icons.Outlined.Info, contentDescription = "Item info")
+            Icon(Icons.Outlined.Info, contentDescription = "File info")
         }
     }
 }
