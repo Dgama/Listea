@@ -1,5 +1,6 @@
 package com.example.listea
 
+import com.example.listea.data.CatalogRow
 import com.example.listea.data.ReviewBlock
 import com.example.listea.domain.AssetKind
 import org.junit.Assert.assertEquals
@@ -127,6 +128,41 @@ class CatalogTest {
         assertEquals(null, reviewBlockFor(listOf(reviewAsset("a.pdf", missing = false))))
         assertEquals(null, reviewBlockFor(emptyList()))
     }
+
+    // A Task row names the add-on page beside its content, because the row is where a Task is
+    // chosen. The count is Task-shaped: it does not care whether the Task is a picture, a PDF or a
+    // Prompt, only whether a resolvable add-on stamp will actually draw a page.
+    @Test
+    fun `a Task row says an add-on page exists beside its Asset count`() {
+        assertEquals("0 Assets, 1 add-on", catalogTaskDetail(row(assetCount = 0), null, hasAddOn = true))
+        assertEquals("2 Assets, 1 add-on", catalogTaskDetail(row(assetCount = 2), null, hasAddOn = true))
+    }
+
+    @Test
+    fun `a Task row without an add-on says only what it holds`() {
+        assertEquals("0 Assets", catalogTaskDetail(row(assetCount = 0), null))
+        assertEquals("3 Assets, 1 missing", catalogTaskDetail(row(assetCount = 3, missing = 1), null))
+    }
+
+    @Test
+    fun `the blocked reason comes after the content and the add-on`() {
+        assertEquals(
+            "1 Asset, 1 add-on · Source missing",
+            catalogTaskDetail(row(assetCount = 1), ReviewBlock.MISSING, hasAddOn = true)
+        )
+    }
+
+    private fun row(assetCount: Int, missing: Int = 0) = CatalogRow(
+        taskId = "t",
+        groupPath = "a.jpg",
+        displayName = "a.jpg",
+        isCompleted = false,
+        assetCount = assetCount,
+        missingAssets = missing,
+        sizeBytes = null,
+        lastModified = null,
+        hasUnviewableAsset = false
+    )
 
     private fun reviewAsset(name: String, missing: Boolean) =
         com.example.listea.data.ReviewAsset(sourceUri = "content://root/$name", name = name, sourceMissing = missing)

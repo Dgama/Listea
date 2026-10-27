@@ -64,6 +64,9 @@ class PromptSubmissionTest {
 
     private val like = ViewerEvent.Choice(optionId = "like", label = "Like")
 
+    /** The answer `VOCABULARY_PAYLOAD` declares, in the option order it declares. */
+    private val wordRight = ViewerEvent.Choice(optionId = "b", label = "a happy accident")
+
     private val terms = ReviewTerms(
         context = ReviewContext.InFolder(ROOT, "dating"),
         template = Templates.StructuredSingleChoice.ref
@@ -183,6 +186,80 @@ class PromptSubmissionTest {
     }
 
     @Test
+    fun `a vocabulary choice commits like any other choice`() = runTest(dispatcher) {
+        val taskId = importedVocabulary()
+
+        val accepted = submit(itemOf(taskId), Templates.StructuredSingleChoice, listOf(wordRight))
+
+        assertTrue(accepted)
+        assertEquals("vocabulary", rawText("SELECT kind FROM task_payloads WHERE taskId = '$taskId'"))
+        assertEquals(1, rawInt("SELECT schemaVersion FROM task_payloads WHERE taskId = '$taskId'"))
+        assertEquals(1, rawInt("SELECT COUNT(*) FROM review_events WHERE taskId = '$taskId'"))
+        assertEquals(1, rawInt("SELECT isCompleted FROM task_state WHERE taskId = '$taskId'"))
+        assertEquals(
+            ReviewResponse.PrimaryReview(completed = true, events = listOf(wordRight)),
+            ReviewResponse.parse(
+                rawText("SELECT response FROM review_events WHERE taskId = '$taskId'")
+            )
+        )
+        // The pronunciation is a Resource, not an Asset: it is linked by key and audio kind and
+        // never becomes a page of the Task.
+        assertEquals(
+            1,
+            rawInt(
+                "SELECT COUNT(*) FROM package_resources " +
+                    "WHERE kind = 'audio' AND resourceKey = 'word-audio'"
+            )
+        )
+        assertEquals(
+            1,
+            rawInt(
+                "SELECT COUNT(*) FROM task_resources tr " +
+                    "JOIN package_resources pr ON pr.id = tr.resourceId " +
+                    "WHERE tr.taskId = '$taskId' AND pr.resourceKey = 'word-audio'"
+            )
+        )
+    }
+
+    @Test
+    fun `a vocabulary option the body does not declare is refused`() = runTest(dispatcher) {
+        val taskId = importedVocabulary()
+
+        val accepted = submit(
+            itemOf(taskId),
+            Templates.StructuredSingleChoice,
+            listOf(ViewerEvent.Choice(optionId = "z", label = "a happy accident"))
+        )
+
+        assertFalse(accepted)
+        assertEquals(0, rawInt("SELECT COUNT(*) FROM review_events WHERE taskId = '$taskId'"))
+    }
+
+    @Test
+    fun `a vocabulary label the body does not declare is refused`() = runTest(dispatcher) {
+        val taskId = importedVocabulary()
+
+        val accepted = submit(
+            itemOf(taskId),
+            Templates.StructuredSingleChoice,
+            listOf(ViewerEvent.Choice(optionId = "b", label = "a sad accident"))
+        )
+
+        assertFalse(accepted)
+        assertEquals(0, rawInt("SELECT COUNT(*) FROM review_events WHERE taskId = '$taskId'"))
+    }
+
+    @Test
+    fun `a missing required pronunciation refuses the vocabulary judgment`() = runTest(dispatcher) {
+        val taskId = importedVocabulary(resourcePresent = false)
+
+        val accepted = submit(itemOf(taskId), Templates.StructuredSingleChoice, listOf(wordRight))
+
+        assertFalse(accepted)
+        assertEquals(0, rawInt("SELECT COUNT(*) FROM review_events WHERE taskId = '$taskId'"))
+    }
+
+    @Test
     fun `a non-revisable template answers once`() = runTest(dispatcher) {
         val taskId = importedPrompt()
         val once = Templates.StructuredSingleChoice.copy(
@@ -264,7 +341,15 @@ class PromptSubmissionTest {
     }
 
     /** One Package holding one Prompt, imported as an import run would leave it. */
-    private suspend fun importedPrompt(resourcePresent: Boolean = true): String {
+    private suspend fun importedPrompt(
+        resourcePresent: Boolean = true,
+        kind: String = "profile",
+        payload: String = PAYLOAD,
+        promptKey: String = PROMPT_KEY,
+        resourceKey: String = "photo",
+        resourceKind: String = "image",
+        member: String = "media/photo.png"
+    ): String {
         val source = dao.registerSource(
             rootUri = ROOT,
             relativePath = "dating",
@@ -278,17 +363,17 @@ class PromptSubmissionTest {
             ImportPlan(
                 tasks = listOf(
                     PlannedTask(
-                        groupPath = catalogKey(PACKAGE_KEY, PROMPT_KEY),
-                        displayName = PROMPT_KEY,
+                        groupPath = catalogKey(PACKAGE_KEY, promptKey),
+                        displayName = promptKey,
                         assets = emptyList(),
                         prompt = PlannedTaskPrompt(
                             packageKey = PACKAGE_KEY,
-                            promptKey = PROMPT_KEY,
-                            kind = "profile",
+                            promptKey = promptKey,
+                            kind = kind,
                             schema = 1,
-                            payload = PAYLOAD,
+                            payload = payload,
                             revision = 1,
-                            resources = listOf(PlannedPromptResource("photo", required = true))
+                            resources = listOf(PlannedPromptResource(resourceKey, required = true))
                         )
                     )
                 ),
@@ -303,9 +388,9 @@ class PromptSubmissionTest {
                         fingerprint = "fp-1",
                         resources = listOf(
                             PlannedPackageResource(
-                                resourceKey = "photo",
-                                kind = "image",
-                                member = "media/photo.png",
+                                resourceKey = resourceKey,
+                                kind = resourceKind,
+                                member = member,
                                 present = resourcePresent
                             )
                         )
@@ -316,6 +401,18 @@ class PromptSubmissionTest {
         )
         return dao.getCatalogTasks(source.id).single().taskId
     }
+
+    /** The same Package shape, one vocabulary Prompt and one pronunciation Resource. */
+    private suspend fun importedVocabulary(resourcePresent: Boolean = true): String =
+        importedPrompt(
+            resourcePresent = resourcePresent,
+            kind = "vocabulary",
+            payload = VOCABULARY_PAYLOAD,
+            promptKey = VOCABULARY_PROMPT_KEY,
+            resourceKey = "word-audio",
+            resourceKind = "audio",
+            member = "media/serendipity.mp3"
+        )
 
     /** The item a review surface hands the write, with the envelope the catalog resolved. */
     private suspend fun itemOf(taskId: String): ReviewItem {
@@ -370,5 +467,15 @@ class PromptSubmissionTest {
         const val PAYLOAD =
             """{"options":[{"id":"like","label":"Like"},{"id":"pass","label":"Pass"}],""" +
                 """"profile":{"age":29,"bio":"Likes long walks","name":"Alice"},"stem":"Meet Alice?"}"""
+
+        const val VOCABULARY_PROMPT_KEY = "serendipity"
+
+        /** Canonical-shaped, with c, b, a order: the reader must not sort it. */
+        const val VOCABULARY_PAYLOAD =
+            """{"answer":"b","audio":"word-audio","definition":"a happy accident",""" +
+                """"options":[{"id":"c","label":"a formal apology"},""" +
+                """{"id":"b","label":"a happy accident"},""" +
+                """{"id":"a","label":"a long journey"}],""" +
+                """"stem":"Choose the meaning of the word.","word":"serendipity"}"""
     }
 }

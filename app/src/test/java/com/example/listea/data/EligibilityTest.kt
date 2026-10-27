@@ -57,7 +57,11 @@ class EligibilityTest {
         runTest {
             val missingJpg = dao.taskIdOf(ROOT, "gone.jpg")
             dao.markFilesDeleted(ROOT, listOf("gone.jpg"))
-            val unviewableTxt = dao.taskIdOf(ROOT, "notes.txt")
+            // Since v0.8.2f the importer skips a text file instead of making an unviewable Task.
+            // The refusal this test pins is about databases written by earlier builds, so the state
+            // is built the way one of those left it: a Task whose Asset is the text file.
+            val unviewableTxt = dao.taskIdOf(ROOT, "legacy.jpg")
+            makeUnviewable(unviewableTxt, "notes.txt")
 
             assertEquals(
                 emptyList<Long>(),
@@ -127,8 +131,12 @@ class EligibilityTest {
     @Test
     fun `a legacy folder List containing a text file keeps its membership and progress, blocked only for review`() =
         runTest {
-            val listId = folderList("notes.txt")
+            // A folder List made before v0.8.2f, whose text file the importer then admitted. The
+            // current importer would skip the file, so the legacy shape is restored by hand: what
+            // survives is the membership and the refusal, not the import that made it.
+            val listId = folderList("legacy.jpg")
             val item = dao.getItems(listId).single()
+            makeUnviewable(item.taskId, "notes.txt")
 
             assertEquals(1, dao.getItems(listId).size)
             assertEquals(1, dao.observeSummaries().first().single().totalItems)
@@ -207,6 +215,19 @@ class EligibilityTest {
                 directories = directories
             )
         )
+
+    /**
+     * Points a Task's one Asset at a file no viewer can open, without moving the Task.
+     *
+     * The legacy-import shape: the row structure a run of an older build would have written, with
+     * content the current importer would never have admitted.
+     */
+    private fun makeUnviewable(taskId: String, path: String) {
+        database.openHelper.writableDatabase.execSQL(
+            "UPDATE assets SET relativePath = ?, sourceUri = ? WHERE taskId = ?",
+            arrayOf(path, "$ROOT/$path", taskId)
+        )
+    }
 
     private fun rawInt(sql: String): Int =
         database.openHelper.writableDatabase.query(sql).use { cursor ->

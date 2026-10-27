@@ -1,5 +1,7 @@
 package com.example.listea
 
+import com.example.listea.domain.AddOnId
+import com.example.listea.domain.AddOnVersionRef
 import com.example.listea.domain.ExportChoice
 import com.example.listea.domain.ExportKind
 import org.junit.Assert.assertEquals
@@ -45,10 +47,36 @@ class ImportRunIdentityTest {
         assertEquals(importRunIdentity(run()), importRunIdentity(run()))
     }
 
+    @Test
+    fun `the add-on a run opens on is part of its identity`() {
+        val withAddOn = run(addOn = AddOnVersionRef(AddOnId("difficulty"), 2))
+        val without = run(addOn = null)
+
+        assertNotEquals(importRunIdentity(withAddOn), importRunIdentity(without))
+    }
+
+    /**
+     * The upgrade flags are part of the identity even when every reference is equal.
+     *
+     * They decide whether a submitted reference is moved to the offered version. Two runs that look
+     * identical but answer that differently would write different rows, so a restored draft must
+     * not carry one's answer into the other.
+     */
+    @Test
+    fun `whether a run upgrades what it holds is part of its identity`() {
+        val adopting = run(upgradeTemplates = true, upgradeAddOn = true)
+        val keeping = run(upgradeTemplates = false, upgradeAddOn = false)
+
+        assertNotEquals(importRunIdentity(adopting), importRunIdentity(keeping))
+    }
+
     private fun run(
         refresh: Boolean = true,
         choice: ExportChoice = ExportChoice.By(ExportKind.WEBHOOK),
-        address: String = "https://n8n.example/webhook/a"
+        address: String = "https://n8n.example/webhook/a",
+        addOn: AddOnVersionRef? = null,
+        upgradeTemplates: Boolean = true,
+        upgradeAddOn: Boolean = true
     ) = ImportFolderRequest.Confirm(
         folderLabel = "cos",
         fileCount = 23,
@@ -58,7 +86,10 @@ class ImportRunIdentityTest {
             displayName = "cos",
             exportChoice = choice,
             webhookUrl = address,
-            webhookFromDefault = true
+            webhookFromDefault = true,
+            addOn = addOn,
+            upgradeTemplates = upgradeTemplates,
+            upgradeAddOn = upgradeAddOn
         )
     )
 }

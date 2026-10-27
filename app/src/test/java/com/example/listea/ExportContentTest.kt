@@ -59,6 +59,37 @@ class ExportContentTest {
     }
 
     @Test
+    fun `a vocabulary choice exports the same v5 identity and result, and no drill text`() {
+        val body = buildWebhookPayload(
+            payload(
+                tasks = listOf(structuredTask("TASK-3", "serendipity")),
+                prompts = mapOf(
+                    "TASK-3" to promptRow(
+                        taskId = "TASK-3",
+                        promptKey = "serendipity",
+                        kind = "vocabulary"
+                    )
+                ),
+                responses = mapOf("TASK-3" to response("b", "a happy accident"))
+            )
+        )
+
+        val task = JSONObject(body).getJSONArray("tasks").getJSONObject(0)
+        assertEquals(5, JSONObject(body).getInt("version"))
+        assertEquals("vocabulary", task.getJSONObject("content").getString("kind"))
+        assertEquals("serendipity", task.getJSONObject("content").getString("promptKey"))
+        assertEquals("b", task.getJSONObject("result").getJSONObject("choice").getString("id"))
+        assertEquals(
+            "a happy accident",
+            task.getJSONObject("result").getJSONObject("choice").getString("label")
+        )
+        // The decision, not the card: word, pronunciation and definition stay home.
+        assertFalse(body.contains("\"word\""))
+        assertFalse(body.contains("\"audio\""))
+        assertFalse(body.contains("definition"))
+    }
+
+    @Test
     fun `a media-only round stays at version 2 with neither new key`() {
         val body = buildWebhookPayload(
             payload(tasks = listOf(mediaTask("TASK-2", "a.jpg")))
@@ -198,11 +229,15 @@ class ExportContentTest {
         selections = ""
     )
 
-    private fun promptRow(taskId: String) = PayloadPromptRow(
+    private fun promptRow(
+        taskId: String,
+        promptKey: String = "alice",
+        kind: String = "profile"
+    ) = PayloadPromptRow(
         taskId = taskId,
         packageKey = "dating-demo",
-        promptKey = "alice",
-        kind = "profile",
+        promptKey = promptKey,
+        kind = kind,
         schemaVersion = 1,
         revision = 3
     )

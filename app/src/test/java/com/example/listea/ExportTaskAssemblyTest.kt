@@ -2,6 +2,7 @@ package com.example.listea
 
 import com.example.listea.data.ListItemEntity
 import com.example.listea.data.PayloadAssetRow
+import com.example.listea.data.PayloadPromptRow
 import com.example.listea.data.PayloadTaskRow
 import com.example.listea.data.TemplateEntity
 import com.example.listea.data.TemplateVersionEntity
@@ -179,6 +180,37 @@ class ExportTaskAssemblyTest {
         assertEquals(listOf(OTHER, LINEAGE), views.single().templates.map { it.id })
         assertEquals(listOf(1, 1), views.single().templates.map { it.version })
         assertEquals(listOf("Other control", "Test control"), views.single().templates.map { it.name })
+    }
+
+    @Test
+    fun `a Prompt Task sends no templates and no file actions, even holding a stale attachment`() {
+        // The dating Todos imported before v0.8.2f carry Media Asset Control on the Source and on
+        // their Tasks. A Prompt is answered in a Viewer; sending the stale template told a receiver
+        // its Prompt was marked up, and offered actions its files never took.
+        val views = exportTaskViews(
+            rows = listOf(row("p")),
+            tasks = mapOf("p" to taskRow("p", attachments = ATTACHMENT)),
+            assetsByTask = mapOf(
+                "p" to listOf(
+                    assetRow("p", "img", "media/a.png", actions = setOf(TAG_ID, Templates.FAVOURITE_BUTTON_ID))
+                )
+            ),
+            resolver = resolver(),
+            promptsByTask = mapOf(
+                "p" to PayloadPromptRow(
+                    taskId = "p",
+                    packageKey = "dating",
+                    promptKey = "alice",
+                    kind = "profile",
+                    schemaVersion = 1,
+                    revision = 1
+                )
+            )
+        )
+
+        val view = views.single()
+        assertEquals(emptyList<ExportTemplateView>(), view.templates)
+        assertEquals(emptyList<String>(), view.assets.single().actions)
     }
 
     @Test
