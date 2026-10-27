@@ -8,6 +8,7 @@ The vocabulary Listea uses, and the one rule that explains most of its behaviour
 - [Deleting a Todo](#deleting-a-todo)
 - [Folders](#folders)
 - [Files and items](#files-and-items)
+- [Questions and parts (planned for v0.8.4)](#questions-and-parts-planned-for-v084)
 - [Lists](#lists)
 - [Folder types](#folder-types)
 - [Quick Review](#quick-review)
@@ -59,6 +60,11 @@ A **Task** is one unit of work. Running **Create Tasks** over a folder inside an
 | **One Task per file** | One Task per file in the folder that a Viewer can open — picture, video, PDF. Its folder tree can be kept or flattened |
 | **One Task per folder** | One Task per immediate child folder, holding that folder's openable files. Flat by construction |
 | **Package Prompts** | One Task per Prompt declared by each Package's manifest, nested under *One Task per file*. The Package's `media` members are Resources, not Tasks |
+
+**Planned for v0.8.4:** a Package may declare **Sections**, and the import may then group questions
+as **one Task per question** (today's behaviour and the default) or **one Task per Section**. The
+rest of the importer's meaning is unchanged. The planned model is
+[Questions and parts](#questions-and-parts-planned-for-v084).
 
 Since v0.8.2f a file no Viewer can open is **skipped, not imported**: a text note, a JSON Prompt
 body, a manifest. A Task nothing can render is a Task nobody could judge, and refusing the judgment
@@ -204,6 +210,63 @@ whatever has been decided about it.
   longer something you can add: a List built before v0.2 may have them, and they go on working
   exactly as they did, reviewable and editable, until their own List's lifecycle removes them. They
   behave differently in one specific way, noted under [Where state lives](#where-state-lives).
+
+## Questions and parts (planned for v0.8.4)
+
+> **Planned, not shipped.** At `0.8.3-preview` the app still makes one Task per Package Prompt, and
+> the older sections of this page use *item* for a file in a queue. v0.8.4 separates the words: the
+> **TaskPart** is the decision unit, the **Asset** is a presented file. This section describes the
+> design; the normative decisions are [v0.8.4](iterations/v0.8.4.md) and the words are
+> [the two vocabularies](vocabulary.md).
+
+The question v0.8.4 answers is simple: **can one Task hold more than one question?** Yes. A Task
+becomes **one sitting over one or more TaskParts**, and a **TaskPart** is one question — one Prompt
+from the Package, or one free-form judgment about a file or folder — instantiated in that Task. A
+Task with one part is exactly today's Task.
+
+The three counts this exposes are different, and the app should never substitute one for another:
+
+| Count | What it counts | Vocabulary question | Photo | Folder of 3 | Section of 10 |
+|---|---|---:|---:|---:|---:|
+| **Questions / parts** | TaskParts, the decisions | 1 | 1 | 1 | 10 in one Task, or 10 Tasks |
+| **Files / Assets** | presented files; the audio is a Resource | 0 | 1 | 3 | 0..N |
+| **Pages** | what the navigator walks | 1 content | 1 file | 3 files | one content page per part, plus files |
+
+So a vocabulary Task is **one question and no files**. Saying "0 Assets" is a correct file count and
+a misleading answer to "how much is there to do"; the decision count is 1. A folder of three
+pictures is **one question and three files** — one decision, three pieces of material, not three
+decisions. A photo is one question and one file.
+
+**A group of questions is a choice the taker makes, not a setter declaration.** A Package may tag
+Prompts with a **Section**; the Section is a declared grouping, like a label, not a Task. At import
+the taker chooses:
+
+- **One Task per question** (the default, and today's shape): each Prompt is its own Task.
+- **One Task per Section**: the Prompts tagged with that Section become TaskParts of one Task,
+  answered in one sitting. Untagged Prompts stay their own Tasks.
+
+The same Section of ten can therefore be one Task with ten parts or ten Tasks with one part. The
+setter says "these belong together"; the taker decides whether they are one sitting. The manifest
+never says "make a Task".
+
+**One question may still need several answers.** A conditional questionnaire — "Did you eat? → What
+did you eat? → Where?" — is one Prompt, one part, one decision. The branch's fields live inside
+that part; they are not separate parts, Sections or Tasks. A later question that depends on an
+earlier *Task's* answer is outside this round: the producer emits a follow-up Task.
+
+**What stays the same.** A file or folder Task still has one part; its files are still Assets in the
+same order and the same page list. The Add-on is still one per Todo, Task-level, and after the last
+part. The page arrows keep their meaning: `<< >>` move between Tasks, `<>` between files; the part
+is a grouping and state unit, not a third arrow. The catalog will show the two counts distinctly
+(for example, *3 questions · 2 files*) instead of showing only the file count.
+
+**Re-import keeps the Task.** Adding a question to a Section Task adds a part; removing one detaches
+its part and keeps its answer and history; it does not delete the Task or rewrite what was
+answered. A change from one question per Task to one Task per Section is a different composition
+and makes new Tasks; the old ones are not silently merged.
+
+The word **item** is retired for this decision unit. It survives only in older text and in the
+legacy queue sense — a file as it appears in a queue — not as a name for a TaskPart.
 
 ## Lists
 
@@ -432,6 +495,11 @@ screen. Since v0.7.1 an add-on's answers are stored the same Task-level way, in
 the question's type and the add-on id and version that asked it, which is what lets an answer
 survive an edit and be explained later — or be hidden rather than deleted when the question stops
 being asked.
+
+**Planned for v0.8.4:** a part response and its events are filed under a **TaskPart** inside the
+Task, and a Task may hold several parts. Completion stays on the Task (`task_state`); pair state and
+marks stay under the Asset. For a one-part Task — every Task at `0.8.3-preview` — nothing
+user-visible moves, and the sentences above remain true.
 
 The two levels are not a complication for its own sake. A Task holding three files is one thing to
 judge and three things to mark, and a mark made on the second of them has to be read back on the

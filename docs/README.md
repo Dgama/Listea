@@ -11,7 +11,8 @@ where the other pages link to rather than repeat.
 | Page | What it covers |
 |---|---|
 | [Getting started](getting-started.md) | Prerequisites, building, installing, adding an Upstream, and running a first review end to end. |
-| [Core concepts](core-concepts.md) | The vocabulary: Upstream, Todo, Task, Asset, add-on, folder, List, catalog, Quick Review, round, checked state, action, content policy, dissolution, and where a decision is stored. |
+| [Core concepts](core-concepts.md) | The vocabulary: Upstream, Todo, Task, Asset, add-on, folder, List, catalog, Quick Review, round, checked state, action, content policy, dissolution, and where a decision is stored — plus the planned v0.8.4 question/part model. |
+| [The two vocabularies](vocabulary.md) | The canonical words for a question and a decision: Prompt, TaskPart, Task, Asset, Resource, Section, Composition, Package — with equalities, examples and the words that are deliberately not used. |
 
 ## Using it
 
@@ -30,7 +31,10 @@ where the other pages link to rather than repeat.
 |---|---|
 | [Architecture](ARCHITECTURE.md) | The normative boundaries: what a Task, Asset, Upstream and List are, what Core does and does not own, identity rules, and the invariants implementations must preserve. Source code cites this document by name. |
 | [v0.8 — framework (draft)](iterations/v0.8.md) | The v0.8.x arc: Package protocol, Prompt payloads, Resources, Structured Viewer and Headless Review Template, the typed page model, ReviewSubmission, and ExportMapping. |
-| [Package protocol](package-protocol.md) | `listea.package/1`: the Prompt vocabulary, manifest and member layout, response contracts, commit/revisability, reconciliation rules, limits, and the dating example. |
+| [Package protocol](package-protocol.md) | `listea.package/1`: the Prompt vocabulary, manifest and member layout, response contracts, commit/revisability, reconciliation rules, limits, and the dating example. Includes the design-only [`listea.package/2`](package-protocol.md#v2-planned-for-v084) with `files`, Sections and `structured`. |
+| [v0.8.4 design](iterations/v0.8.4.md) | The planned framework round: Task = 1..N TaskParts, Section as a tag, the taker's Composition, part-level state and Task-level completion, protocol v2, schema 33 and export v6. Design only. |
+| [v0.8.4 plan](iterations/v0.8.4-plan.md) | The implementation plan for v0.8.4: phases, the schema-33 DDL and 32→33 migration, import composition, page model, completion policy, export v6, tests and device acceptance. |
+| [v0.8.4 design check](iterations/v0.8.4-design-check.md) | The gate before code: vocabulary, scenario walks, invariants, compatibility matrix, adversarial cases and the sign-off table. |
 | [v0.8.2 plan](iterations/v0.8.2-plan.md) | The v0.8.2 implementation plan: schema 32, Package import, the typed content page, the first Structured Viewer and Headless Template, and the dating acceptance walk. |
 | [v0.8.2f fixes](iterations/v0.8.2f.md) | The six issues the v0.8.2 acceptance found — Todo rename, card-level add-on edit, the one Templates list with nothing required, format-matched import, Prompt Tasks exporting no templates, and the stuck page swipe — plus the seventh found while verifying them: a judgment no longer skips the add-on page. The eighth makes every Task surface show the same pages: the read-only previews gain the add-on page, and one shared page model governs the count, the swipe and the guide. Its fixes ship in the `0.8.3-preview` build. |
 | [Vocabulary round plan](iterations/v0.8.0-vocabulary-plan.md) | The vocabulary round, delivered as the unreleased `0.8.3-preview`: a `vocabulary`/1 Viewer behind the same Package protocol, page model, single-choice template, add-on and v5 export, plus the fixtures for the mixed-List acceptance walk and the follow-up fixes the walk produced. |
@@ -89,9 +93,16 @@ The current build is **`0.8.3-preview`** (versionCode 803, unreleased): the
 [vocabulary round](iterations/v0.8.0-vocabulary-plan.md) and the v0.8.2f fixes gathered together.
 It adds the second structured Viewer (`vocabulary`/1) on the same protocol, schema 32 and export
 v5, and is device-verified through 2026-10-26. It is a preview, not the close of v0.8.3: the
-payload-revision policy, the independent-Todo proof and the protocol/capability freeze are still
-open in [v0.8 (draft)](iterations/v0.8.md#v0.8.3--shared-resources-and-the-reveal-card-proof).
-Planned material is labelled as planned.
+payload-revision policy, the independent-Todo proof and the protocol/capability freeze are carried
+into v0.8.4 rather than dropped; see [v0.8 (draft)](iterations/v0.8.md#v083--shared-resources-and-the-reveal-card-proof)
+and [v0.8.4 design](iterations/v0.8.4.md#inherited-v083-open-items).
+
+**v0.8.4 is design only** as of 2026-10-27: Task = 1..N TaskParts, Section as a declared tag, the
+taker's Composition, protocol v2 (`files`, `sections`, `structured`), and the planned schema 33 /
+export v6. No code, schema, protocol or version has changed; `0.8.3-preview` (803) remains the
+build. Start at [v0.8.4 design](iterations/v0.8.4.md); the
+[v0.8.4 design check](iterations/v0.8.4-design-check.md) was signed off on 2026-10-27, and
+implementation starts only on the user's instruction. Planned material is labelled as planned.
 
 If a page disagrees with the app, the app is right and the page is a bug — please open an issue.
 

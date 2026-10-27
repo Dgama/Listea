@@ -364,7 +364,7 @@ exactly as it parses a POST. A round carrying PDF passages writes the same versi
 
 **The one thing the file does not carry is the destination.** That is not an omission: there was
 never an address in a body, because where an export went is a fact for
-[the record](#the-record), not for its bytes. This makes the two outputs of one round diffable on
+[the record](exports.md#the-record), not for its bytes. This makes the two outputs of one round diffable on
 a workstation, which is the property the feature exists to give.
 
 **The file name carries what the body does not.** The v2 body has no `at` field and does not name

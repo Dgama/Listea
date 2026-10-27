@@ -325,7 +325,7 @@ it is the seam the [cross-platform roadmap item](roadmap.md) would widen.
 
 The identity types are the substantive part: **several** id types rather than one, so passing a
 Task id where an Asset id belongs does not compile, and so a Task's identity cannot be derived from
-where its file sits. They are UUIDs rather than [public item ids](webhooks.md#item-ids), whose
+where its file sits. They are UUIDs rather than [public item ids](webhooks.md#task-and-asset-ids), whose
 middle field is a fingerprint of the path under its Upstream — deliberately readable, deliberately
 different for two arrivals of one file, and disqualifying for a Task that has to survive a move.
 Both schemes stay; the adapter is where one becomes the other.

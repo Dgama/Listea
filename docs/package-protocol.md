@@ -1,12 +1,12 @@
 # The Listea Package protocol — v1
 
-> **Status:** **Implemented for v0.8.2 (2026-10-24), unreleased.** The protocol identifier is
-> `listea.package/1`. It is not shipped until v0.8.2 is released. A breaking change bumps the
-> identifier; additive, backward-compatible changes are made only when the reader can be extended
-> without guessing.
+> **Status:** **v1 implemented for v0.8.2 (2026-10-24), unreleased.** The protocol identifier is
+> `listea.package/1`; it remains the shipped reader. **v2 is designed, not implemented** — see
+> [v2 planned for v0.8.4](#v2-planned-for-v084). A breaking change bumps the identifier; additive,
+> backward-compatible changes are made only when the reader can be extended without guessing.
 > **Audience:** the person preparing a Package, and the coding agent implementing the reader.
 > **Related:** [ARCHITECTURE → Framework evolution](ARCHITECTURE.md#framework-evolution--v08x-planned),
-> [v0.8.2 plan](iterations/v0.8.2-plan.md).
+> [v0.8.2 plan](iterations/v0.8.2-plan.md), [v0.8.4 design](iterations/v0.8.4.md).
 
 ## Why a protocol
 
@@ -27,10 +27,10 @@ These words are used precisely in this document and in the code that implements 
 | Term | Meaning | Not |
 |---|---|---|
 | **Upstream** | Registered access to material, and therefore to the question setter's work: a grant, a locator, a name, provenance. | A Package, a Task, a review context |
-| **Prompt** | One question setter's unit: a statement, a response contract, and the materials it needs. A Package stores Prompts. | A Task, an Asset, a List, a review event |
+| **Prompt** | One question setter's unit: a statement, a response contract, and the materials it needs. A Package stores Prompts. | A Task, a TaskPart, an Asset, a List, a review event |
 | **Decision-maker intent** | A Todo: which Prompts a person takes on, under which upstream, in what scope and order, printed how, and answered with which tool. | The question setter's intent; a List; a Package |
-| **Task** | A decision-maker's undertaking to answer one Prompt in one Todo, and the durable record of that undertaking and its judgments. | A file, an image, a Prompt, a List membership |
-| **Asset** | Material a Prompt **presents**: a page the person looks at. | A Resource, a prompt body |
+| **Task** | A decision-maker's undertaking to answer one or more Prompts in one Todo, and the durable record of that undertaking and its judgments. In v1 it answers one Prompt; v0.8.4 plans 1..N **TaskParts**. | A file, an image, a Prompt, a List membership |
+| **Asset** | Material a Prompt **presents**: a page the person looks at. In a Task, it belongs to one TaskPart and is never the decision unit. | A Resource, a prompt body, a TaskPart |
 | **Resource** | Material a Prompt **depends on** but does not present: a photo beside a profile, pronunciation audio, a reference image. | An Asset, a page, a judgment target |
 | **Viewer** | The renderer for a Prompt family. It draws the Prompt, resolves Resources, and emits named intents. | A template, a completion policy, a database writer |
 | **Template** | The answer tool: which intents it accepts, when it commits, whether a commit may be revised, and what a commit does to Task state. | A viewer, a Prompt, a workflow type |
@@ -43,6 +43,13 @@ A `.listea` Package does not store Tasks. It stores **Prompts**. A Task appears 
 decision-maker — a Todo — takes a Prompt on. The same Prompt may be taken on by two Todos, which
 is two Tasks with two independent judgments. Re-importing the same Package into the same Todo is
 the same Task, reconciled by key.
+
+**Planned for v0.8.4:** a Task may hold several Prompts as **TaskParts**, and the taker's
+**Composition** decides the grouping — one Prompt per Task, or all Prompts tagged with a Section in
+one Task. The same Prompt taken on by two Todos is still two TaskParts with independent judgments.
+In a multi-part Task the Task reconciles on `(todoId, packageKey, compositionKey)` and each Prompt
+is a part within it; a one-Prompt Task keeps today's behaviour. The protocol still declares no
+Tasks and no composition.
 
 An image is not a Task. "Look at this image and tag it" is a degenerate Prompt: it has materials
 but no declared constraint. The decision-maker's act of tagging it is the Task. Today's picture
@@ -90,7 +97,8 @@ source of rules; the sections below are authoritative.
 | Viewer | the printer for a question type | different question types print differently |
 | Template | the candidate's pen, pencil, eraser | the answer tool, including whether a mark can be erased |
 | Todo | the candidate's decision to sit this paper, these questions, in this order | the decision-maker's intent |
-| Task | actually answering one question | the verb, not the paper |
+| Task | the sitting: actually answering one or more questions | the verb, not the paper |
+| TaskPart (v0.8.4) | one question of that sitting | the decision unit inside the Task |
 
 ## Package layout
 
@@ -259,6 +267,14 @@ show the Package's manifest `title` instead of the synthetic `<packageKey>/<prom
 the importer stores in the Task's path columns. Since v0.8.2f the same rule applies everywhere
 provenance is displayed.
 
+**Planned for v0.8.4:** the Task's reconciliation key becomes
+`(todoId, packageKey, compositionKey)`, and `promptKey` identifies a **TaskPart** within the Task.
+For the default one-Prompt composition the composition key is `prompt:<promptKey>`, so renaming the
+Prompt is a new Task exactly as before. In a `section:<sectionKey>` composition a renamed
+`promptKey` detaches the old part and mints a new one while the Task id survives; the old part's
+response and history are kept. A `sectionKey` follows the same key grammar and uniqueness as the
+other keys.
+
 ## Prompt description
 
 The `description` member is a JSON object. Its **outer envelope is fixed by this protocol only for
@@ -362,6 +378,11 @@ and the vocabulary `vocabulary`/1 Viewer, because the contract is what the quest
 for and both cards emit the same `choice.select` intent. `choice.multiple` is a declared protocol
 value and is rejected as unsupported until a Viewer and Template for it exist; `freeform` is
 reserved for the degenerate Prompts described below.
+
+**`structured` is planned for v2**, not accepted by this reader. The Prompt body declares a field
+set, the Viewer for `kind`/`schema` interprets it, and the protocol validates the envelope rather
+than the fields. A structured response is still one TaskPart; its fields are internal answers, not
+parts. See [v2 planned for v0.8.4](#v2-planned-for-v084).
 
 A choice event's stored value is:
 
@@ -523,6 +544,176 @@ importer, where they already work. The concept is recorded here because it is th
 protocol has a `freeform` response contract at all, and because a later round may move them into
 the same envelope without changing what a Task is.
 
+## v2 planned for v0.8.4
+
+> **Status: design only, 2026-10-27.** No reader and no writer for this version exist yet; the
+> shipped reader is v1. The design is [v0.8.4](iterations/v0.8.4.md); the implementation plan is
+> [v0.8.4-plan.md](iterations/v0.8.4-plan.md). The grammar below freezes at acceptance, not before.
+
+`listea.package/2` is the same envelope with three changes: presented files are named `files`, a
+Package may declare **Sections**, and a Prompt may ask for a **structured** response. It still
+declares **Prompts, not Tasks**, and it has no composition field.
+
+| v1 | v2 | Why |
+|---|---|---|
+| `protocol: "listea.package/1"` | `protocol: "listea.package/2"` | a breaking grammar change |
+| `prompts[].assets` | `prompts[].files` | the setter's word for presented material; the internal term remains **Asset** |
+| — | `prompts[].section` + top-level `sections[]` | the setter may tag questions; the taker still composes Tasks |
+| `choice.single` / `choice.multiple` / `freeform` | adds `structured` | one Prompt may produce a structured answer |
+
+### Manifest
+
+```json
+{
+  "protocol": "listea.package/2",
+  "packageKey": "drill-1",
+  "revision": 3,
+  "title": "Drill 1",
+  "sections": [
+    { "sectionKey": "drill-1", "title": "Drill 1", "order": 1 }
+  ],
+  "prompts": [
+    {
+      "promptKey": "q1",
+      "kind": "vocabulary",
+      "schema": 1,
+      "response": "choice.single",
+      "title": "Word 1",
+      "description": "prompts/q1.json",
+      "section": "drill-1",
+      "files": [
+        { "member": "media/q1.png", "name": "q1.png" }
+      ]
+    },
+    {
+      "promptKey": "meal-tree",
+      "kind": "form",
+      "schema": 1,
+      "response": "structured",
+      "title": "Meal",
+      "description": "prompts/meal.json",
+      "section": "drill-1"
+    }
+  ]
+}
+```
+
+### Top-level additions
+
+| Field | Required | Type | Meaning |
+|---|---|---|---|
+| `sections` | no | array | 0–2,000 Section declarations. Absent means no Prompt is tagged. |
+
+A Section entry:
+
+```json
+{ "sectionKey": "drill-1", "title": "Drill 1", "order": 1 }
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `sectionKey` | yes | Stable key under the Package; same grammar and uniqueness as other keys. |
+| `title` | yes | Display label, 1–200 characters. |
+| `order` | no | Integer ≥ 0; a registry/display hint. Member order is always the `prompts[]` order. |
+
+### Section semantics
+
+- A Section is a **declared tag**, not a parent, not a Task and not a required grouping. A Prompt has
+  at most one `section` tag.
+- A Prompt's `section` must name an entry in `sections[]`. An unknown tag rejects the whole
+  Package, because it is a manifest contradiction, not a content kind this reader cannot draw.
+- Duplicate `sectionKey` values reject the Package.
+- An untagged Prompt is valid. It can still become its own Task (`prompt:<promptKey>`).
+- A Section with no tagged Prompts is a valid declaration; selecting it as a composition is an
+  import diagnostic (`section-empty`) and mints no Task.
+- The taker's **Composition** decides whether a Section's members become one Task with N TaskParts
+  or N Tasks with one part each. The manifest never says which. Requiredness is likewise the
+  taker's; a Prompt does not declare Task requiredness.
+
+### Structured response
+
+`response: "structured"` says the Prompt's legal answer is a structured object, not one option. The
+field set lives in the Prompt body and belongs to the `kind`/`schema`; the protocol validates the
+envelope and the declared contract only. The Viewer interprets the fields, their visibility and
+their validation.
+
+`form`/1 is the planned first structured Viewer. Its body is illustrative, not a protocol rule:
+
+```json
+{
+  "title": "Meal",
+  "fields": [
+    {
+      "key": "ate",
+      "type": "choice.single",
+      "label": "Did you eat?",
+      "options": [
+        { "id": "yes", "label": "Yes" },
+        { "id": "no", "label": "No" }
+      ]
+    },
+    {
+      "key": "what",
+      "type": "text",
+      "label": "What did you eat?",
+      "when": { "field": "ate", "equals": "yes" }
+    }
+  ]
+}
+```
+
+- Conditions live **inside the Prompt body only**. There are no manifest-level conditions and no
+  cross-Prompt conditions in v0.8.4. A later Prompt depending on an earlier answer is a follow-up
+  Task from the producer.
+- A structured response is one TaskPart. Its fields are internal answers, not parts, Sections or
+  Tasks.
+- A body this build's Viewer cannot validate is a Prompt this build cannot draw. It is imported
+  unavailable, like an unknown kind/schema; it is not presented as a broken card.
+
+### Compatibility
+
+- The v0.8.4 reader accepts **both** v1 and v2. A v1 Package imports with the one-Prompt
+  composition (`prompt:<promptKey>`) and its `assets` become Assets; it has no Sections and no
+  structured contract.
+- A v1 reader rejects v2 whole. It does not attempt to read `files` as `assets` or to ignore
+  `sections`.
+- Within one manifest the grammar is either v1 or v2. `assets` in a v2 manifest and `files` in a v1
+  manifest are unknown fields and reject the Package. `structured` in v1 is an unsupported
+  response contract.
+- A v2 Package still declares no `tasks`, `composition`, `task` or manifest-level `when`; such a
+  field is unknown and rejects the Package.
+
+### Limits and diagnostics
+
+The v1 limits apply to the same records, with `files` replacing `assets` and `structured` counted as
+a description of the same size and depth. `sections` is bounded at 2,000.
+
+New stable diagnostic codes:
+
+| Code | Scope | Effect |
+|---|---|---|
+| `section-duplicate` | Package | reject |
+| `section-unknown` | Prompt | reject the Package (the tag names no registry entry) |
+| `section-invalid` | Package | reject (invalid key/title/order) |
+| `section-empty` | Section | diagnose; selecting it produces no Task |
+| `files-in-v1` / `assets-in-v2` | Package | reject as an unknown field |
+| `structured-body-invalid` | Prompt | import unavailable; no card, no crash |
+| `structured-unsupported` | Prompt | import unavailable; no Template/Viewer for the contract |
+
+The protocol does not validate the structured field set itself; that is the Viewer's capability. A
+structured Prompt with no compatible Viewer is `structured-unsupported`, not a malformed Package.
+
+### What v2 does not do
+
+- It does not declare Tasks or compositions.
+- It does not make a Section a Task, a parent or a required grouping.
+- It does not add cross-Prompt conditions.
+- It does not add per-part requiredness or per-part revisability to the manifest.
+- It does not introduce archives, embedded blobs or remote members; v1's member rules and
+  rejections still apply.
+- It does not change Asset or Resource meaning. `files` are Assets; `resources` are still
+  dependencies and not pages.
+
 ## Relationship to the current app
 
 - **File-as-Task and folder-as-Task remain.** They are printing conventions, not Packages. A file
@@ -623,7 +814,8 @@ own Viewer, and both are answerable through the single-choice template.
 ## Versioning
 
 - A breaking grammar change updates `protocol` to `listea.package/2`; the app supports the versions
-  it ships readers for and rejects the rest whole.
+  it ships readers for and rejects the rest whole. v0.8.4 plans exactly that step — `files`,
+  `sections` and `structured` — and is design only until accepted; v1 remains the shipped reader.
 - A new `kind` does not change the protocol. It needs a Viewer that declares support.
 - A new `response` contract is a protocol change, because it changes what a valid answer is.
 - A new optional field inside a description is a schema change for that `kind`; the Viewer

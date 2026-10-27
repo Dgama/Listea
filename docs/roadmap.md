@@ -2,8 +2,9 @@
 
 > **Nothing on this page is implemented.** It describes where Listea is going and why. For what
 > Listea does today, see [the documentation](README.md). For the nearer v0.8.x framework round, see
-> [Architecture → Framework evolution](ARCHITECTURE.md#framework-evolution--v08x-planned) and the
-> [v0.8 draft](iterations/v0.8.md); this page keeps the longer product direction.
+> [Architecture → Framework evolution](ARCHITECTURE.md#framework-evolution--v08x-planned), the
+> [v0.8 draft](iterations/v0.8.md) and the design-only [v0.8.4](iterations/v0.8.4.md); this page
+> keeps the longer product direction.
 
 - [The current system](#the-current-system)
 - [Architectural direction](#architectural-direction)
@@ -140,6 +141,11 @@ builders and the export payload, and it is the one that makes the other two wort
 - **v0.8.x (planned)** is the first move on the content half: an optional Task payload, a directory
   Package protocol, Package-scoped Resources, a typed page model, and one submission path shared
   with media. See [Architecture → Framework evolution](ARCHITECTURE.md#framework-evolution--v08x-planned).
+- **v0.8.4 (design only, 2026-10-27)** takes that content half one step further: a Task becomes
+  1..N **TaskParts**, so one sitting can hold several questions; a **Section** is a declared tag and
+  the taker's **Composition** decides the grouping. The protocol gains `files`, Sections and
+  `structured`; schema 33 and export v6 are planned. No code has changed. See
+  [v0.8.4](iterations/v0.8.4.md).
 - What is still missing after that is the product layer: vocabulary and primary-questionnaire
   experiences, which are v0.9.x. `AssetKind.OTHER` remains the member for content no viewer claims;
   it is not a structured payload kind.
