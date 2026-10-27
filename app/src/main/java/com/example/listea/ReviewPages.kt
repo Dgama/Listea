@@ -105,6 +105,18 @@ internal data class TaskPageState(
     fun pageOfAssetIndex(assetIndex: Int): Int =
         pages.indexOfFirst { it is ReviewPage.Asset && it.assetIndex == assetIndex }
             .takeIf { it >= 0 } ?: pageIndex
+
+    /**
+     * Whether [AssetRun]'s own step may move off the current page in [forward]'s direction.
+     *
+     * The run counts Assets and [pageOfAssetIndex] resolves only Asset pages, so its step is
+     * meaningful only when the neighbouring page is another Asset. Across a part's Content page,
+     * onto the Add-on, or off the end of the list the run must stay put — there is no Asset index
+     * to land on — and the caller turns the page by page index instead. Derived here, beside the
+     * list, so the three surfaces that draw a Task cannot disagree about where the run ends.
+     */
+    fun assetRunSteps(forward: Boolean): Boolean =
+        pages.getOrNull(pageStep(pageCount, pageIndex, forward) ?: -1) is ReviewPage.Asset
 }
 
 /**

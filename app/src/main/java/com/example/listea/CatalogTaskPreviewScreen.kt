@@ -292,24 +292,31 @@ fun CatalogTaskPreviewScreen(
         ),
         chromeVisible = chromeVisible,
         media = {
+            // The Task's edge, read once. A swipe moves to the next page of this Task when the
+            // unified page list has one, and only outside the Task does it move the queue — the
+            // add-on is the last page, not a queue step.
+            val nextPage = pageStep(pageCount, currentPage, forward = true)
+            val previousPage = pageStep(pageCount, currentPage, forward = false)
             if (onContentPage) {
                 // The same page turn the List's item viewer gives a Prompt: read-only, so a swipe
                 // decides nothing. Inside the Task it turns to the next page — the first file, or
                 // the add-on after the last one; at the Task's edge it moves to the next Task.
                 ContentPageSwipe(
-                    canSwipeForward = currentPage < pageCount - 1 ||
-                        taskIndex < tasks.lastIndex,
-                    canSwipeBack = taskIndex > 0,
+                    canSwipeForward = nextPage != null || taskIndex < tasks.lastIndex,
+                    canSwipeBack = previousPage != null || taskIndex > 0,
                     onSwipeForward = {
-                        val next = pageStep(pageCount, currentPage, forward = true)
-                        if (next != null) {
-                            pageIndex = next
+                        if (nextPage != null) {
+                            pageIndex = nextPage
                         } else if (taskIndex < tasks.lastIndex) {
                             currentTaskId = tasks[taskIndex + 1].taskId
                         }
                     },
                     onSwipeBack = {
-                        if (taskIndex > 0) currentTaskId = tasks[taskIndex - 1].taskId
+                        if (previousPage != null) {
+                            pageIndex = previousPage
+                        } else if (taskIndex > 0) {
+                            currentTaskId = tasks[taskIndex - 1].taskId
+                        }
                     },
                     onTap = { chromeVisible = !chromeVisible },
                     modifier = Modifier.fillMaxSize()
@@ -337,12 +344,11 @@ fun CatalogTaskPreviewScreen(
                     }
                 }
             } else {
-                // Back off the first file of a part returns to that part's Content page; the page
-                // list is where the answer lives now that a Task may present more than one Prompt.
-                val backToContentPage = (pageState.current as? ReviewPage.Asset)?.let { asset ->
-                    (pageState.pages.getOrNull(currentPage - 1) as? ReviewPage.Content)?.partKey ==
-                        asset.partKey
-                } == true
+                // [AssetRun] counts Assets; this Task's page list also counts Content pages and the
+                // add-on. At the run's edge the neighbour is therefore sometimes another page of
+                // this Task rather than another Asset: the leaf callbacks move by page index there,
+                // and the run steps by Asset index only when that neighbour really is an Asset —
+                // otherwise the index names no Asset and the swipe lands nowhere.
                 AssetRun(
                     item = item,
                     selectedIndex = currentAsset,
@@ -354,17 +360,23 @@ fun CatalogTaskPreviewScreen(
                     // the *level* it simply stops: there is no Task to leave for and nothing to
                     // complete, because nothing here is being decided.
                     //
-                    // Back off the **first page of a part** goes to that part's Content page. A
-                    // Prompt's pages are Content first, then its files, and skipping the Content
-                    // page to land on the previous Task made the back gesture jump two steps. The
-                    // forward direction already stepped page → next Task only at the last page, so
-                    // this makes the two ends symmetric.
-                    canLeaveForward = taskIndex < tasks.lastIndex,
-                    canLeaveBack = backToContentPage || taskIndex > 0,
-                    onLeaveForward = { currentTaskId = tasks[taskIndex + 1].taskId },
+                    // Inside the Task, a Content page between two parts' Assets and the add-on
+                    // after the last Asset are both page turns; the back gesture from a part's
+                    // first file returns to that part's Content page rather than skipping it.
+                    canLeaveForward = nextPage != null || taskIndex < tasks.lastIndex,
+                    canLeaveBack = previousPage != null || taskIndex > 0,
+                    assetStepForward = pageState.assetRunSteps(forward = true),
+                    assetStepBack = pageState.assetRunSteps(forward = false),
+                    onLeaveForward = {
+                        if (nextPage != null) {
+                            pageIndex = nextPage
+                        } else if (taskIndex < tasks.lastIndex) {
+                            currentTaskId = tasks[taskIndex + 1].taskId
+                        }
+                    },
                     onLeaveBack = {
-                        if (backToContentPage) {
-                            pageIndex = currentPage - 1
+                        if (previousPage != null) {
+                            pageIndex = previousPage
                         } else if (taskIndex > 0) {
                             currentTaskId = tasks[taskIndex - 1].taskId
                         }

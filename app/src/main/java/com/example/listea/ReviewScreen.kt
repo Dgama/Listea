@@ -1426,13 +1426,13 @@ fun ReviewSession(
                 }
             }
         } else {
-        // [AssetRun] counts Assets, and its add-on sentinel is the Asset count. The unified page
-        // list counts a Content page as a page of its own, so leaving backwards from the first
-        // file of a part returns to *that part's* Content page — the page immediately before it —
-        // rather than assuming there is exactly one Content page and it is index 0.
-        val backToContentPage = (currentModel as? ReviewPage.Asset)?.let { asset ->
-            (pages.getOrNull(currentPage - 1) as? ReviewPage.Content)?.partKey == asset.partKey
-        } == true
+        // [AssetRun] counts Assets, while the Task's unified page list also counts each part's
+        // Content page and the Add-on. At the run's edge, the neighbour in that list is therefore
+        // not always another Asset: when it is a page of this Task, the swipe is an ordinary page
+        // turn, not a leave, and the run must not step by Asset index — that index would name no
+        // Asset (`pageOfAssetIndex` falls back to the current page) and the swipe would be lost.
+        val nextPage = pageStep(pageCount, currentPage, forward = true)
+        val previousPage = pageStep(pageCount, currentPage, forward = false)
         // This visit's judgment has already been written, and the reviewer is on the add-on page it
         // was sent to. Forward from here is a queue move, not a second commit — for a template that
         // accepts events there is nothing left to report, so committing again would be refused and
@@ -1450,17 +1450,25 @@ fun ReviewSession(
             // the run and not the run itself. A template that accepts viewer events is the second
             // closed gate: with no event reported, forward is nowhere to go either — and the
             // gesture has to know that before it slides, or a leave the dispatch refuses parks
-            // the card off-screen as a black surface.
-            canLeaveForward = passedCommit ||
+            // the card off-screen as a black surface. Neither gate applies to a swipe that turns
+            // to another page of this Task: reaching the next question or the Add-on is not a
+            // judgment.
+            canLeaveForward = nextPage != null ||
+                passedCommit ||
                 forwardIsNavigation ||
                 canLeaveTaskForward(
                     reviewBlocked = item.reviewBlocked != null,
                     acceptsEvents = definitionAcceptsEvents,
                     hasPendingEvent = sample != null
                 ),
-            // Back off the first file of a Prompt Task returns to its Content page — a page turn,
-            // not a queue step. Elsewhere it steps the queue, exactly as before.
-            canLeaveBack = backToContentPage || navigation.canGoPrevious,
+            // Back off the first file of a part returns to that part's Content page, and back off
+            // the first Content page steps the queue — both are page turns, not judgments.
+            canLeaveBack = previousPage != null || navigation.canGoPrevious,
+            // The run may step by Asset index only while the neighbouring unified page really is
+            // an Asset. Across a Content page or onto the Add-on the step belongs to the leaves
+            // below, which move by page index.
+            assetStepForward = pageState.assetRunSteps(forward = true),
+            assetStepBack = pageState.assetRunSteps(forward = false),
             pdfTools = pdfTools,
             pdfMarks = pdfMarks,
             onPdfCreateMark = onCreatePdfMark,
@@ -1472,16 +1480,17 @@ fun ReviewSession(
             onPdfRelocateMark = { id, anchor -> viewModel.relocateMark(id, anchor) },
             onPdfMarksResolved = { pdfMarkInfo = it },
             onLeaveForward = {
-                if (passedCommit || forwardIsNavigation) {
-                    advanceToNextTask()
-                } else {
-                    dispatch(TaskAction.CompleteTask)
+                when {
+                    // Another page of this Task: the next part's question, or the Add-on.
+                    nextPage != null -> pageIndex = nextPage
+                    passedCommit || forwardIsNavigation -> advanceToNextTask()
+                    else -> dispatch(TaskAction.CompleteTask)
                 }
             },
-            // Backwards is never a judgment: it either returns to this Task's Content page or
+            // Backwards is never a judgment: it either turns to another page of this Task or
             // steps the queue, and changes nothing about the Task that was left behind.
             onLeaveBack = {
-                if (backToContentPage) pageIndex = currentPage - 1
+                if (previousPage != null) pageIndex = previousPage
                 else dispatch(TaskAction.PreviousTask)
             },
             onSelectAsset = { pageIndex = pageState.pageOfAssetIndex(it) },
@@ -1624,6 +1633,18 @@ fun AssetRun(
      * leaving the Task — which is the whole of where an add-on sits.
      */
     addOnPage: (@Composable () -> Unit)? = null,
+    /**
+     * Whether a swipe forward/back inside the run may step to the next/previous Asset.
+     *
+     * The run counts Assets, but a Task over several prompts also has Content pages between their
+     * Assets. When the neighbouring page of the unified page list is a Content page (or the
+     * Add-on), the step belongs to the caller: the run sets its own step to null and uses
+     * [canLeaveForward]/[canLeaveBack] instead, so the swipe lands on that page rather than on an
+     * Asset index the page list does not hold. Both default to true, which is the single-part
+     * shape every pre-v0.8.4 Task has.
+     */
+    assetStepForward: Boolean = true,
+    assetStepBack: Boolean = true,
     pdfTools: List<TemplateButton> = emptyList(),
     pdfMarks: List<AssetMark> = emptyList(),
     onPdfCreateMark: ((TemplateButton, String?, QuoteAnchor) -> Unit)? = null,
@@ -1660,8 +1681,8 @@ fun AssetRun(
     // the three cannot disagree about there being a page to move to. Pages, not Assets: the
     // questionnaire is the last page, and stepping onto it from the last file is an interior move
     // that leaves nothing.
-    val forward = pageStep(pageCount, selectedIndex, forward = true)
-    val back = pageStep(pageCount, selectedIndex, forward = false)
+    val forward = if (assetStepForward) pageStep(pageCount, selectedIndex, forward = true) else null
+    val back = if (assetStepBack) pageStep(pageCount, selectedIndex, forward = false) else null
 
     SwipeCard(
         // The page and not just the Task: the key is what recentres the card and drops the zoom,
