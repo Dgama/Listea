@@ -307,6 +307,7 @@ private fun reviewItemFor(
     // And the Prompt envelope, for the same reason: a queue item that dropped it would present a
     // Package Prompt as a Task with no pages at all.
     packageKey = row.packageKey,
+    packageTitle = row.packageTitle,
     promptKey = row.promptKey,
     payloadKind = row.payloadKind,
     payloadSchema = row.payloadSchema,

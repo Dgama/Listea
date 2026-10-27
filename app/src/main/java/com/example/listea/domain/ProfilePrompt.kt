@@ -18,11 +18,11 @@ package com.example.listea.domain
  * for reading — `age`, `bio`, `name` would put the age above the name.
  */
 data class ProfilePrompt(
-    val stem: String,
+    override val stem: String,
     val fields: List<ProfileField>,
     val photoResource: String?,
-    val options: List<PromptOption>
-)
+    override val options: List<PromptOption>
+) : PromptContent
 
 data class ProfileField(val label: String, val value: String)
 
@@ -68,18 +68,9 @@ fun parseProfilePrompt(
         value.asStringOrNull()?.takeIf { PackageProtocol.isKey(it) } ?: return null
     }
 
-    val optionValues = root["options"]?.asArrOrNull()?.items ?: return null
-    if (optionValues.isEmpty() || optionValues.size > 100) return null
-    val options = optionValues.map { value ->
-        val option = value.asObjOrNull() ?: return null
-        if (option.keys != setOf("id", "label")) return null
-        val id = option["id"]?.asStringOrNull()?.takeIf { PackageProtocol.isKey(it) } ?: return null
-        val label = option["label"]?.asStringOrNull()
-            ?.takeIf { it.isNotEmpty() && it.length <= 200 }
-            ?: return null
-        PromptOption(id, label)
-    }
-    if (options.map { it.id }.toSet().size != options.size) return null
+    // The option grammar is shared with every other structured Viewer, so the id/label rules and
+    // the declared order have one reader rather than one per card.
+    val options = parsePromptOptions(root["options"]) ?: return null
 
     return ProfilePrompt(stem = stem, fields = fields, photoResource = photo, options = options)
 }
@@ -95,14 +86,17 @@ fun parseProfilePrompt(
  * more than one Viewer, so the table is a list to search rather than a lookup to match.
  *
  * [ref] is the identity an authored template names, not a renderer selector. The renderer is chosen
- * from the payload; the reference records what the template was written against.
+ * from the payload; the reference records what the template was written against. [parse] is that
+ * renderer's half of the contract: the viewer owns what its body means, so the compatibility table
+ * answers both "can this build read the envelope?" and "what does it read as?" in one place.
  */
 data class ViewerCapability(
     val ref: TemplateVersionRef,
     val kind: String,
     val schema: Int,
     val responses: Set<ResponseContract>,
-    val intents: Set<ViewerEventType>
+    val intents: Set<ViewerEventType>,
+    val parse: (String) -> PromptContent?
 )
 
 object Viewers {
@@ -113,10 +107,21 @@ object Viewers {
         kind = "profile",
         schema = 1,
         responses = setOf(ResponseContract.SINGLE),
-        intents = setOf(ViewerEventType.CHOICE_SELECT)
+        intents = setOf(ViewerEventType.CHOICE_SELECT),
+        parse = { payload -> parseProfilePrompt(payload) }
     )
 
-    val all: List<ViewerCapability> = listOf(Profile)
+    /** The vocabulary drill: a word card, an optional pronunciation Resource, one choice. */
+    val Vocabulary = ViewerCapability(
+        ref = TemplateVersionRef(TemplateId("builtin.viewer.vocabulary"), 1),
+        kind = "vocabulary",
+        schema = 1,
+        responses = setOf(ResponseContract.SINGLE),
+        intents = setOf(ViewerEventType.CHOICE_SELECT),
+        parse = { payload -> parseVocabularyPrompt(payload) }
+    )
+
+    val all: List<ViewerCapability> = listOf(Profile, Vocabulary)
 
     /** The Viewer that can draw this envelope, or null when none in this build can. */
     fun forPayload(kind: String?, schema: Int?): ViewerCapability? =

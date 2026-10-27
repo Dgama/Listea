@@ -96,6 +96,15 @@ fun SwipeCard(
     // recomposition, and re-keying pointerInput on it would tear the gesture down mid-touch.
     val currentOnTap by rememberUpdatedState(onTap)
     val currentOnLongPress by rememberUpdatedState(onLongPress)
+    // The same rule for the swipe boundary and its callbacks. They used to be pointerInput keys,
+    // which restarted the detector whenever they changed and left it holding the versions from
+    // whenever it last started — in a run of seven Tasks the flags become `(true, true)` and then
+    // stop changing, so later swipes replayed the same Task's callbacks. The detector now restarts
+    // only when [key] changes (a new item is on screen) and reads these live.
+    val currentCanForward by rememberUpdatedState(canSwipeForward)
+    val currentCanBack by rememberUpdatedState(canSwipeBack)
+    val currentOnSwipeForward by rememberUpdatedState(onSwipeForward)
+    val currentOnSwipeBack by rememberUpdatedState(onSwipeBack)
 
     BoxWithConstraints(
         modifier = modifier.clipToBounds(),
@@ -103,6 +112,10 @@ fun SwipeCard(
     ) {
         val widthPx = constraints.maxWidth.toFloat()
         val thresholdPx = with(LocalDensity.current) { SWIPE_THRESHOLD.toPx() }
+        // Both are measured here and can change while the detector is installed (a rotation, a
+        // split-screen resize), so the gesture reads them live for the same reason as the flags.
+        val currentWidth by rememberUpdatedState(widthPx)
+        val currentThreshold by rememberUpdatedState(thresholdPx)
 
         Box(
             modifier = Modifier
@@ -117,7 +130,7 @@ fun SwipeCard(
                         onTap = { currentOnTap?.invoke() }
                     )
                 }
-                .pointerInput(key, canSwipeForward, canSwipeBack) {
+                .pointerInput(key) {
                     detectZoomPanGestures(
                         onGesture = { centroid, pan, zoomChange, pointers ->
                             val leftover = zoom.onGesture(centroid, pan, zoomChange)
@@ -126,21 +139,27 @@ fun SwipeCard(
                             // with the part of itself the picture had no room for.
                             if (pointers == 1 && leftover != 0f) {
                                 scope.launch {
-                                    offsetX.snapTo(resisted(offsetX.value + leftover, canSwipeForward, canSwipeBack))
+                                    offsetX.snapTo(
+                                        resisted(
+                                            offsetX.value + leftover,
+                                            currentCanForward,
+                                            currentCanBack
+                                        )
+                                    )
                                 }
                             }
                         },
                         onGestureEnd = {
                             scope.launch {
                                 when {
-                                    canSwipeForward && offsetX.value < -thresholdPx -> {
-                                        offsetX.animateTo(-widthPx, tween(180))
-                                        onSwipeForward()
+                                    currentCanForward && offsetX.value < -currentThreshold -> {
+                                        offsetX.animateTo(-currentWidth, tween(180))
+                                        currentOnSwipeForward()
                                     }
 
-                                    canSwipeBack && offsetX.value > thresholdPx -> {
-                                        offsetX.animateTo(widthPx, tween(180))
-                                        onSwipeBack()
+                                    currentCanBack && offsetX.value > currentThreshold -> {
+                                        offsetX.animateTo(currentWidth, tween(180))
+                                        currentOnSwipeBack()
                                     }
 
                                     else -> offsetX.animateTo(0f, tween(180))

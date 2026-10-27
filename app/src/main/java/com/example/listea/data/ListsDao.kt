@@ -188,11 +188,17 @@ abstract class ListsDao {
         """
         SELECT ti.taskId AS taskId, ti.assetControls AS assetControls, ti.addOn AS addOn,
                ti.taskReview AS taskReview, ppt.packageKey AS packageKey,
-               ppt.promptKey AS promptKey, tp.kind AS payloadKind,
-               tp.schemaVersion AS payloadSchema, tp.revision AS payloadRevision
+               pc.title AS packageTitle, ppt.promptKey AS promptKey,
+               tp.kind AS payloadKind, tp.schemaVersion AS payloadSchema,
+               tp.revision AS payloadRevision
         FROM task_imports ti
         JOIN list_items i ON i.taskId = ti.taskId
         LEFT JOIN package_prompt_tasks ppt ON ppt.taskId = ti.taskId
+        -- The checkpoint is keyed by (sourceId, packageKey), so this join is one row and the
+        -- title is the same one the Catalog names the Package scope by. Only the title is read:
+        -- the Task's paths stay the synthetic catalog key.
+        LEFT JOIN package_checkpoints pc
+               ON pc.sourceId = ti.sourceId AND pc.packageKey = ppt.packageKey
         LEFT JOIN task_payloads tp ON tp.taskId = ti.taskId
         WHERE i.listId = :listId
         """
@@ -253,11 +259,17 @@ abstract class ListsDao {
         """
         SELECT ti.taskId AS taskId, ti.assetControls AS assetControls, ti.addOn AS addOn,
                ti.taskReview AS taskReview, ppt.packageKey AS packageKey,
-               ppt.promptKey AS promptKey, tp.kind AS payloadKind,
-               tp.schemaVersion AS payloadSchema, tp.revision AS payloadRevision
+               pc.title AS packageTitle, ppt.promptKey AS promptKey,
+               tp.kind AS payloadKind, tp.schemaVersion AS payloadSchema,
+               tp.revision AS payloadRevision
         FROM task_imports ti
         JOIN list_items i ON i.taskId = ti.taskId
         LEFT JOIN package_prompt_tasks ppt ON ppt.taskId = ti.taskId
+        -- The checkpoint is keyed by (sourceId, packageKey), so this join is one row and the
+        -- title is the same one the Catalog names the Package scope by. Only the title is read:
+        -- the Task's paths stay the synthetic catalog key.
+        LEFT JOIN package_checkpoints pc
+               ON pc.sourceId = ti.sourceId AND pc.packageKey = ppt.packageKey
         LEFT JOIN task_payloads tp ON tp.taskId = ti.taskId
         WHERE i.listId = :listId
         """
@@ -754,11 +766,19 @@ abstract class ListsDao {
                 sourceRelativePath = relativePath
             )
         )
+        // The import skips files no viewer can open (v0.8.2f), so a scanned file with no Task is
+        // the ordinary outcome for one of those and must not become an item. A file this app *can*
+        // show still has to have produced a Task, and failing that is a bug rather than a policy.
+        // Sort orders keep the scan's indices and so develop gaps where files were skipped; the
+        // relative order, which is what a List reads by, is unchanged.
         insertItems(
-            files.mapIndexed { index, file ->
+            files.mapIndexedNotNull { index, file ->
                 val groupPath = rootRelativePathOf(relativePath, file.relativePath)
                 val taskId = taskIdsByGroup[groupPath]
-                    ?: throw IllegalStateException("no Task for $groupPath after import")
+                if (taskId == null) {
+                    if (!assetViewerAvailable(file.name)) return@mapIndexedNotNull null
+                    throw IllegalStateException("no Task for $groupPath after import")
+                }
                 listItemForTask(taskId, listId, index, now, relativePath)
             }
         )
@@ -2585,6 +2605,7 @@ abstract class ListsDao {
                s.lastImportAt AS lastImportAt,
                s.lastImportStatus AS lastImportStatus,
                s.assetControls AS assetControls,
+               s.addOn AS addOn,
                COALESCE(MAX(ti.assetControls), '') AS taskAssetControls,
                COUNT(ti.taskId) AS taskCount
         FROM sources s
@@ -2613,6 +2634,7 @@ abstract class ListsDao {
                s.lastImportAt AS lastImportAt,
                s.lastImportStatus AS lastImportStatus,
                s.assetControls AS assetControls,
+               s.addOn AS addOn,
                COALESCE(MAX(ti.assetControls), '') AS taskAssetControls,
                COUNT(ti.taskId) AS taskCount
         FROM sources s
@@ -2789,6 +2811,42 @@ abstract class ListsDao {
 
     @Query("UPDATE sources SET followUpstream = :follow WHERE id = :id")
     abstract suspend fun setFollowUpstream(id: String, follow: Boolean)
+
+    /**
+     * A Todo's display name, changed from its card.
+     *
+     * The name is genuinely the Todo's own: an import writes it as a default at Create time (the
+     * folder's name, usually), but it stops being the folder's the moment a user renames it, and
+     * nothing else reads it back from the filesystem. Refreshes keep the stored row's name — see
+     * the run paths in [ListsViewModel] — so a rename survives every later import.
+     */
+    @Query("UPDATE sources SET displayName = :displayName WHERE id = :id")
+    abstract suspend fun setSourceDisplayName(id: String, displayName: String)
+
+    /**
+     * A Todo's add-on, changed from its card, stamped onto every Task it has imported.
+     *
+     * Two statements because the column is copied per Task: [task_imports.addOn] is what a Task
+     * actually opens with, and leaving it behind would make the card and the Tasks disagree until
+     * the next run. One transaction because a Source claiming an add-on its Tasks do not hold is
+     * precisely the drift the card is meant to make impossible.
+     *
+     * Answers already recorded for the old add-on are **left in place, not deleted**. They are
+     * filtered out on read when the lineage no longer matches — the resolver asks by add-on
+     * identity — so a user who switches back finds them again, and one who does not is never
+     * shown an answer to a question the Task no longer asks.
+     */
+    @Transaction
+    open suspend fun setSourceAddOn(id: String, addOn: String) {
+        updateSourceAddOn(id, addOn)
+        restampTaskImportsAddOn(id, addOn)
+    }
+
+    @Query("UPDATE sources SET addOn = :addOn WHERE id = :id")
+    protected abstract suspend fun updateSourceAddOn(id: String, addOn: String)
+
+    @Query("UPDATE task_imports SET addOn = :addOn WHERE sourceId = :sourceId")
+    protected abstract suspend fun restampTaskImportsAddOn(sourceId: String, addOn: String)
 
     /**
      * The address a Todo posts to, and whether it was copied from Settings' default or typed.

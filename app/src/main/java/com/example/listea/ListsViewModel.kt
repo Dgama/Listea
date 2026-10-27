@@ -104,7 +104,6 @@ import com.example.listea.domain.ViewerEventType
 import com.example.listea.domain.CommitPolicy
 import com.example.listea.domain.TaskReviewDefinition
 import com.example.listea.domain.Viewers
-import com.example.listea.domain.parseProfilePrompt
 import java.util.UUID
 
 /** What the Folder screen should be showing about a pending "create list from folder" action. */
@@ -1053,6 +1052,7 @@ class ListsViewModel @JvmOverloads constructor(
                             addOn = addOnByTask[item.taskId].orEmpty(),
                             taskReview = reviewByTask[item.taskId].orEmpty(),
                             packageKey = control?.packageKey,
+                            packageTitle = control?.packageTitle,
                             promptKey = control?.promptKey,
                             payloadKind = control?.payloadKind,
                             payloadSchema = control?.payloadSchema,
@@ -1772,9 +1772,11 @@ class ListsViewModel @JvmOverloads constructor(
 
         // The option and its label snapshot must be declared by the body that is stored now. The
         // label is compared as well as the id: a Package's revision may have renamed a choice, and
-        // an answer recorded with the old label is not an answer to this Prompt.
-        val prompt = parseProfilePrompt(payload.payload) ?: return false
-        if (prompt.options.none { it.id == choice.optionId && it.label == choice.label }) return false
+        // an answer recorded with the old label is not an answer to this Prompt. The capability's
+        // own parser answers this, so a vocabulary choice is held to exactly the same rule as a
+        // profile one and the write boundary learns no Viewer.
+        val content = capability.parse(payload.payload) ?: return false
+        if (content.options.none { it.id == choice.optionId && it.label == choice.label }) return false
 
         // Required content that is not there cannot support a judgment.
         if (dao.taskResourceViews(item.taskId).any { it.required && it.missing }) return false
@@ -2208,12 +2210,17 @@ class ListsViewModel @JvmOverloads constructor(
         // A refresh adopts the offered version of every template it still holds — see
         // [upgradeAttachments] — while Create and an upstream sync submit exactly what they were
         // given. Resolved before the encode so the Todo's row, the run and the write-back all get
-        // one answer.
-        val attachments = if (options.upgradeTemplates) {
-            upgradeAttachments(options.templates, attachableTemplates())
-        } else {
-            options.templates
-        }
+        // one answer. A Package run then drops file templates entirely: its Tasks are Prompts
+        // answered in a Viewer, so there is no file for a template to govern — see
+        // [fileTemplatesFor], which is the same rule the dialog draws.
+        val attachments = fileTemplatesFor(
+            importer,
+            if (options.upgradeTemplates) {
+                upgradeAttachments(options.templates, attachableTemplates())
+            } else {
+                options.templates
+            }
+        )
 
         // Encoded once, here, and the same string goes to all three writes below — the Todo's row,
         // the run, and the Todo's row again. The dialog collected *references*; what every column
@@ -3182,6 +3189,32 @@ class ListsViewModel @JvmOverloads constructor(
 
     fun setTodoKeepStateOnDelete(sourceId: String, keep: Boolean) = launchDb {
         dao.setKeepStateOnDelete(sourceId, keep)
+    }
+
+    /**
+     * Renames a Todo from its card.
+     *
+     * Blank input is ignored rather than clearing the name, the same rule List titles use: a Todo
+     * with no name would be unlabelled everywhere it is referenced. This changes only the Todo's
+     * label — its folder, its Tasks' `groupPath`s, and the next run's default name are all
+     * untouched, because those name where the material came from rather than what the user calls
+     * this Todo.
+     */
+    fun renameTodo(sourceId: String, title: String) = edit(title) { clean ->
+        dao.setSourceDisplayName(sourceId, clean)
+    }
+
+    /**
+     * Sets, changes, or clears a Todo's add-on from its card.
+     *
+     * [addOn] is an encoded attachment, empty for *none*. The DAO writes it to the Source and to
+     * every imported Task in one transaction, so the card and the Tasks cannot disagree; answers
+     * recorded under a previous add-on are kept but hidden by the resolver's lineage check, which
+     * is what makes switching back a recovery rather than a re-answer. Nothing is imported here:
+     * the add-on is stamped onto Tasks that already exist, and the next run stamps its own.
+     */
+    fun setTodoAddOn(sourceId: String, addOn: String) = launchDb {
+        dao.setSourceAddOn(sourceId, addOn)
     }
 
     fun setDefaultContentPolicy(policy: ContentPolicy) = launchDb {

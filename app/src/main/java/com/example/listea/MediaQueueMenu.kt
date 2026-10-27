@@ -454,8 +454,7 @@ internal fun reviewQueueEntries(
     items: List<ReviewItem>,
     pagesOf: (ReviewItem) -> List<MediaQueueEntry>
 ): List<MediaQueueEntry> = items.map { item ->
-    val detail = listOf(item.relativePath, item.rootRelativePath)
-        .firstOrNull { !it.isNullOrBlank() && it != item.title }
+    val detail = item.provenance()
     MediaQueueEntry(
         label = item.title,
         detail = detail,

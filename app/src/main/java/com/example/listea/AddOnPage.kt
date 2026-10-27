@@ -102,6 +102,70 @@ fun AddOnPage(
 }
 
 /**
+ * The Task's questionnaire as a *look*: the same page Review draws, with nothing to press.
+ *
+ * The read-only viewing surfaces — the Todo preview and the List item viewer — show a Task's pages
+ * exactly as Review does, add-on included, because a Task is one shape wherever it is browsed. What
+ * they must not do is write: those surfaces have never had a control that changes state, and a
+ * questionnaire you could answer from a gallery would be one. So this draws every question in the
+ * attached version's own order with the answer on record, or *Not answered*, and offers no chip, no
+ * field and no callback.
+ *
+ * Only questions the attached version still asks are drawn, exactly as [AddOnPage] draws them.
+ * Answers to removed questions are kept, not shown here; Info is where those are explained.
+ */
+@Composable
+fun AddOnAnswersPage(
+    addOn: StoredAddOnVersion,
+    answers: List<AddOnAnswer>,
+    modifier: Modifier = Modifier
+) {
+    val resolved = remember(addOn, answers) { resolveAddOnAnswers(addOn, answers) }
+    val byQuestion = remember(resolved) { resolved.visible.associateBy { it.question.id } }
+
+    Surface(modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(
+                    start = ListeaDimens.PagePadding,
+                    end = ListeaDimens.PagePadding,
+                    top = ListeaDimens.SectionGap,
+                    bottom = ListeaDimens.SectionGap
+                ),
+            verticalArrangement = Arrangement.spacedBy(ListeaDimens.SectionGap)
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(ListeaDimens.CompactGap)) {
+                Text(addOn.name, style = MaterialTheme.typography.titleLarge)
+                Text(
+                    "Read-only · answers are written while reviewing",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            addOn.questions.forEach { question ->
+                val value = byQuestion[question.id]?.answer?.value
+                Column(verticalArrangement = Arrangement.spacedBy(ListeaDimens.RowGap)) {
+                    Text(question.prompt, style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        if (value == null) "Not answered" else addOnAnswerText(value),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (value == null) {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        }
+                    )
+                    HorizontalDivider(Modifier.padding(top = ListeaDimens.RowGap))
+                }
+            }
+        }
+    }
+}
+
+/**
  * One question and its controls.
  *
  * Keyed by task and question id at the caller: paging away and back discards the page's composition,

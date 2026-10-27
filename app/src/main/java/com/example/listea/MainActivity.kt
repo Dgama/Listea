@@ -1538,7 +1538,11 @@ internal fun importRunIdentity(request: ImportFolderRequest.Confirm): String {
         seed.followUpstream,
         seed.keepStateOnDelete,
         encodeTemplateAttachments(seed.templates),
-        encodeTemplateAttachments(seed.taskReview?.let { listOf(it) } ?: emptyList()),
+        seed.upgradeTemplates,
+        encodeAddOnAttachment(seed.addOn),
+        encodeTemplateAttachments(listOfNotNull(seed.taskReview)),
+        seed.upgradeAddOn,
+        seed.upgradeTaskReview,
         request.histories.joinToString(",") { it.sourceId }
     ).joinToString("\u0000")
 }
@@ -1675,19 +1679,28 @@ private fun ImportConfirmDialogBody(
         decodeTemplateAttachments(reviewAttachment).firstOrNull()
     }
 
-    // Whether the review radio has been answered by hand. Until it is, the default follows the
-    // grouping: a Package's Prompts are answered in a Viewer, so its matching pen is the headless
-    // single-choice template; a folder of files keeps the file-decisions template. Once the user
-    // picks a row, this stays true and no later change of grouping moves their answer.
+    // Whether the headless rows have been answered by hand. Until they have, the default follows
+    // the grouping: a Package's Prompts are answered in a Viewer, so its matching pen is the
+    // headless single-choice template; a folder of files keeps the file-decisions template. Once
+    // the user picks or clears a row, this stays true and no later change of grouping moves their
+    // answer — which is what lets a deliberately cleared row stay cleared.
     var reviewTouched by rememberSaveable(runKey) { mutableStateOf(false) }
 
     /**
-     * One Task Review chosen. A radio group with no clear gesture, because choosing the selected
-     * row again is *the same answer twice* rather than *none* — every Task is judged by something.
+     * One headless template chosen, or the chosen one chosen again to clear it.
+     *
+     * **The clear gesture is how *File Decisions* is reached.** A run with no headless template
+     * records the files' own page decisions — the built-in's job — so clearing is not *no judgment*,
+     * it is the ordinary judgment for a Todo whose Tasks are their files. Since v0.8.2f the
+     * headless rows are peers of the file templates in one list, and every one of them can be
+     * cancelled, which is what makes a Package of pictures importable without attaching the pen a
+     * Prompt would use.
      */
     fun setReview(choice: StoredTemplateVersion) {
         reviewTouched = true
-        reviewAttachment = encodeTemplateAttachments(listOf(choice.ref))
+        reviewAttachment =
+            if (attachedReview?.templateId == choice.ref.templateId) "" else
+                encodeTemplateAttachments(listOf(choice.ref))
     }
 
     /**
@@ -1727,8 +1740,19 @@ private fun ImportConfirmDialogBody(
     } else {
         null
     }
+    // The file templates this dialog actually offers and records. A Package's Tasks are Prompts
+    // answered in a Viewer, so file templates are neither shown nor written — see
+    // [fileTemplatesFor] — and a stale attachment on an older Todo must not produce a notice about
+    // a write this run will not make.
+    val fileChoices = fileTemplatesFor(importer, request.templates)
+    val attachedFileTemplates = fileChoices.count { choice ->
+        attached.any { it.templateId == choice.ref.templateId }
+    }
     val versionNotice = if (request.refresh) {
-        refreshVersionNotice(attached, request.templates)
+        refreshVersionNotice(
+            attached.filter { ref -> fileChoices.any { it.ref.templateId == ref.templateId } },
+            request.templates
+        )
     } else {
         null
     }
@@ -1747,17 +1771,14 @@ private fun ImportConfirmDialogBody(
     /**
      * Confirm, or open the section that is holding it back.
      *
-     * The two gates used to be expressed as a disabled button. They are still gates — nothing is
-     * submitted with no template, or with a webhook method and no usable address — but a disabled
-     * button cannot say *why*, and its reason may live in a section the user folded shut. So the
-     * button presses, the offending section opens, and the error is on screen beside the control
-     * that can fix it.
+     * **One gate, not two.** A webhook method with no usable address still opens Sync and shows
+     * why, because a disabled button cannot say it and the reason may sit in a folded section.
+     * Attaching a template no longer gates anything: a run with no file template records the
+     * files' own decisions, and a Package run has no files to govern at all — its Tasks are
+     * Prompts answered in a Viewer. Requiring `Media Asset Control` there was a category error,
+     * and v0.8.2f removed it.
      */
     fun confirm() {
-        if (attached.isEmpty()) {
-            reviewOpen = true
-            return
-        }
         if (addressProblem != null) {
             syncOpen = true
             return
@@ -1776,9 +1797,11 @@ private fun ImportConfirmDialogBody(
                 // Not part of the gate: an add-on is optional, so an empty page is a valid run.
                 addOn = attachedAddOn,
                 upgradeAddOn = seed.upgradeAddOn,
-                // The review the picker shows. A dialog whose offered list was somehow empty
-                // still passes the seeded reference, so a run never loses the built-in.
-                taskReview = attachedReview ?: seed.taskReview,
+                // Whatever the picker shows, **including nothing**. Null is not "keep what the row
+                // holds": it means the run falls back to the built-in file-decisions template,
+                // which is exactly how clearing the selected headless row takes effect. Passing
+                // the seed here would make a cleared row impossible to keep cleared.
+                taskReview = attachedReview,
                 upgradeTaskReview = seed.upgradeTaskReview,
                 followUpstream = followUpstream,
                 keepStateOnDelete = keepStateOnDelete,
@@ -1883,7 +1906,12 @@ private fun ImportConfirmDialogBody(
                 // it is written back so the answer stands for the next run too.
                 ImportSection(
                     title = "Review",
-                    summary = reviewSummary(policy, attached.size),
+                    summary = reviewSummary(
+                        policy,
+                        attachedFileTemplates,
+                        attachedReview,
+                        request.taskReviews
+                    ),
                     expanded = reviewOpen,
                     onToggle = { reviewOpen = !reviewOpen }
                 ) {
@@ -1903,11 +1931,22 @@ private fun ImportConfirmDialogBody(
                     // how a user says so; whether any of them admits a PDF is the resolver's answer
                     // to give, not this dialog's to pre-empt.
                     Spacer(Modifier.height(ListeaDimens.RowGap))
+                    // **One list, every row cancellable.** File templates are a multi-select and
+                    // headless templates are a single-select, but both are templates — the pen for
+                    // a file and the pen for a Task — so v0.8.2f draws them together instead of
+                    // making the headless choice a separate, unskippable step. See
+                    // [ImportTemplateAttach].
                     ImportTemplateAttach(
-                        choices = request.templates,
+                        fileChoices = fileChoices,
+                        reviewChoices = request.taskReviews,
                         attached = attached,
+                        attachedReview = attachedReview,
+                        importer = importer,
+                        refresh = request.refresh,
+                        heldReviewVersion = seed.taskReview?.version,
                         newTemplateTapped = newTemplateTapped,
                         onToggle = ::setAttached,
+                        onSelectReview = ::setReview,
                         onNewTemplate = { newTemplateTapped = true }
                     )
                     // What moving a held version does to marks that already exist, said before the
@@ -1921,18 +1960,6 @@ private fun ImportConfirmDialogBody(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    // The Task-level judgment, under the file-level attachment it sits beside:
-                    // every Task this run makes is judged by one of these, and a Task Review is
-                    // what decides how the review surface commits a judgment.
-                    Spacer(Modifier.height(ListeaDimens.RowGap))
-                    TaskReviewAttach(
-                        choices = request.taskReviews,
-                        attached = attachedReview,
-                        importer = importer,
-                        refresh = request.refresh,
-                        heldVersion = seed.taskReview?.version,
-                        onSelect = ::setReview
-                    )
                 }
                 // The Task-level question, beside the file-level ones rather than among them: an
                 // add-on asks about the whole Task, so it gets its own section and its own page.
@@ -2194,13 +2221,31 @@ private fun groupingSummary(importer: ImporterKind, keepTree: Boolean): String =
     ImporterKind.PACKAGE -> "One Task per Prompt in each Package"
 }
 
-private fun reviewSummary(policy: ContentPolicy, templates: Int): String {
-    val templatesWord = when (templates) {
-        0 -> "no template"
-        1 -> "1 template"
-        else -> "$templates templates"
+/**
+ * What the Review section says while folded: the content policy, how many file templates are
+ * attached, and which pen judges a Task.
+ *
+ * The headless word is named rather than counted, because there is only ever one and the
+ * difference between *Single Choice* and *file decisions* is the difference between catching a
+ * Prompt's answer and not. A Todo opening on a package of pictures therefore states its pen
+ * before the section is unfolded.
+ */
+private fun reviewSummary(
+    policy: ContentPolicy,
+    fileTemplates: Int,
+    attachedReview: TemplateVersionRef?,
+    reviews: List<StoredTemplateVersion>
+): String {
+    val filesWord = when (fileTemplates) {
+        0 -> "no file template"
+        1 -> "1 file template"
+        else -> "$fileTemplates file templates"
     }
-    return policy.label + " · " + templatesWord
+    val reviewWord = attachedReview?.let { ref ->
+        reviews.firstOrNull { it.ref.templateId == ref.templateId }?.name
+            ?: "a headless template this build cannot read"
+    } ?: "file decisions"
+    return policy.label + " · " + filesWord + " · " + reviewWord
 }
 
 private fun exportChoiceSummary(choice: ExportChoice, address: String): String = when (choice) {
@@ -2219,7 +2264,7 @@ private fun othersSummary(keepStateOnDelete: Boolean): String =
     if (keepStateOnDelete) "Keep decisions when deleted" else "Decisions go with the Todo"
 
 /**
- * The attach step: which templates govern the files this run is about to create Tasks over.
+ * The attach step: **one list of templates**, file and headless together, every row cancellable.
  *
  * **The successor to the per-kind tag editors that stood here**, and the shape of the change
  * v0.5.4 makes. Those drew one editor per kind the scan found and let a user rename and re-wire a
@@ -2227,12 +2272,31 @@ private fun othersSummary(keepStateOnDelete: Boolean): String =
  * apply. Editing a button moved to the template's own page, and what happens *here* is the choice
  * that page cannot make — this Todo, these files, this template.
  *
+ * **Two kinds of pen, one list.** A file template governs the buttons a Task's files offer; a
+ * headless template is the pen for the Task as a whole and catches what its Viewer reports. They
+ * are peers, not a sequence, and v0.8.2f draws them together: the old separate *Task review* radio
+ * made the headless choice look mandatory and could not be cleared, so a Package of pictures could
+ * not be imported without attaching a pen meant for Prompt answers. File templates stay
+ * multi-select (a Task may carry more than one file kind); headless templates are single-select,
+ * because one Task has one answer, and choosing the selected row again clears it.
+ *
+ * **Nothing here is a gate.** Any selected template is enough; none is also a valid run. With no
+ * file template a Task records its files' own page decisions, and with no headless template it is
+ * judged the same way — the built-in file-decisions template, which the run writes down. The
+ * hidden cost is said rather than prevented: a Package with no headless template still imports,
+ * but its Prompts' answers have no pen to catch them, and the caption says so.
+ *
  * **The step is drawn whatever the folder holds.** The editors it replaced were drawn only for
  * kinds the folder actually had, because a tag edited for a kind that is not there would be a
  * question about nothing. That rule belonged to a per-kind control, not to this one: a template
  * governs a *set* of kinds, so "is any of this folder's material admitted" is a question about the
  * templates and their scopes, and a dialog that hid the step would be answering it silently. A
  * folder of PDFs is offered them and the user decides.
+ *
+ * **A Package is offered no file templates.** Its Tasks come from Prompts answered in a Viewer,
+ * and its files are the Prompts' Resources rather than Assets — a file template would have nothing
+ * to govern. [fileTemplatesFor] is the one rule, shared with the write path, so the list and the
+ * record cannot disagree.
  *
  * **Two whose scopes overlap cannot both be chosen**, and the second one is shown disabled with the
  * reason rather than hidden. *First attached wins* is the resolver's rule and is the right one for
@@ -2263,21 +2327,27 @@ private fun othersSummary(keepStateOnDelete: Boolean): String =
  */
 @Composable
 private fun ImportTemplateAttach(
-    choices: List<StoredTemplateVersion>,
+    fileChoices: List<StoredTemplateVersion>,
+    reviewChoices: List<StoredTemplateVersion>,
     attached: List<TemplateVersionRef>,
+    attachedReview: TemplateVersionRef?,
+    importer: ImporterKind,
+    refresh: Boolean,
+    heldReviewVersion: Int?,
     newTemplateTapped: Boolean,
     onToggle: (StoredTemplateVersion, Boolean) -> Unit,
+    onSelectReview: (StoredTemplateVersion) -> Unit,
     onNewTemplate: () -> Unit
 ) {
     // By lineage, not by reference — see [heldVersionOf], which is where that reading lives so that
     // it can be tested. A Todo holding version 1 *is* attached to a picker offering version 2.
     val attachedLineages = attached.mapTo(mutableSetOf()) { it.templateId }
     // Read off the ticked rows rather than off `attached`, and the two are the same set by different
-    // routes: a ticked row is a lineage the Todo holds, and [choices] carries its *current* version —
-    // which is the version a run writes, so it is the scope that governs the files. A stored
-    // reference to an older version deliberately contributes nothing here, because leaving the row
-    // ticked replaces it.
-    val attachedScopes = choices.filter { it.ref.templateId in attachedLineages }.map { it.scope }
+    // routes: a ticked row is a lineage the Todo holds, and [fileChoices] carries its *current*
+    // version — which is the version a run writes, so it is the scope that governs the files. A
+    // stored reference to an older version deliberately contributes nothing here, because leaving
+    // the row ticked replaces it.
+    val attachedScopes = fileChoices.filter { it.ref.templateId in attachedLineages }.map { it.scope }
 
     Column {
         Row(
@@ -2285,15 +2355,16 @@ private fun ImportTemplateAttach(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                "Add a template",
+                "Templates",
                 style = MaterialTheme.typography.titleSmall,
                 modifier = Modifier.weight(1f)
             )
             TextButton(onClick = onNewTemplate) { Text("New template") }
         }
         Text(
-            "A template decides which buttons this Todo's files offer. Its buttons are edited on " +
-                "the template's own page under Settings.",
+            "A file template decides which buttons this Todo's files offer; a headless template " +
+                "is the pen for a Task as a whole, catching what its Viewer reports. Nothing here " +
+                "is required: with none attached, a Task records its files' own decisions.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -2306,31 +2377,103 @@ private fun ImportTemplateAttach(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-        if (choices.isEmpty()) {
-            // Unreachable on a real install — every database has the built-in — and said rather than
-            // left blank, because a step that draws nothing is a step the user cannot tell from one
-            // that failed to load.
+        if (importer == ImporterKind.PACKAGE) {
             Spacer(Modifier.height(ListeaDimens.RowGap))
             Text(
-                "There are no templates to attach.",
+                "A Package's Tasks come from Prompts answered in a Viewer, so file templates do " +
+                    "not apply. Choose the headless template that matches the Prompts.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        } else {
+            Spacer(Modifier.height(ListeaDimens.RowGap))
+            if (fileChoices.isEmpty()) {
+                // Unreachable on a real install — every database has the built-in — and said rather
+                // than left blank, because a step that draws nothing is a step the user cannot tell
+                // from one that failed to load.
+                Text(
+                    "There are no templates to attach.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            fileChoices.forEach { choice ->
+                val held = heldVersionOf(attached, choice.ref.templateId)
+                val isAttached = held != null
+                val clash = !isAttached &&
+                    attachedScopes.any { scopesOverlap(it, choice.scope) }
+                ImportTemplateRow(
+                    choice = choice,
+                    isAttached = isAttached,
+                    clash = clash,
+                    // The version this Todo holds of the template this row is, when it is not the
+                    // one the row would attach. Null in the two ordinary cases, and in the clash
+                    // case, which is not attached to anything.
+                    heldVersion = held?.takeIf { it != choice.ref.version },
+                    onToggle = { onToggle(choice, it) }
+                )
+            }
+        }
+        // The pen for a Task as a whole, under the same heading and in the same list. A subheading
+        // rather than a second section: the choice is one row among rows, not a step of its own.
+        Spacer(Modifier.height(ListeaDimens.RowGap))
+        Text("Headless templates", style = MaterialTheme.typography.bodyMedium)
+        Text(
+            "One at most. Choosing the selected row again clears it.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        if (reviewChoices.isEmpty()) {
+            Text(
+                "No headless template in this build can be read, so this run will use the built-in.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-        choices.forEach { choice ->
-            val held = heldVersionOf(attached, choice.ref.templateId)
-            val isAttached = held != null
-            val clash = !isAttached &&
-                attachedScopes.any { scopesOverlap(it, choice.scope) }
-            ImportTemplateRow(
+        reviewChoices.forEach { choice ->
+            ImportReviewRow(
                 choice = choice,
-                isAttached = isAttached,
-                clash = clash,
-                // The version this Todo holds of the template this row is, when it is not the one
-                // the row would attach. Null in the two ordinary cases, and in the clash case, which
-                // is not attached to anything.
-                heldVersion = held?.takeIf { it != choice.ref.version },
-                onToggle = { onToggle(choice, it) }
+                selected = attachedReview?.templateId == choice.ref.templateId,
+                refresh = refresh,
+                heldVersion = heldReviewVersion,
+                onSelect = { onSelectReview(choice) }
+            )
+        }
+        if (attachedReview == null) {
+            Spacer(Modifier.height(ListeaDimens.CompactGap))
+            Text(
+                "No headless template selected: Tasks record their files' own decisions.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        // A Package's Prompts are answered in a Viewer, and the file-decisions template catches
+        // nothing one reports. The choice is still allowed — a Package Todo may hold other Tasks —
+        // but the consequence is said here rather than found later as an unanswerable page.
+        val chosenReview = reviewChoices.firstOrNull {
+            it.ref.templateId == attachedReview?.templateId
+        }
+        if (importer == ImporterKind.PACKAGE &&
+            (attachedReview == null || chosenReview?.taskReview?.accepts?.isEmpty() == true)
+        ) {
+            Spacer(Modifier.height(ListeaDimens.RowGap))
+            Text(
+                "A Package's Prompts are answered in a Viewer. With no headless template that " +
+                    "catches that answer, a Prompt's response will not be recorded.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        if (attachedReview != null && reviewChoices.none {
+                it.ref.templateId == attachedReview.templateId
+            }
+        ) {
+            Spacer(Modifier.height(ListeaDimens.RowGap))
+            Text(
+                "The headless template this Todo currently holds is not in this list, so this " +
+                    "build cannot read it. Choosing another replaces it; leaving it alone keeps it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
     }
@@ -2491,11 +2634,12 @@ private fun ImportAddOnAttach(
 }
 
 /**
- * The Task Review step: which **headless template** — the pen — judges every Task this run creates.
+ * One **headless template** — the pen — as a single-select row among the file templates.
  *
- * **A radio group with no clear gesture.** Every Task has always been judged by something, and the
- * built-in is the answer a Todo that never chose one has; tapping the selected row again is the same
- * answer twice rather than *none*, because there is no none to reach.
+ * **Choosing the selected row again clears it.** That gesture is how a run reaches *no headless
+ * template*, which is a real answer: the Task is then judged by the built-in file-decisions
+ * template and records its own pages. *None* is reachable on purpose since v0.8.2f, when this
+ * stopped being a separate, unskippable Task-review step.
  *
  * **A row says what it catches, not that it catches something.** A template that accepts no viewer
  * events records the Task's own file decisions; one that accepts an event is the pen for that kind
@@ -2506,86 +2650,38 @@ private fun ImportAddOnAttach(
  * said out loud is the held line on a refresh — the run that is about to move the Todo.
  */
 @Composable
-private fun TaskReviewAttach(
-    choices: List<StoredTemplateVersion>,
-    attached: TemplateVersionRef?,
-    importer: ImporterKind,
+private fun ImportReviewRow(
+    choice: StoredTemplateVersion,
+    selected: Boolean,
     refresh: Boolean,
     heldVersion: Int?,
-    onSelect: (StoredTemplateVersion) -> Unit
+    onSelect: () -> Unit
 ) {
-    Column {
-        Text("Task review", style = MaterialTheme.typography.titleSmall)
-        Text(
-            "The pen for every Task this run creates. A headless template catches the answer its " +
-                "Viewer reports and files it; the file-decisions template records the Task's own " +
-                "page decisions instead.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        if (choices.isEmpty()) {
-            Spacer(Modifier.height(ListeaDimens.RowGap))
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onSelect)
+            .padding(vertical = ListeaDimens.CompactGap),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        RadioButton(selected = selected, onClick = onSelect)
+        Spacer(Modifier.width(ListeaDimens.RowGap))
+        Column(Modifier.weight(1f)) {
+            Text(choice.name, style = MaterialTheme.typography.bodyMedium)
             Text(
-                "No Task review in this build can be read, so this run will use the built-in.",
+                choice.taskReview?.let { reviewCatchLine(it.accepts) }
+                    ?: "Headless template · unreadable",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-        }
-        choices.forEach { choice ->
-            val selected = attached?.templateId == choice.ref.templateId
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onSelect(choice) }
-                    .padding(vertical = ListeaDimens.CompactGap),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                RadioButton(selected = selected, onClick = { onSelect(choice) })
-                Spacer(Modifier.width(ListeaDimens.RowGap))
-                Column(Modifier.weight(1f)) {
-                    Text(choice.name, style = MaterialTheme.typography.bodyMedium)
-                    Text(
-                        choice.taskReview?.let { reviewCatchLine(it.accepts) }
-                            ?: "Headless template · unreadable",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    if (refresh && selected && heldVersion != null &&
-                        heldVersion != choice.ref.version
-                    ) {
-                        Text(
-                            "This Todo holds version $heldVersion; confirming moves it to " +
-                                "${choice.ref.version}.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
+            if (refresh && selected && heldVersion != null && heldVersion != choice.ref.version) {
+                Text(
+                    "This Todo holds version $heldVersion; confirming moves it to " +
+                        "${choice.ref.version}.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
-        }
-        // A Package's Prompts are answered in a Viewer. The file-decisions template is still a
-        // valid choice — a Package Todo may hold other Tasks — but it catches nothing a Prompt
-        // reports, and saying so here is cheaper than finding an unanswerable page in Review.
-        val chosenReview = choices.firstOrNull { it.ref.templateId == attached?.templateId }
-        if (importer == ImporterKind.PACKAGE &&
-            chosenReview?.taskReview?.accepts?.isEmpty() == true
-        ) {
-            Spacer(Modifier.height(ListeaDimens.RowGap))
-            Text(
-                "A Package's Prompts are answered in a Viewer. This template records file " +
-                    "decisions only, so a Prompt it judges will have no answer to catch.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        if (attached != null && choices.none { it.ref.templateId == attached.templateId }) {
-            Spacer(Modifier.height(ListeaDimens.RowGap))
-            Text(
-                "The Task review this Todo currently holds is not in this list, so this build " +
-                    "cannot read it. Choosing another replaces it; leaving the section alone keeps it.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
         }
     }
 }

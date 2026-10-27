@@ -155,6 +155,18 @@ class AddOnResolver(
         versionOf(decodeAddOnAttachment(encoded))
 
     /**
+     * The version a stored column names, when it is worth a page.
+     *
+     * A version with no questions draws nothing in Review, so every surface that decides whether a
+     * Task has an add-on **page** asks this rather than [versionFor]. The distinction is deliberate
+     * and belongs here: export and write paths keep reading [versionFor], because an attached
+     * questionnaire with no questions is still an attachment they must report; only the page model
+     * treats it as absent.
+     */
+    fun readableVersion(encoded: String): StoredAddOnVersion? =
+        versionFor(encoded)?.takeIf { it.questions.isNotEmpty() }
+
+    /**
      * A question as one authored version asked it, for explaining an answer the current version no
      * longer offers.
      *

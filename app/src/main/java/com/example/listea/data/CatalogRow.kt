@@ -59,6 +59,17 @@ data class TaskAssetControls(
      * [com.example.listea.data.ReviewItem.payloadKind] gives.
      */
     val packageKey: String? = null,
+
+    /**
+     * The Package's manifest title, when the source still has the checkpoint it was imported from.
+     *
+     * Carried beside [packageKey] because the key is an internal name — `<packageKey>/<promptKey>`
+     * is also the synthetic catalog key written into the Task's paths — and the Catalog already
+     * names a Package scope by this title. A List row and a Review Info sheet must name it the
+     * same way, or the Task reads as coming from a folder nobody can find. Null when the
+     * checkpoint is gone; the surfaces then show no Package line rather than the raw key.
+     */
+    val packageTitle: String? = null,
     val promptKey: String? = null,
     val payloadKind: String? = null,
     val payloadSchema: Int? = null,
@@ -247,6 +258,17 @@ data class SourceSummary(
      * `''` for a Todo with no Tasks at all, which is a Todo whose next run has not happened yet.
      */
     val taskAssetControls: String = "",
+
+    /**
+     * The add-on the Todo was last imported under, as `sources.addOn` holds it.
+     *
+     * Read for the card's overflow, which offers changing it: a control that did not know the
+     * current add-on could not say whether it was selected or offer to clear it. Only the Source's
+     * own value is needed — unlike [assetControls], the card never reports what the Tasks hold,
+     * because an add-on is stamped onto every Task by the same write that changes the Source, so
+     * the two cannot drift through Settings the way template attachments can.
+     */
+    val addOn: String = "",
 
     /**
      * How this Todo exports, and the address it holds.

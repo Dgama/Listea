@@ -303,7 +303,13 @@ fun exportTaskViews(
     responseByTask: Map<String, String> = emptyMap()
 ): List<ExportTaskView> = rows.distinctBy { it.taskId }.map { row ->
     val task = tasks[row.taskId]
-    val attachments = task?.assetControls.orEmpty()
+    // A structured Prompt Task answers in a Viewer: its pen is the Task-level Headless Template,
+    // not a file template, and its files (when it has any) are presented by the Prompt rather than
+    // governed by a chip row. `templates` and file actions are therefore suppressed for it, which
+    // is also what stops a Package Todo carrying a stale Media Asset Control from telling a
+    // receiver its Prompt was marked up. A file Task is unchanged.
+    val isPromptTask = promptsByTask.containsKey(row.taskId)
+    val attachments = if (isPromptTask) "" else task?.assetControls.orEmpty()
     val templates = decodeTemplateAttachments(attachments).map { ref ->
         ExportTemplateView(
             id = ref.templateId.value,

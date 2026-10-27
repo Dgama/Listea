@@ -739,6 +739,17 @@ data class ReviewItem(
      * when the Content page is composed, so a long queue does not carry every description.
      */
     val packageKey: String? = null,
+
+    /**
+     * The Package's manifest title, when the Todo still has the checkpoint that named it.
+     *
+     * [packageKey] is an internal name, and for a Prompt Task it doubles as the synthetic catalog
+     * key in [rootRelativePath] and [relativePath]. Displaying either as a folder path sends the
+     * user looking for a directory named `dating-demo` that does not exist; the title is what the
+     * Catalog calls the same Package (`Dating demo`). Null when the checkpoint is gone, and then
+     * nothing is shown in its place.
+     */
+    val packageTitle: String? = null,
     val promptKey: String? = null,
     val payloadKind: String? = null,
     val payloadSchema: Int? = null,
@@ -777,6 +788,7 @@ fun ListItemEntity.toReviewItem(
     addOn: String = "",
     taskReview: String = "",
     packageKey: String? = null,
+    packageTitle: String? = null,
     promptKey: String? = null,
     payloadKind: String? = null,
     payloadSchema: Int? = null,
@@ -816,6 +828,7 @@ fun ListItemEntity.toReviewItem(
     // The Prompt envelope travels with the rest of the import facts: a List review builds its
     // queue from membership rows and must still know whether this Task has a Content page.
     packageKey = packageKey,
+    packageTitle = packageTitle,
     promptKey = promptKey,
     payloadKind = payloadKind,
     payloadSchema = payloadSchema,

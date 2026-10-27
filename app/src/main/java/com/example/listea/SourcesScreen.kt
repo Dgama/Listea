@@ -91,9 +91,15 @@ fun SourcesScreen(
     // The live default, for the address dialog's *Use default* radio. Read here rather than in the
     // dialog so the dialog is given one value to draw and takes no subscription of its own.
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    // The add-ons a card's dialog can offer, and the names of the one it holds. Read here for the
+    // same reason as the template resolver: the menu names the current add-on and the dialog starts
+    // on it, and neither can be answered from the row alone.
+    val addOns by viewModel.addOnResolver.collectAsStateWithLifecycle()
     // The Todo whose address is being edited, held by value: the dialog closes when the card it was
     // opened from leaves the list, which is what deleting that Todo should do anyway.
     var editingAddress by remember { mutableStateOf<SourceSummary?>(null) }
+    var editingName by remember { mutableStateOf<SourceSummary?>(null) }
+    var editingAddOn by remember { mutableStateOf<SourceSummary?>(null) }
 
     if (sources.isEmpty()) {
         Column(modifier.fillMaxSize().padding(ListeaDimens.PagePadding)) {
@@ -118,15 +124,41 @@ fun SourcesScreen(
             TodoCard(
                 source = source,
                 resolver = resolver,
+                addOnResolver = addOns,
                 available = source.rootUri in heldRoots,
                 onOpen = { onOpenTodo(source) },
                 onRefresh = { viewModel.requestSourceRefresh(source.id) },
                 onDelete = { viewModel.requestDeleteTodo(source.id) },
                 onFollowUpstream = { viewModel.setTodoFollowUpstream(source.id, it) },
                 onKeepStateOnDelete = { viewModel.setTodoKeepStateOnDelete(source.id, it) },
-                onEditAddress = { editingAddress = source }
+                onEditAddress = { editingAddress = source },
+                onRename = { editingName = source },
+                onEditAddOn = { editingAddOn = source }
             )
         }
+    }
+
+    editingName?.let { source ->
+        TodoRenameDialog(
+            source = source,
+            onDismiss = { editingName = null },
+            onSave = { name ->
+                viewModel.renameTodo(source.id, name)
+                editingName = null
+            }
+        )
+    }
+
+    editingAddOn?.let { source ->
+        TodoAddOnDialog(
+            source = source,
+            resolver = addOns,
+            onDismiss = { editingAddOn = null },
+            onSave = { attachment ->
+                viewModel.setTodoAddOn(source.id, attachment)
+                editingAddOn = null
+            }
+        )
     }
 
     editingAddress?.let { source ->
@@ -146,13 +178,16 @@ fun SourcesScreen(
 private fun TodoCard(
     source: SourceSummary,
     resolver: TemplateResolver,
+    addOnResolver: AddOnResolver,
     available: Boolean,
     onOpen: () -> Unit,
     onRefresh: () -> Unit,
     onDelete: () -> Unit,
     onFollowUpstream: (Boolean) -> Unit,
     onKeepStateOnDelete: (Boolean) -> Unit,
-    onEditAddress: () -> Unit
+    onEditAddress: () -> Unit,
+    onRename: () -> Unit,
+    onEditAddOn: () -> Unit
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     // The whole card opens the Todo and the one button acts on it, which is the same split the
@@ -226,6 +261,26 @@ private fun TodoCard(
                         )
                     }
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        // The two names this card can change about the Todo itself, above the
+                        // policies: what the user calls it and what questionnaire judges it. The
+                        // name is the user's label and nothing else reads it, so renaming is safe
+                        // at any time; the add-on is stamped onto every Task already imported, so
+                        // the row names the one in force rather than making the user open a dialog
+                        // to find out.
+                        DropdownMenuItem(
+                            text = { Text("Rename…") },
+                            onClick = {
+                                menuOpen = false
+                                onRename()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text(todoAddOnLabel(source, addOnResolver)) },
+                            onClick = {
+                                menuOpen = false
+                                onEditAddOn()
+                            }
+                        )
                         // The two policies a Todo holds, above the one action that destroys it. Each
                         // row carries its consequence as well as its name, because neither switch
                         // shows one when it is thrown: following the upstream writes on a later day
@@ -369,6 +424,13 @@ internal fun todoContentPolicyLabel(source: SourceSummary): String =
  * showing them the storage format.
  */
 internal fun todoAssetControlLabel(source: SourceSummary, resolver: TemplateResolver): String {
+    // A Package's Tasks are Prompts answered in a Viewer; file templates never govern them. Todos
+    // imported before v0.8.2f still carry the old Media Asset Control record on their Tasks, and
+    // reporting it would say those Prompts are marked up. The card says what is true of them now,
+    // and the export suppresses the same stale record on the same rule — see `exportTaskViews`.
+    if (source.importerKind == ImporterKind.PACKAGE.key) {
+        return "Templates: not used by Package Prompts"
+    }
     if (source.taskAssetControls.isEmpty()) return "Templates: not chosen yet"
 
     return decodeTemplateAttachments(source.taskAssetControls).joinToString(" · ") { ref ->
@@ -379,6 +441,20 @@ internal fun todoAssetControlLabel(source: SourceSummary, resolver: TemplateReso
             version.name + " (" + countLabel(version.buttons.size, "button") + ")"
         }
     }
+}
+
+/**
+ * The add-on a Todo's Tasks carry, as the card's menu names it.
+ *
+ * The add-on is the Todo's own choice and is stamped onto every Task by one write, so unlike the
+ * template line this reads [SourceSummary.addOn] and cannot drift from what a Task opens with. A
+ * reference this build cannot read is said in words rather than printed as an id, the same rule
+ * [todoAssetControlLabel] follows.
+ */
+internal fun todoAddOnLabel(source: SourceSummary, resolver: AddOnResolver): String {
+    if (source.addOn.isEmpty()) return "Add-on · none"
+    val version = resolver.versionFor(source.addOn)
+    return "Add-on · " + (version?.name ?: "this build cannot read it")
 }
 
 /**
@@ -640,6 +716,170 @@ internal fun deleteTodoOutcome(report: DissolutionReport): String = buildString 
  * export. An address that is present is validated whichever method is chosen, so an invalid one is
  * never written into a row a later delivery would trust.
  */
+/**
+ * Renaming a Todo.
+ *
+ * The name is a label, not a location: it starts as the folder's name at Create Tasks time and is
+ * the user's own from then on. The dialog says so, because a user who thinks renaming moves or
+ * re-labels the Upstream's folder would be surprised twice — once here and once at the next refresh,
+ * which keeps the stored name and does not restore the folder's.
+ */
+@Composable
+private fun TodoRenameDialog(
+    source: SourceSummary,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit
+) {
+    var name by rememberSaveable(source.id) { mutableStateOf(source.displayName) }
+    val clean = name.trim()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Rename this Todo") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(ListeaDimens.CompactGap))
+                Text(
+                    "This changes the name on this card and on the Todo's own screen. The " +
+                        "Upstream folder and where the Tasks came from are not renamed.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = clean.isNotEmpty(), onClick = { onSave(clean) }) { Text("Save") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+/**
+ * Choosing a Todo's add-on, or clearing it.
+ *
+ * **One questionnaire, and *none* is a real answer.** The add-on is independent of the exam paper —
+ * an extra rating of difficulty, say — so a Todo may go without one, and the top row says so rather
+ * than leaving an empty picker to mean it. The choice reaches every Task already imported: the
+ * dialog says that, because a user changing a card does not expect to change what seven existing
+ * Tasks ask until the next import.
+ *
+ * Answers recorded under a previous add-on are kept, not deleted; the note at the bottom says they
+ * are hidden while the add-on is detached. That is what makes changing one's mind a recovery rather
+ * than a re-answer.
+ *
+ * The selection is held as the encoded attachment, so a reference this build cannot read survives
+ * an untouched visit: no row matches it, *none* is not selected either, and saving writes back what
+ * was there. Printing its id would be the app showing the storage format.
+ */
+@Composable
+private fun TodoAddOnDialog(
+    source: SourceSummary,
+    resolver: AddOnResolver,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit
+) {
+    var choice by rememberSaveable(source.id) { mutableStateOf(source.addOn) }
+    val heldLineage = decodeAddOnAttachment(choice)?.addOnId
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add-on") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    "An add-on is a questionnaire about each Task as a whole. Choosing one attaches " +
+                        "its current version to every Task this Todo already holds.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(ListeaDimens.RowGap))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { choice = "" }
+                        .padding(vertical = ListeaDimens.CompactGap),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(selected = choice.isEmpty(), onClick = { choice = "" })
+                    Spacer(Modifier.width(ListeaDimens.RowGap))
+                    Column {
+                        Text("None", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "Tasks show their files and nothing more",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                resolver.attachable.forEach { addOn ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { choice = encodeAddOnAttachment(addOn.ref) }
+                            .padding(vertical = ListeaDimens.CompactGap),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = heldLineage == addOn.ref.addOnId,
+                            onClick = { choice = encodeAddOnAttachment(addOn.ref) }
+                        )
+                        Spacer(Modifier.width(ListeaDimens.RowGap))
+                        Column {
+                            Text(addOn.name, style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                countLabel(addOn.questions.size, "question"),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+                if (resolver.attachable.isEmpty()) {
+                    Spacer(Modifier.height(ListeaDimens.CompactGap))
+                    Text(
+                        "This build has no add-ons to attach yet.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (choice.isNotEmpty() && heldLineage == null) {
+                    Spacer(Modifier.height(ListeaDimens.CompactGap))
+                    Text(
+                        "This Todo holds an add-on this build cannot read. Choosing a row here " +
+                            "replaces it.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (source.addOn.isNotEmpty()) {
+                    Spacer(Modifier.height(ListeaDimens.CompactGap))
+                    Text(
+                        "Answers already recorded under an add-on are kept when it is removed or " +
+                            "replaced; they are hidden until that add-on is attached again.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(choice) }) { Text("Save") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
 @Composable
 private fun TodoWebhookAddressDialog(
     source: SourceSummary,

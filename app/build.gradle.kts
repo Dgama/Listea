@@ -15,10 +15,15 @@ android {
         minSdk = 24
         targetSdk = 37
         // The version is the round the code is at — the same name the iteration docs and the git
-        // tag use. versionCode is that name flattened to one integer, so it cannot drift from it.
-        val version = "0.8.2"
+        // tag use. versionCode is the numeric part flattened to one integer, so it cannot drift
+        // from it. A suffix names a step on the same line and keeps that line's code: 0.8.2f still
+        // installs over 0.8.2, and the 0.8.3 preview (803) still installs over both. The hyphen
+        // suffix says the sub-version is not frozen yet; the numeric prefix is what the installer
+        // and the About page measure.
+        val version = "0.8.3-preview"
         versionName = version
-        versionCode = version.split(".")
+        versionCode = version.takeWhile { it.isDigit() || it == '.' }
+            .split(".")
             .let { it[0].toInt() * 10_000 + it[1].toInt() * 100 + it[2].toInt() }
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

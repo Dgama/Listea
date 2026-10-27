@@ -129,6 +129,7 @@ fun ListDetailScreen(
     val freshness by viewModel.sourceFreshness.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val resolver by viewModel.templateResolver.collectAsStateWithLifecycle()
+    val addOnResolver by viewModel.addOnResolver.collectAsStateWithLifecycle()
     val arrangements by viewModel.arrangements.collectAsStateWithLifecycle()
 
     // The same two sources the Folder browser reads, under this list's own key, so "same filter
@@ -177,8 +178,10 @@ fun ListDetailScreen(
             listTitle = current.list.title,
             settings = settings,
             resolver = resolver,
+            addOnResolver = addOnResolver,
             observePayload = viewModel::observeTaskPayload,
             observeResources = viewModel::observeTaskResources,
+            observeAnswers = viewModel::observeTaskAnswers,
             onClose = { viewingItemId = null }
         )
         return
@@ -864,7 +867,7 @@ private fun ItemRow(
             )
             // Folder-backed items keep their path so bilibili/a.jpg stays distinct from
             // danbooru/a.jpg.
-            item.relativePath?.takeIf { it != item.title }?.let { path ->
+            item.provenance()?.let { path ->
                 StatusLine(path)
             }
             ItemActionTags(item.taskDecisions, control)

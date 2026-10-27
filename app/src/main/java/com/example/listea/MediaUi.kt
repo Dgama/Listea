@@ -470,12 +470,25 @@ internal tailrec fun Context.findActivity(): Activity? = when (this) {
  * as easy to hit, but the name is what tells the user which item they are on, and 40dp is still a
  * target a thumb finds.
  *
- * The counter is bracketed by its own arrows - "‹ 3 / 12 ›" - rather than sitting apart from them,
+ * The counter is bracketed by its own arrows - "« 3 / 12 »" - rather than sitting apart from them,
  * because that is what they move: they are the position's own control, and reading them as a group
  * is what stops them being mistaken for anything that acts on the item. When the item has pages
- * under it there is a second, outer pair, so the label reads "3(2/3)/7" between four arrows: the
- * outer two move the queue and the inner two move the file. Grouped, they also take width from the
- * names in one place instead of two, and the names are the part that can afford to lose it.
+ * under it there is a second, inner pair, so the label reads "3(2/3)/7" between four arrows: the
+ * outer two, double, move the queue and the inner two, single, move the file. The outer pair keeps
+ * its double chevrons even when there is no inner pair, so a glyph means the same level on every
+ * surface: double is the queue (Tasks or files), single is a page inside the current item. Grouped,
+ * the arrows also take width from the names in one place instead of two, and the names are the part
+ * that can afford to lose it.
+ *
+ * The tags are the one row that is not in that row. Under a long Task name beside four arrows and a
+ * two-level counter there is not enough width left for the title and its badges both, and the badges
+ * cannot ellipsize: a chip with its label cut in half is not a badge. They are drawn on their own
+ * line across the bar, under the row, which is where they were read before and where the bar's
+ * width rather than the name's cap now measures them. The file's name is the row's first casualty:
+ * below [NavigatorSubtitleMinWidth] it is not drawn at all, so the item's name keeps the corner
+ * instead of being pinned to a cap and pushing the queue's last arrow off the screen. The file is
+ * still named in the Info sheet and in the queue guide, and at that width the alternative is a name
+ * truncated to a stub beside an arrow nobody can reach.
  *
  * A control at an end is shown disabled rather than removed. Removing it would re-measure the bar
  * as the user reaches the end of a queue, sliding the counter and the remaining arrow sideways
@@ -493,108 +506,124 @@ private fun MediaTopBar(navigator: MediaNavigator) {
         // Read here and carried down: inside the Row below, the bar's width is reached through
         // two receivers, and naming it once keeps the counter's popup cap unambiguous.
         val barWidth = maxWidth
+        // A bar this narrow has no room for two names beside the position cluster. The item's name
+        // wins: it is what tells the user where they are, and dropping the file's name is what
+        // lets the title take the leftover width instead of being capped and overflowing the bar.
+        val subtitle = navigator.subtitle?.takeIf { barWidth >= NavigatorSubtitleMinWidth }
+        val tags = navigator.tags
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = navigator.onBack, modifier = Modifier.size(stepSize)) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-            }
-
-            val subtitle = navigator.subtitle
-            val tags = navigator.tags
-            Column(
-                // Measured at its natural width and capped, never weighted. A weighted child is
-                // held to its *share* of the leftover rather than to what it needs, and on a bar
-                // this narrow the share is not enough for either name: split evenly, the item's
-                // name came out as "Wha..." and the file's as "I...". Measured first, the item's
-                // name reads properly and the file's name - the zone the spec sacrifices - takes
-                // what the bar has left, which on the narrowest screens is nothing at all.
-                modifier = if (subtitle == null) {
-                    Modifier.weight(1f)
-                } else {
-                    Modifier.widthIn(max = NavigatorTitleMaxWidth)
-                }
+        Column(Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    navigator.title,
-                    style = MaterialTheme.typography.titleSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                // The Task's tags, under its name and inside the same capped column, so a marked
-                // Task reads as one block rather than as a line and a stray row of chips. The
-                // component emits nothing for an unmarked Task, so the bar keeps its height.
-                if (tags != null) {
-                    Box(Modifier.padding(top = ListeaDimens.CompactGap)) { tags() }
+                IconButton(onClick = navigator.onBack, modifier = Modifier.size(stepSize)) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                }
+
+                Column(
+                    // Measured at its natural width and capped, never weighted. A weighted child is
+                    // held to its *share* of the leftover rather than to what it needs, and on a bar
+                    // this narrow the share is not enough for either name: split evenly, the item's
+                    // name came out as "Wha..." and the file's as "I...". Measured first, the item's
+                    // name reads properly and the file's name - the zone the spec sacrifices - takes
+                    // what the bar has left, which on the narrowest screens is nothing at all.
+                    modifier = if (subtitle == null) {
+                        Modifier.weight(1f)
+                    } else {
+                        Modifier.widthIn(max = NavigatorTitleMaxWidth)
+                    }
+                ) {
+                    Text(
+                        navigator.title,
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                subtitle?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center,
+                        // The only weighted child in the row, so it takes all of what the fixed zones
+                        // leave. Where that is too little to show anything it ellipsizes to a stub
+                        // rather than pushing the controls off the bar, and the Info sheet still names
+                        // the file.
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                navigator.counter?.let { counter ->
+                    Spacer(Modifier.width(ListeaDimens.RowGap))
+                    if (navigator.hasAssetSteps) {
+                        MediaStepButton(
+                            icon = Icons.Filled.KeyboardDoubleArrowLeft,
+                            label = "Previous task",
+                            size = stepSize,
+                            onClick = navigator.onPrevious
+                        )
+                        MediaStepButton(
+                            icon = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                            label = "Previous file",
+                            size = stepSize,
+                            onClick = navigator.onPreviousAsset
+                        )
+                    } else {
+                        // The outer pair always means the queue, so it always draws as the outer
+                        // pair — double chevrons — even where the item has no pages under it. A
+                        // single chevron here used to move the queue too, which made the same glyph
+                        // mean "next Task" in one bar and "next file inside this Task" in the next.
+                        // The bar is wider for it; one meaning everywhere is worth the width.
+                        MediaStepButton(
+                            icon = Icons.Filled.KeyboardDoubleArrowLeft,
+                            label = "Previous item",
+                            size = stepSize,
+                            onClick = navigator.onPrevious
+                        )
+                    }
+                    MediaQueueCounter(
+                        counter = counter,
+                        queue = navigator.queueJump,
+                        maxWidth = barWidth,
+                        height = stepSize
+                    )
+                    if (navigator.hasAssetSteps) {
+                        MediaStepButton(
+                            icon = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                            label = "Next file",
+                            size = stepSize,
+                            onClick = navigator.onNextAsset
+                        )
+                        MediaStepButton(
+                            icon = Icons.Filled.KeyboardDoubleArrowRight,
+                            label = "Next task",
+                            size = stepSize,
+                            onClick = navigator.onNext
+                        )
+                    } else {
+                        MediaStepButton(
+                            icon = Icons.Filled.KeyboardDoubleArrowRight,
+                            label = "Next item",
+                            size = stepSize,
+                            onClick = navigator.onNext
+                        )
+                    }
                 }
             }
 
-            subtitle?.let {
-                Text(
-                    it,
-                    style = MaterialTheme.typography.titleSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    textAlign = TextAlign.Center,
-                    // The only weighted child in the row, so it takes all of what the fixed zones
-                    // leave. Where that is too little to show anything it ellipsizes to a stub
-                    // rather than pushing the controls off the bar, and the Info sheet still names
-                    // the file.
-                    modifier = Modifier.weight(1f)
-                )
-            }
-
-            navigator.counter?.let { counter ->
-                Spacer(Modifier.width(ListeaDimens.RowGap))
-                if (navigator.hasAssetSteps) {
-                    MediaStepButton(
-                        icon = Icons.Filled.KeyboardDoubleArrowLeft,
-                        label = "Previous task",
-                        size = stepSize,
-                        onClick = navigator.onPrevious
-                    )
-                    MediaStepButton(
-                        icon = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
-                        label = "Previous file",
-                        size = stepSize,
-                        onClick = navigator.onPreviousAsset
-                    )
-                } else {
-                    MediaStepButton(
-                        icon = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
-                        label = "Previous",
-                        size = stepSize,
-                        onClick = navigator.onPrevious
-                    )
-                }
-                MediaQueueCounter(
-                    counter = counter,
-                    queue = navigator.queueJump,
-                    maxWidth = barWidth,
-                    height = stepSize
-                )
-                if (navigator.hasAssetSteps) {
-                    MediaStepButton(
-                        icon = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                        label = "Next file",
-                        size = stepSize,
-                        onClick = navigator.onNextAsset
-                    )
-                    MediaStepButton(
-                        icon = Icons.Filled.KeyboardDoubleArrowRight,
-                        label = "Next task",
-                        size = stepSize,
-                        onClick = navigator.onNext
-                    )
-                } else {
-                    MediaStepButton(
-                        icon = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                        label = "Next",
-                        size = stepSize,
-                        onClick = navigator.onNext
-                    )
+            // The Task's tags, on a line of their own and measured by the bar rather than by the
+            // name's cap — a chip is a badge with a label, and ellipsizing it is cutting the
+            // label off. The inset lines the row up with the title above it, and the component
+            // emits nothing for an unmarked Task, so the bar keeps its height.
+            if (tags != null) {
+                Box(
+                    Modifier.padding(start = stepSize, top = ListeaDimens.CompactGap)
+                ) {
+                    tags()
                 }
             }
         }
@@ -666,6 +695,56 @@ fun TaskCompletionBar(
             modifier = Modifier.semantics {
                 contentDescription =
                     if (item.isCompleted) "Checked" else "Not checked"
+            }
+        )
+    }
+}
+
+/**
+ * The Task's own state, read-only, in the frame's bottom band.
+ *
+ * Every template gets the frame's bottom band, because *whether this Task is checked* is a
+ * Task-level fact independent of which template records the judgment. A template that commits
+ * from its own control — a Prompt's Like/Dislike, a sampled point's Submit, a rapid-review
+ * template's button — draws that control in the dismissible file band, and leaves this band to
+ * say what the Task's state is. It is drawn, never hidden by a tap: the frame persists, and what
+ * collapses is the file's band above it. Before this bar existed those templates had an empty
+ * slot, and a headless Prompt had no task-level display at all.
+ *
+ * It is the [TaskCompletionBar]'s checkbox with no interactive callback (`onCheckedChange = null`
+ * keeps full colour, unlike `enabled = false`), and nothing else. **The fill is the state**: empty
+ * is not checked, filled is checked, exactly as on the interactive bar.
+ *
+ * The first version of this band wrote *Checked* / *Not checked* beside it, reasoning that a
+ * checkbox nobody can press needs its meaning spelled out. That was a local reading of one new
+ * control, not a rule about the Task-level fact: in the same Review an image Task drew the same
+ * fact as a bare checkbox, so a vocabulary Task looked like a different kind of thing for the
+ * same state. The word was removed in the v0.8.2f follow-up. The state is still announced to
+ * accessibility through the checkbox's content description; that is a label for a reader, not a
+ * second visual language.
+ */
+@Composable
+fun TaskStatusBar(
+    item: ReviewItem,
+    modifier: Modifier = Modifier,
+    reviewBlocked: ReviewBlock? = null
+) {
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        if (reviewBlocked != null) {
+            Text(
+                reviewBlocked.label,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Checkbox(
+            checked = item.isCompleted,
+            onCheckedChange = null,
+            modifier = Modifier.semantics {
+                contentDescription = if (item.isCompleted) "Checked" else "Not checked"
             }
         )
     }
@@ -847,6 +926,21 @@ fun ItemActionTags(
  * stub - the file is named in the Info sheet, and the item's name is what tells you where you are.
  */
 private val NavigatorTitleMaxWidth = 120.dp
+
+/**
+ * The bar width below which the file's name is not drawn at all.
+ *
+ * With four arrows, a two-level counter and the back affordance the fixed zones already take more
+ * than a 360dp phone has; the item's name can only keep the corner if the file's name yields, which
+ * is the same sacrifice the layout makes at every size, taken all the way. Above this width both
+ * names have room on the ordinary phone and the file's name is drawn as before.
+ *
+ * It is not a font-scale threshold: a large font widens the counter and the item's name inside the
+ * same bar, so at that scale this width is reached sooner — which is the honest reading, because
+ * the room really is gone at that size. The file remains named in the Info sheet and in the queue
+ * guide on every surface.
+ */
+private val NavigatorSubtitleMinWidth = 400.dp
 
 /**
  * The width below which the navigator's controls come down from Material's 48dp to

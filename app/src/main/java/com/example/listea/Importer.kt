@@ -20,11 +20,11 @@ import com.example.listea.domain.TemplateVersionRef
  * one decision the whole release exists to make explicit. A `plan` never writes; [ListsDao.runImport]
  * is the only thing that turns a plan into rows.
  *
- * Two rules answer two different questions, and importing something never implies it can be
- * reviewed. file-as-Task admits every file the scanner found — v0.1 parity, no content filter —
- * while folder-as-Task applies the supported-content policy below, because it is new and has no
- * behaviour to preserve. Whether a judgment may be recorded against a Task is a later question,
- * answered by review eligibility, not by the importer.
+ * Two rules answer two different questions. Both apply the same supported-content policy — a file
+ * a viewer can open — because a Task nothing can open is a Task nobody can judge; since v0.8.2f the
+ * file-as-Task rule no longer keeps v0.1's "every file" behaviour, which turned a Package's
+ * manifest and Prompt bodies into unreviewable Tasks. Whether a judgment may be recorded against a
+ * Task is still a later question, answered by review eligibility, not by the importer.
  */
 
 /** The grouping rules v0.2.5 ships, keyed by the value persisted on `sources.importerKind`. */
@@ -356,17 +356,38 @@ fun plan(
     }
 
 /**
- * One Task per discovered file, one Asset, no content filter.
+ * One Task per discovered file a viewer can open, one Asset each.
  *
- * This is what `createFolderList` always did, expressed as a rule instead of a side effect. A file
- * no viewer supports still becomes a Task, because the legacy folder-to-List path never filtered;
- * whether that Task can be reviewed is eligibility's question, not this one's. `directories` is
- * unused — there is nothing this importer can say about a folder.
+ * Since v0.8.2f this importer admits the same set [planFolderAsTask] does — picture, video and PDF
+ * — because a Task nothing can open is a Task nobody can judge. Every other file, and a Package's
+ * manifest and Prompt bodies are the reason the rule exists, is skipped and reported rather than
+ * turned into an empty chip row. `directories` is unused — there is nothing this importer can say
+ * about a folder.
  */
-fun planFileAsTask(importRoot: String, snapshot: FolderSnapshot): ImportPlan = ImportPlan(
-    tasks = snapshot.files.map { fileTask(importRoot, it) },
-    notices = emptyList()
-)
+fun planFileAsTask(importRoot: String, snapshot: FolderSnapshot): ImportPlan {
+    val notices = mutableListOf<ImportNotice>()
+    val tasks = mutableListOf<PlannedTask>()
+    for (file in snapshot.files) {
+        if (assetViewerAvailable(file.name)) {
+            tasks += fileTask(importRoot, file)
+        } else {
+            notices += ImportNotice.UnsupportedFile(childRelativePath(importRoot, file.relativePath))
+        }
+    }
+    return ImportPlan(tasks = tasks, notices = notices)
+}
+
+/**
+ * The file templates a run stores, given its importer.
+ *
+ * A Package run creates Tasks from Prompts rather than from files: its Tasks are answered in a
+ * Viewer and hold no file Assets of their own, so a file template has nothing to govern and is
+ * dropped rather than stamped onto every Prompt. The picker hides those rows for a Package; this
+ * function is the rule both the dialog and the write path share, so a caller that bypassed the
+ * picker cannot store a template the model says does not apply.
+ */
+fun <T> fileTemplatesFor(importer: ImporterKind, templates: List<T>): List<T> =
+    if (importer == ImporterKind.PACKAGE) emptyList() else templates
 
 /**
  * Each immediate child folder of the import root is one Task; its supported descendants are its
@@ -375,7 +396,7 @@ fun planFileAsTask(importRoot: String, snapshot: FolderSnapshot): ImportPlan = I
  * Nested folders organise Assets and never create Tasks, so entering `alice/papers` later cannot
  * redefine `sample.pdf` as its own Task. A child folder with no supported file produces no Task and
  * one notice, and an unsupported file anywhere is skipped and reported. Supported means picture,
- * video or PDF; PDF is imported and catalogued but is deliberately not reviewable until v0.3.
+ * video or PDF — the kinds a Viewer in this build can open, so every Task made here is reviewable.
  */
 fun planFolderAsTask(importRoot: String, snapshot: FolderSnapshot): ImportPlan {
     val notices = mutableListOf<ImportNotice>()
@@ -430,14 +451,13 @@ fun planFolderAsTask(importRoot: String, snapshot: FolderSnapshot): ImportPlan {
 }
 
 /**
- * The supported-content policy for folder-as-Task: picture and video from [MediaKind], PDF by
- * extension. Everything else — `rubric.txt` — is skipped and reported. Admission is not eligibility:
- * a PDF is imported here and simply not reviewable until a viewer ships.
+ * The supported-content policy both folder importers share: a file a viewer can open.
+ *
+ * Written as [assetViewerAvailable] rather than as its own extension list, so the importer, the
+ * asset-control lookup and the catalog badge answer with one opinion. Everything else —
+ * `rubric.txt`, a Package's manifest — is skipped and reported.
  */
-fun folderAsTaskSupported(name: String): Boolean {
-    val kind = mediaKindOf(name)
-    return kind == MediaKind.PICTURE || kind == MediaKind.VIDEO || fileExtension(name) == "pdf"
-}
+fun folderAsTaskSupported(name: String): Boolean = assetViewerAvailable(name)
 
 private fun fileTask(importRoot: String, file: ScannedFile): PlannedTask = PlannedTask(
     groupPath = childRelativePath(importRoot, file.relativePath),

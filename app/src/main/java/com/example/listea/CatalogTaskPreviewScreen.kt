@@ -21,7 +21,8 @@ import com.example.listea.data.ReviewItem
 import com.example.listea.data.TaskPayloadEntity
 import com.example.listea.data.TaskResourceView
 import com.example.listea.data.decodeActionIds
-import com.example.listea.domain.parseProfilePrompt
+import com.example.listea.domain.AddOnAnswer
+import com.example.listea.domain.decodePrompt
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -53,6 +54,7 @@ fun CatalogTaskPreview(
     val rowsFlow = remember(sourceId, importVersion) { viewModel.observeCatalog(sourceId) }
     val rows by rowsFlow.collectAsStateWithLifecycle(initialValue = null)
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val addOnResolver by viewModel.addOnResolver.collectAsStateWithLifecycle()
 
     // Still loading is not the same as gone, and only a read that has come back may close the
     // screen: closing on the first frame would shut every preview before its data arrived. The
@@ -70,8 +72,10 @@ fun CatalogTaskPreview(
         initialTaskId = taskId,
         rootUri = rootUri,
         settings = settings,
+        addOnResolver = addOnResolver,
         observePayload = viewModel::observeTaskPayload,
         observeResources = viewModel::observeTaskResources,
+        observeAnswers = viewModel::observeTaskAnswers,
         onClose = onExit
     )
 }
@@ -82,18 +86,21 @@ fun CatalogTaskPreview(
  * This is the catalog's read gesture, and it is deliberately not a review. There is no checkbox
  * and no action chip, so opening a Task to see what it is cannot become a judgement about it by
  * accident — the same distinction the List's item viewer draws, and drawn for the same reason. It
- * touches no ViewModel: there is no call it could make.
+ * makes no write: what it reads (the Prompt body, its Resources, the add-on's answers) arrives as
+ * flows, and nothing on screen can change them.
  *
  * What it keeps is the navigator, because a Task standing for a folder is several files and the
- * only way to see the rest of them is to page. What it drops is everything below it — the file's
- * chips, the completion box, the Info bar. The band that remains is the one that belongs to the
- * Task rather than to the file, which is exactly the boundary the frame already draws.
+ * only way to see the rest of them is to page. It shows the Task's pages exactly as Review does —
+ * Prompt, then files, then the add-on questionnaire read-only — because a Task is one shape wherever
+ * it is browsed. What it drops is everything below the navigator — the file's chips, the completion
+ * box, the Info bar. The band that remains is the one that belongs to the Task rather than to the
+ * file, which is exactly the boundary the frame already draws.
  *
  * **It pages between Tasks as well as within one.** [tasks] is the level the user was standing in
  * when they tapped — the catalog's own list, in the catalog's own order — so the outer pair of
- * arrows walks the folder they were looking at, and swiping at either end of a Task's files moves
- * to the next Task rather than stopping. The two levels are the same two the List's item viewer
- * has, and for the same reason: a folder is a sequence of Tasks, and a Task is a sequence of files.
+ * arrows walks the folder they were looking at, and swiping at either end of a Task moves to the
+ * next Task rather than stopping. The two levels are the same two the List's item viewer has, and
+ * for the same reason: a folder is a sequence of Tasks, and a Task is a sequence of pages.
  *
  * Still nothing is decided: stepping sideways is a look at the next one, not a move on it. A Task
  * is reached this way only if it was already in the level, so the sequence can never lead anywhere
@@ -106,11 +113,15 @@ fun CatalogTaskPreviewScreen(
     initialTaskId: String,
     rootUri: String,
     settings: AppSettings,
+    // The add-on is resolved from the rows every Task column names, exactly as Review resolves it,
+    // so this screen and Review cannot disagree about whether a Task has a questionnaire page.
+    addOnResolver: AddOnResolver,
     // The Prompt body is read by Task id when its page is composed, not carried on every row: a
     // catalog of a thousand prompts must not hold a thousand bodies to show one. Reads only — this
     // screen still has no write it could make.
     observePayload: (String) -> Flow<TaskPayloadEntity?>,
     observeResources: (String) -> Flow<List<TaskResourceView>>,
+    observeAnswers: (String) -> Flow<List<AddOnAnswer>>,
     onClose: () -> Unit
 ) {
     val context = LocalContext.current
@@ -147,27 +158,36 @@ fun CatalogTaskPreviewScreen(
 
     val item = remember(row, rootUri) { row.asPreviewItem(rootUri) }
     val assets = item.assets
-    val contentPage = item.hasContentPage()
-    val contentOffset = if (contentPage) 1 else 0
-    val pageCount = assets.size + contentOffset
-    val currentPage = pageIndex.coerceIn(0, maxOf(pageCount - 1, 0))
-    val currentAsset = (currentPage - contentOffset).coerceAtLeast(0)
-    val onContentPage = contentPage && currentPage == 0
-    val hasPageLevel = pageCount > 1
+    // The one page model every Task surface shares: Prompt (when there is one), then its files,
+    // then the add-on. Computing a count and an Asset index here instead is what let this screen
+    // and Review disagree about how many pages a Task has.
+    val storedAddOn = addOnResolver.readableVersion(item.addOn)
+    val pageState = taskPageState(item, storedAddOn, pageIndex)
+    val pageCount = pageState.pageCount
+    val currentPage = pageState.pageIndex
+    val currentAsset = pageState.assetIndex
+    val onContentPage = pageState.onContentPage
+    val hasPageLevel = pageState.hasPageLevel
     // A level with nothing to move between is not a level: a folder holding one Task draws no
-    // outer arrows, and a Task holding one file draws no inner pair.
+    // outer arrows, and a Task holding one page draws no inner pair.
     val hasTaskLevel = tasks.size > 1 && taskIndex >= 0
     // The level's Tasks in the level's order, as the guide names them, each carrying its pages as
     // the level below. A folder Task's name is often its path's last segment already, so the path
     // is only carried when it adds something.
-    val queueEntries = remember(tasks) {
+    val queueEntries = remember(tasks, addOnResolver) {
         tasks.map { task ->
             MediaQueueEntry(
                 label = task.displayName,
-                detail = task.groupPath.takeIf { it.isNotBlank() && it != task.displayName },
+                detail = taskProvenance(
+                    packageKey = task.packageKey,
+                    packageTitle = task.packageTitle,
+                    relativePath = task.groupPath,
+                    rootRelativePath = task.groupPath,
+                    title = task.displayName
+                ),
                 pages = reviewPageEntries(
                     task.assets,
-                    addOn = null,
+                    addOn = addOnResolver.readableVersion(task.addOn),
                     content = task.payloadKind != null
                 ).takeIf { it.size > 1 }.orEmpty()
             )
@@ -176,8 +196,8 @@ fun CatalogTaskPreviewScreen(
     // A level holding one Task still has a counter worth opening when the Task holds several
     // pages: the counter then names the pages, and this is that list. Nothing here can be marked,
     // so an entry is only a page's name.
-    val pageEntries = remember(assets, contentPage) {
-        reviewPageEntries(assets, addOn = null, content = contentPage)
+    val pageEntries = remember(assets, storedAddOn, pageState.hasContentPage) {
+        reviewPageEntries(assets, addOn = storedAddOn, content = pageState.hasContentPage)
     }
 
     // The Prompt body, for the Content page only. Read by Task id rather than carried, and read
@@ -186,11 +206,14 @@ fun CatalogTaskPreviewScreen(
         .collectAsStateWithLifecycle(initialValue = null)
     val taskResources by remember(item.taskId) { observeResources(item.taskId) }
         .collectAsStateWithLifecycle(initialValue = emptyList())
-    val prompt = remember(payloadRow) { payloadRow?.let { parseProfilePrompt(it.payload) } }
-    val photo = remember(prompt, taskResources) {
-        prompt?.photoResource?.let { key -> taskResources.firstOrNull { it.resourceKey == key } }
+    // The answers the read-only questionnaire page shows. The same flow Review reads; this screen
+    // has no control that could write to it.
+    val answers by remember(item.taskId) { observeAnswers(item.taskId) }
+        .collectAsStateWithLifecycle(initialValue = emptyList())
+    // The Viewer table owns the body; this surface only knows it has content to draw.
+    val content = remember(payloadRow) {
+        payloadRow?.let { decodePrompt(it.kind, it.schemaVersion, it.payload) }
     }
-    val photoMissing = prompt?.photoResource != null && (photo == null || photo.missing)
 
     MediaSystemBars(chromeVisible)
     BackHandler { onClose() }
@@ -203,6 +226,7 @@ fun CatalogTaskPreviewScreen(
             subtitle = when {
                 !hasPageLevel -> null
                 onContentPage -> "Prompt"
+                pageState.onAddOnPage -> "Add-on"
                 else -> assets.getOrNull(currentAsset)?.name
             },
             // Where in the folder this is, and — inside it — which page of the Task. The same
@@ -253,10 +277,10 @@ fun CatalogTaskPreviewScreen(
             } else {
                 null
             },
-            onPreviousAsset = assetStep(pageCount, currentPage, forward = false)?.let { page ->
+            onPreviousAsset = pageStep(pageCount, currentPage, forward = false)?.let { page ->
                 { pageIndex = page }
             },
-            onNextAsset = assetStep(pageCount, currentPage, forward = true)?.let { page ->
+            onNextAsset = pageStep(pageCount, currentPage, forward = true)?.let { page ->
                 { pageIndex = page }
             },
             hasAssetSteps = hasPageLevel
@@ -265,15 +289,16 @@ fun CatalogTaskPreviewScreen(
         media = {
             if (onContentPage) {
                 // The same page turn the List's item viewer gives a Prompt: read-only, so a swipe
-                // decides nothing. A multi-page Task turns to its first file; at the Task's edge
-                // the swipe moves to the next Task in the level.
+                // decides nothing. Inside the Task it turns to the next page — the first file, or
+                // the add-on after the last one; at the Task's edge it moves to the next Task.
                 ContentPageSwipe(
                     canSwipeForward = currentPage < pageCount - 1 ||
                         taskIndex < tasks.lastIndex,
                     canSwipeBack = taskIndex > 0,
                     onSwipeForward = {
-                        if (currentPage < pageCount - 1) {
-                            pageIndex = currentPage + 1
+                        val next = pageStep(pageCount, currentPage, forward = true)
+                        if (next != null) {
+                            pageIndex = next
                         } else if (taskIndex < tasks.lastIndex) {
                             currentTaskId = tasks[taskIndex + 1].taskId
                         }
@@ -281,18 +306,21 @@ fun CatalogTaskPreviewScreen(
                     onSwipeBack = {
                         if (taskIndex > 0) currentTaskId = tasks[taskIndex - 1].taskId
                     },
+                    onTap = { chromeVisible = !chromeVisible },
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    if (prompt != null) {
-                        ProfilePromptPage(
-                            prompt = prompt,
-                            photoUri = photo?.takeIf { !it.missing }?.uri,
-                            photoMissing = photoMissing,
-                            // A look says nothing: no pill is selected and none can be taken. The
-                            // same card as Review, so Preview and Review cannot disagree about what
-                            // the Prompt says.
+                    if (content != null) {
+                        PromptContentPage(
+                            content = content,
+                            resources = taskResources,
+                            // A look says nothing: no option is selected and none can be taken.
+                            // The same card as Review, so Preview and Review cannot disagree about
+                            // what the Prompt says. A drill may reveal its meaning here, because a
+                            // look is not an attempt.
                             selectedOptionId = null,
                             interactive = false,
+                            reveal = true,
+                            player = player,
                             onSelect = {},
                             modifier = Modifier.fillMaxSize()
                         )
@@ -314,12 +342,30 @@ fun CatalogTaskPreviewScreen(
                     // which is what makes a swipe the same gesture here as the arrows. At the ends of
                     // the *level* it simply stops: there is no Task to leave for and nothing to
                     // complete, because nothing here is being decided.
+                    //
+                    // Back off the **first page** goes to the Prompt page when there is one. A
+                    // Prompt Task's pages are Content first, then files, and skipping the Content
+                    // page to land on the previous Task made the back gesture jump two steps. The
+                    // forward direction already stepped page → next Task only at the last page, so
+                    // this makes the two ends symmetric.
                     canLeaveForward = taskIndex < tasks.lastIndex,
-                    canLeaveBack = taskIndex > 0,
+                    canLeaveBack = pageState.hasContentPage || taskIndex > 0,
                     onLeaveForward = { currentTaskId = tasks[taskIndex + 1].taskId },
-                    onLeaveBack = { currentTaskId = tasks[taskIndex - 1].taskId },
-                    onSelectAsset = { pageIndex = it + contentOffset },
+                    onLeaveBack = {
+                        if (pageState.hasContentPage) {
+                            pageIndex = 0
+                        } else if (taskIndex > 0) {
+                            currentTaskId = tasks[taskIndex - 1].taskId
+                        }
+                    },
+                    onSelectAsset = { pageIndex = pageOfAsset(it, pageState.hasContentPage) },
                     onTap = { chromeVisible = !chromeVisible },
+                    // The last page, drawn read-only: the questions the attached version still asks
+                    // and the answers on record. No chip and no field, so a look cannot become an
+                    // answer — but the Task is the shape Review shows, add-on included.
+                    addOnPage = storedAddOn?.let { addOn ->
+                        { AddOnAnswersPage(addOn = addOn, answers = answers) }
+                    },
                     modifier = Modifier.fillMaxSize()
                 )
             }
@@ -365,8 +411,13 @@ internal fun CatalogRow.asPreviewItem(rootUri: String): ReviewItem = ReviewItem(
     // The Prompt envelope, carried for the same reason: this screen renders a whole item, and an
     // item with a body is one whose first page is its Content page.
     packageKey = packageKey,
+    packageTitle = packageTitle,
     promptKey = promptKey,
     payloadKind = payloadKind,
     payloadSchema = payloadSchema,
-    payloadRevision = payloadRevision
+    payloadRevision = payloadRevision,
+    // The questionnaire stamp, carried because it is a page of the Task: resolving it here is what
+    // lets the preview show the same pages Review does. Reading it is all this screen does; the
+    // answers arrive on their own flow.
+    addOn = addOn
 )

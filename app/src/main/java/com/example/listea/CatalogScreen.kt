@@ -137,6 +137,11 @@ fun CatalogScreen(
     val importVersion by viewModel.importVersion.collectAsStateWithLifecycle()
     val error by viewModel.listCreationError.collectAsStateWithLifecycle()
     val lists by viewModel.summaries.collectAsStateWithLifecycle()
+    // The Task row says whether an add-on page will actually be drawn, not merely whether a
+    // reference is stamped: a reference this build cannot resolve draws no page (the fail-closed
+    // rule `AddOnResolver` states), and a count that ignored that would promise a page Review does
+    // not have. Every kind of Task reads its stamp here — a picture, a PDF and a Prompt alike.
+    val addOnResolver by viewModel.addOnResolver.collectAsStateWithLifecycle()
 
     // Cold, and re-collected on every committed import: a Task selection made from a stale read
     // would create a List of Tasks that are not the ones the user was shown.
@@ -298,6 +303,7 @@ fun CatalogScreen(
                     items(view.tasks, key = { it.taskId }) { row ->
                         CatalogTaskCard(
                             row = row,
+                            hasAddOn = addOnResolver.readableVersion(row.addOn) != null,
                             selecting = selecting,
                             selected = row.taskId in covered,
                             // No root, no preview: the row is still listed and still selectable,
@@ -519,6 +525,8 @@ private fun CatalogScopeCard(
 @Composable
 private fun CatalogTaskCard(
     row: CatalogRow,
+    /** Whether this Task's stamped add-on resolves, so the row can say the page exists. */
+    hasAddOn: Boolean,
     selecting: Boolean,
     selected: Boolean,
     onOpen: (() -> Unit)?,
@@ -547,7 +555,7 @@ private fun CatalogTaskCard(
             Column(Modifier.weight(1f)) {
                 Text(row.displayName, style = MaterialTheme.typography.titleSmall, maxLines = 1)
                 Text(
-                    catalogTaskDetail(row, block),
+                    catalogTaskDetail(row, block, hasAddOn),
                     style = MaterialTheme.typography.bodySmall,
                     color = if (block == null) {
                         MaterialTheme.colorScheme.onSurfaceVariant
@@ -576,12 +584,25 @@ private fun CatalogTaskCard(
 }
 
 /**
- * What a Task row says under its name: how much content it has, and why it cannot be reviewed when
- * it cannot. One function so the line and its tone cannot disagree.
+ * What a Task row says under its name: how much content it has, whether it carries an add-on page,
+ * and why it cannot be reviewed when it cannot. One function so the line and its tone cannot
+ * disagree.
+ *
+ * **The add-on is named here because it is a page.** It is not an Asset and never was — it belongs
+ * to the Task, not to a file — but the row is the one place a user chooses a Task, and a Task whose
+ * review will end on a questionnaire should say so before it is opened. [hasAddOn] is resolved
+ * (`AddOnResolver.readableVersion`), not the raw stamp, so the count cannot promise a page this
+ * build will not draw. The rule is Task-shaped rather than Prompt-shaped: a picture or a PDF Task
+ * that was given an add-on reads the same line.
  */
-internal fun catalogTaskDetail(row: CatalogRow, block: ReviewBlock?): String {
+internal fun catalogTaskDetail(
+    row: CatalogRow,
+    block: ReviewBlock?,
+    hasAddOn: Boolean = false
+): String {
     val content = countLabel(row.assetCount, "Asset") +
-        if (row.missingAssets > 0) ", " + row.missingAssets + " missing" else ""
+        (if (row.missingAssets > 0) ", " + row.missingAssets + " missing" else "") +
+        (if (hasAddOn) ", " + countLabel(1, "add-on") else "")
     return if (block == null) content else content + " · " + block.label
 }
 

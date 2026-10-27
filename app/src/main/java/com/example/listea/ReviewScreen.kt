@@ -60,7 +60,7 @@ import com.example.listea.domain.ReviewResponse
 import com.example.listea.domain.encodeValue
 import com.example.listea.domain.parse
 import com.example.listea.domain.parseEventValue
-import com.example.listea.domain.parseProfilePrompt
+import com.example.listea.domain.decodePrompt
 import com.example.listea.domain.StoredTemplateVersion
 import com.example.listea.domain.TASK_REVIEW_COMPLETE_CONTROL
 import com.example.listea.domain.TaskAction
@@ -137,8 +137,27 @@ data class ReviewItemInfo(
     val sourceMissing: Boolean,
     val isCompleted: Boolean,
     val actionLabel: String?,
-    val listTitle: String?
+    val listTitle: String?,
+    /**
+     * The Package this Task answers, when it came from one. Carried so the sheet names the
+     * Package by its manifest title rather than printing the synthetic catalog key that sits in
+     * [relativePath]; see [taskProvenance].
+     */
+    val packageKey: String? = null,
+    val packageTitle: String? = null
 )
+
+/**
+ * Which level of a Task an Info sheet is describing.
+ *
+ * The hierarchy is Task → Asset → media viewer, with the add-on a bounded Task-level property
+ * that is *drawn* as a page. The Info button belongs to the asset level, and the sheet it opens
+ * describes that level only: a file's sheet says what is true of the file, and the add-on page's
+ * sheet says what is true of the question it is on. Mixing the Task's questionnaire into every
+ * file's sheet made the two levels read as one. [Content] is the Prompt body's own level — a
+ * Task-level page with no file, and so no marks, no media facts and no Save.
+ */
+enum class ReviewInfoLevel { Content, Asset, AddOn }
 
 /**
  * Assembles what the current card knows about itself. Cheap: no queries, no file access.
@@ -165,7 +184,9 @@ fun reviewItemInfo(
     sourceMissing = item.sourceMissing,
     isCompleted = item.isCompleted,
     actionLabel = itemActionLabel(decisions, resolver.controlForTask(item.assetControls)),
-    listTitle = listTitle
+    listTitle = listTitle,
+    packageKey = item.packageKey,
+    packageTitle = item.packageTitle
 )
 
 /**
@@ -517,6 +538,11 @@ fun ReviewSession(
     // the two levels are one control group, and a selection living inside the viewer would have to
     // be reported back up for the bar to draw it and driven back down for the arrows to move it.
     var pageIndex by rememberSaveable(currentTaskId) { mutableStateOf(0) }
+    // Set when this visit's commit has been accepted and the reviewer was sent to the add-on page
+    // rather than the next Task. Leaving the add-on page forward is then a move in the queue, not a
+    // second judgment, so it must not try to commit again. Keyed on the Task, so arriving at another
+    // one starts uncommitted.
+    var committedHere by remember(currentTaskId) { mutableStateOf(false) }
     // A page the guide asked for on a Task that is not on screen yet. The page index is keyed on
     // the Task, so the Task arrives at its first page and this moves it once that state exists.
     var pendingPage by remember { mutableStateOf<Int?>(null) }
@@ -641,11 +667,12 @@ fun ReviewSession(
         .collectAsStateWithLifecycle(initialValue = null)
     val taskResources by remember(item.taskId) { viewModel.observeTaskResources(item.taskId) }
         .collectAsStateWithLifecycle(initialValue = emptyList())
-    val prompt = remember(payloadRow) { payloadRow?.let { parseProfilePrompt(it.payload) } }
-    val photo = remember(prompt, taskResources) {
-        prompt?.photoResource?.let { key -> taskResources.firstOrNull { it.resourceKey == key } }
+    // The body is decoded through the Viewer table, so this screen never names a Viewer and never
+    // parses one. The card resolves its own Resource against the Task's uses; the resources flow
+    // is read here for the requiredness gate below.
+    val content = remember(payloadRow) {
+        payloadRow?.let { decodePrompt(it.kind, it.schemaVersion, it.payload) }
     }
-    val photoMissing = prompt?.photoResource != null && (photo == null || photo.missing)
 
     // What is on record for this Task, so a committed point is not write-only. Read as text and
     // parsed through the domain reader: the column holds two grammars, and a row from a later build
@@ -687,15 +714,76 @@ fun ReviewSession(
     // menu that is not open.
     val queueEntries = remember(items, addOnResolver) {
         reviewQueueEntries(items) { entry ->
-            val addOn = addOnResolver.versionFor(entry.addOn)
-                ?.takeIf { it.questions.isNotEmpty() }
-            reviewPageEntries(assetsOf(entry), addOn)
+            reviewPageEntries(
+                assets = assetsOf(entry),
+                addOn = addOnResolver.readableVersion(entry.addOn),
+                // The Content page is a page of the Task and keeps its place in the guide. It was
+                // omitted while every page after it was counted, so a Prompt Task's guide rows were
+                // one page to the left of the position beside them.
+                content = entry.hasContentPage()
+            )
         }
     }
     // The frame takes real room here, so the system bars are never hidden: there is no full-bleed
     // picture for them to be hiding *from*. They are still forced light, which is the other half
     // of what this does — what sits under them is the navigator's scrim, not the app's surface.
     MediaSystemBars(chromeVisible = true)
+
+    // The page state is clamped rather than repaired: a re-sync can take a file away under a
+    // selection that was already made, and the honest answer is to show what is still there
+    // instead of writing state from a composition.
+    //
+    // Read here, above the queue moves, because a commit has to know whether the Task has an add-on
+    // page to land on before it decides to advance — see [commitArrival].
+    val assets = assetsOf(item)
+    // The questionnaire this Task was stamped with, if this build can read it. A reference this
+    // build cannot resolve draws nothing — the fail-closed rule the resolver states — so the Task
+    // simply has no extra page rather than a page it cannot fill.
+    val storedAddOn = addOnResolver.readableVersion(item.addOn)
+    val hasAddOnPage = storedAddOn != null
+    // The pages this Task presents, in the order the arrows and the guide walk them: the Prompt
+    // body first when it has one, then the Assets, then the add-on. One state derivation, shared
+    // with the read-only Task surfaces, is the source for the count, the step, the guide and which
+    // page is showing — see [taskPageState].
+    val pageState = taskPageState(item, storedAddOn, pageIndex)
+    val pages = pageState.pages
+    val pageCount = pageState.pageCount
+    // The pages as the jump list names them, for when the queue itself has only one Task to move
+    // between. The Content and add-on pages are both entries, and each row says what it is — see
+    // [reviewPageEntries].
+    val pageEntries = remember(assets, storedAddOn, pages) {
+        reviewPageEntries(assets, storedAddOn, content = item.hasContentPage())
+    }
+    val currentPage = pageState.pageIndex
+    val currentModel = pageState.current
+    val contentPage = currentModel as? ReviewPage.Content
+    // The add-on page is the last index. `page` is then null, which every file-specific value below
+    // already reads as *no file* rather than as an error.
+    val onAddOnPage = pageState.onAddOnPage
+
+    // Why this Prompt cannot be answered, resolved once: the Content page draws it, and the
+    // forward edge has to know whether this Task has a judgment in it at all. Null means the page
+    // is interactive. Each reason is a fact the submission boundary would refuse on, said before
+    // the tap rather than only after it.
+    val missingRequired = taskResources.firstOrNull { it.required && it.missing }
+    // Whether *the Task* has a Content page, not whether one is on screen: the forward edge is
+    // resolved on the add-on page too, and asking the current page would have said "no Prompt"
+    // exactly where the gate is applied.
+    val contentNotice = if (item.hasContentPage()) {
+        when {
+            payloadRow == null -> "This Prompt's body could not be read."
+            content == null -> "This build cannot read this Prompt."
+            item.payloadRevision != null && payloadRow?.revision != item.payloadRevision ->
+                "This Prompt was updated after the review opened. Reopen it to judge the new text."
+
+            missingRequired != null ->
+                "The file this Prompt requires is missing from the source, so it cannot be answered."
+            !acceptsChoice -> "No Task Review in force catches a choice."
+            else -> null
+        }
+    } else {
+        null
+    }
 
     // Landing on a Task is what moves the List's cursor; [id] rather than [taskId] because the
     // cursor names an entry, and §6 leaves it that way on purpose.
@@ -705,6 +793,17 @@ fun ReviewSession(
     }
 
     val navigation = taskNavigation(items, index)
+
+    // Forward off this Task's last page is the queue move the next arrow makes, rather than a
+    // commit, when the Task has no judgment a commit could record: its source is blocked, or its
+    // Prompt cannot be answered and the template in force is waiting for an event. Without this
+    // the forward edge would be inert on exactly the Tasks that can never be judged, which is
+    // the one place the documented swipe contract would stop working. A template that needs no
+    // event still commits normally — a legacy rapid-review Prompt completes from the frame.
+    val forwardIsNavigation = navigation.canGoNext && (
+        item.reviewBlocked != null ||
+            (contentNotice != null && definitionAcceptsEvents)
+        )
 
     // The semantic-action boundary, and it sits a level above the Task on purpose: a swipe and an
     // explicit control both arrive here as a [TaskAction], and this is where one becomes its
@@ -719,20 +818,44 @@ fun ReviewSession(
      * button. [events] is what the viewer reported; the headless definition gets an empty list and
      * records the fold of the pairs, exactly as it always has.
      */
+    // The queue move a judgment leads to, once the Task has nothing left to show. Shared by the
+    // accepted commit and by leaving the add-on page after one, so the two cannot disagree about
+    // when a round ends.
+    fun advanceToNextTask() {
+        if (index == items.lastIndex) {
+            finished = true
+            // Announced after the check above, so the delivery it may lead to sees
+            // the item that was just swiped as checked.
+            onQueueFinished?.invoke(items)
+        } else {
+            goTo(items[index + 1])
+        }
+    }
+
     fun commit(events: List<ViewerEvent>) {
         viewModel.submitItemReview(item, terms, review, events) { accepted ->
             // A refused commit wrote nothing, so there is nowhere to move: advancing would show the
             // next Prompt while this one stayed unanswered, and the round would have walked past a
             // judgment it never made.
             if (!accepted) return@submitItemReview
-            if (reviewDefinition?.advanceAfterCommit == false) return@submitItemReview
-            if (index == items.lastIndex) {
-                finished = true
-                // Announced after the check above, so the delivery it may lead to sees
-                // the item that was just swiped as checked.
-                onQueueFinished?.invoke(items)
-            } else {
-                goTo(items[index + 1])
+            when (
+                commitArrival(
+                    advanceAfterCommit = reviewDefinition?.advanceAfterCommit != false,
+                    hasAddOnPage = hasAddOnPage,
+                    currentPage = currentPage,
+                    pageCount = pageCount
+                )
+            ) {
+                // Judged, but its questionnaire is a page it has not shown yet. Land there rather
+                // than on the next Task: the add-on is the Task's last page, and the place a Task
+                // is left from — advancing straight away skipped it without a trace.
+                CommitArrival.AddOnPage -> {
+                    committedHere = true
+                    pageIndex = pageCount - 1
+                }
+
+                CommitArrival.NextTask -> advanceToNextTask()
+                null -> Unit
             }
         }
     }
@@ -760,34 +883,6 @@ fun ReviewSession(
             TaskAction.NextTask -> navigation.next?.let { goTo(it) }
         }
     }
-
-    // The page state is clamped rather than repaired: a re-sync can take a file away under a
-    // selection that was already made, and the honest answer is to show what is still there
-    // instead of writing state from a composition.
-    val assets = assetsOf(item)
-    // The questionnaire this Task was stamped with, if this build can read it. A reference this
-    // build cannot resolve draws nothing — the fail-closed rule the resolver states — so the Task
-    // simply has no extra page rather than a page it cannot fill.
-    val storedAddOn = addOnResolver.versionFor(item.addOn)
-        ?.takeIf { it.questions.isNotEmpty() }
-    val hasAddOnPage = storedAddOn != null
-    // The pages this Task presents, in the order the arrows and the guide walk them: the Prompt
-    // body first when it has one, then the Assets, then the add-on. One list is now the source for
-    // the count, the step, the guide and which page is showing.
-    val pages = reviewPages(item, hasAddOnPage)
-    val pageCount = pages.size
-    // The pages as the jump list names them, for when the queue itself has only one Task to move
-    // between. The Content and add-on pages are both entries, and each row says what it is — see
-    // [reviewPageEntries].
-    val pageEntries = remember(assets, storedAddOn, pages) {
-        reviewPageEntries(assets, storedAddOn, content = item.hasContentPage())
-    }
-    val currentPage = pageIndex.coerceIn(0, maxOf(pageCount - 1, 0))
-    val currentModel = pages.getOrNull(currentPage)
-    val contentPage = currentModel as? ReviewPage.Content
-    // The add-on page is the last index. `page` is then null, which every file-specific value below
-    // already reads as *no file* rather than as an error.
-    val onAddOnPage = currentModel is ReviewPage.AddOn
 
     // The bands' two answers, resolved here because this is the only place that knows both which
     // Task is on screen and which of its files. The chip row belongs to the *file* — its kind comes
@@ -1049,10 +1144,13 @@ fun ReviewSession(
         // one thing a review is for, and a round cannot be finished by a tap that hid the control
         // that finishes it.
         framePersists = true,
-        // The completion checkbox exists only when the review commits from it. A template that
-        // names its own control draws that control in the band instead, and this frame's slot is
-        // empty: a checkbox here would complete the Task without recording what the template is
-        // waiting for.
+        // The frame's bottom band is the Task's own state, and every template has one. When the
+        // review commits from the checkbox it is that control. When a template names its own
+        // control, that control lives in the dismissible file band and this band states the
+        // result instead — a checkbox here would complete the Task without recording what the
+        // template is waiting for, but an empty band leaves a headless Prompt with no task-level
+        // display at all. Read-only, and beside the file's band rather than inside it, so a tap
+        // that puts the file's controls away cannot put this away too.
         taskBar = if (commitIsCompletion) {
             {
                 TaskCompletionBar(
@@ -1072,55 +1170,76 @@ fun ReviewSession(
                 )
             }
         } else {
-            null
+            { TaskStatusBar(item = item, reviewBlocked = item.reviewBlocked) }
         },
         assetControls = assetBand,
     ) {
         if (contentPage != null) {
-            // The Prompt's own refusal reasons, resolved once for both the card and its notice.
-            // Each one is a fact the submission boundary would refuse on, said before the tap
-            // rather than only after it.
-            val missingRequired = taskResources.firstOrNull { it.required && it.missing }
-            val notice = when {
-                payloadRow == null -> "This Prompt's body could not be read."
-                prompt == null -> "This build cannot read this Prompt."
-                item.payloadRevision != null && payloadRow?.revision != item.payloadRevision ->
-                    "This Prompt was updated after the review opened. Reopen it to judge the new text."
-
-                missingRequired != null ->
-                    "The file this Prompt requires is missing from the source, so it cannot be answered."
-                !acceptsChoice -> "No Task Review in force catches a choice."
-                else -> null
-            }
-            if (prompt != null) {
-                ProfilePromptPage(
-                    prompt = prompt,
-                    photoUri = photo?.takeIf { !it.missing }?.uri,
-                    photoMissing = photoMissing,
-                    selectedOptionId = (choice ?: recordedChoice)?.optionId,
-                    interactive = notice == null,
-                    notice = notice,
-                    onSelect = { option ->
-                        val event = ViewerEvent.Choice(option.id, option.label)
-                        if (commitsChoiceImmediately) {
-                            // The tap is the judgment. A refusal inside the write boundary leaves
-                            // this page on screen, which is the honest answer to a refused commit.
-                            commit(listOf(event))
-                        } else {
-                            // A template with its own commit route holds the choice until that
-                            // route fires; nothing is written here.
-                            pendingChoice = event.encodeValue()
-                        }
-                    },
-                    modifier = Modifier.fillMaxSize()
-                )
-            } else {
-                PromptNoticePage(notice ?: "This Prompt cannot be shown.")
+            // A page with a judgment to make is left alone: its tap is the answer, and a swipe
+            // that could leave it would be a way to pass the question unknowingly. A page this
+            // build cannot answer has no judgment to make, so it joins the ordinary run — swipe
+            // turns the page, and at the run's ends crosses Tasks as navigation, not as a commit.
+            // Both cases get the tap that reveals and hides the asset band.
+            val interactive = contentNotice == null
+            ContentPageSwipe(
+                canSwipeForward = !interactive && (pageForward != null || navigation.next != null),
+                canSwipeBack = !interactive && (pageBack != null || navigation.previous != null),
+                onSwipeForward = {
+                    pageForward?.let { pageIndex = it }
+                        ?: navigation.next?.let { goTo(it) }
+                },
+                onSwipeBack = {
+                    pageBack?.let { pageIndex = it }
+                        ?: navigation.previous?.let { goTo(it) }
+                },
+                onTap = { chromeVisible = !chromeVisible },
+                modifier = Modifier.fillMaxSize()
+            ) {
+                if (content != null) {
+                    PromptContentPage(
+                        content = content,
+                        resources = taskResources,
+                        selectedOptionId = (choice ?: recordedChoice)?.optionId,
+                        interactive = interactive,
+                        // A drill reveals its meaning only once the answer is on record. A page
+                        // this build cannot answer is read-only and shows everything it has.
+                        reveal = !interactive || recordedChoice != null,
+                        notice = contentNotice,
+                        player = player,
+                        onSelect = { option ->
+                            val event = ViewerEvent.Choice(option.id, option.label)
+                            if (commitsChoiceImmediately) {
+                                // The tap is the judgment. A refusal inside the write boundary
+                                // leaves this page on screen, which is the honest answer to a
+                                // refused commit.
+                                commit(listOf(event))
+                            } else {
+                                // A template with its own commit route holds the choice until
+                                // that route fires; nothing is written here.
+                                pendingChoice = event.encodeValue()
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    PromptNoticePage(contentNotice ?: "This Prompt cannot be shown.")
+                }
             }
         } else {
+        // [AssetRun] counts Assets, and its add-on sentinel is the Asset count. The unified page
+        // list counts the Content page as zero, so a Prompt Task carrying both a body and files
+        // would otherwise open one file too far and put its add-on on the wrong page. The two
+        // converters are the same pair the preview surfaces use; see [assetIndexOf].
+        val hasContent = item.hasContentPage()
+        val backToContent = hasContent && currentPage == 1
+        // This visit's judgment has already been written, and the reviewer is on the add-on page it
+        // was sent to. Forward from here is a queue move, not a second commit — for a template that
+        // accepts events there is nothing left to report, so committing again would be refused and
+        // the page would feel stuck.
+        val passedCommit = onAddOnPage && committedHere
         AssetRun(
             item = item,
-            selectedIndex = currentPage,
+            selectedIndex = pageState.assetIndex,
             player = player,
             imageLoader = imageLoader,
             settings = settings,
@@ -1131,12 +1250,16 @@ fun ReviewSession(
             // closed gate: with no event reported, forward is nowhere to go either — and the
             // gesture has to know that before it slides, or a leave the dispatch refuses parks
             // the card off-screen as a black surface.
-            canLeaveForward = canLeaveTaskForward(
-                reviewBlocked = item.reviewBlocked != null,
-                acceptsEvents = definitionAcceptsEvents,
-                hasPendingEvent = sample != null
-            ),
-            canLeaveBack = navigation.canGoPrevious,
+            canLeaveForward = passedCommit ||
+                forwardIsNavigation ||
+                canLeaveTaskForward(
+                    reviewBlocked = item.reviewBlocked != null,
+                    acceptsEvents = definitionAcceptsEvents,
+                    hasPendingEvent = sample != null
+                ),
+            // Back off the first file of a Prompt Task returns to its Content page — a page turn,
+            // not a queue step. Elsewhere it steps the queue, exactly as before.
+            canLeaveBack = backToContent || navigation.canGoPrevious,
             pdfTools = pdfTools,
             pdfMarks = pdfMarks,
             onPdfCreateMark = onCreatePdfMark,
@@ -1147,11 +1270,19 @@ fun ReviewSession(
             // drew.
             onPdfRelocateMark = { id, anchor -> viewModel.relocateMark(id, anchor) },
             onPdfMarksResolved = { pdfMarkInfo = it },
-            onLeaveForward = { dispatch(TaskAction.CompleteTask) },
-            // Backwards is never a judgment: it steps the queue and changes nothing about the
-            // Task that was left behind.
-            onLeaveBack = { dispatch(TaskAction.PreviousTask) },
-            onSelectAsset = { pageIndex = it },
+            onLeaveForward = {
+                if (passedCommit || forwardIsNavigation) {
+                    advanceToNextTask()
+                } else {
+                    dispatch(TaskAction.CompleteTask)
+                }
+            },
+            // Backwards is never a judgment: it either returns to this Task's Content page or
+            // steps the queue, and changes nothing about the Task that was left behind.
+            onLeaveBack = {
+                if (backToContent) pageIndex = 0 else dispatch(TaskAction.PreviousTask)
+            },
+            onSelectAsset = { pageIndex = pageOfAsset(it, hasContent) },
             onTap = { chromeVisible = !chromeVisible },
             // The viewer's third gesture, offered only when the template in force accepts it and
             // the page on screen is a picture. The point is resolved through the card's own zoom
@@ -1210,12 +1341,21 @@ fun ReviewSession(
             // which is exactly what a folder-as-Task used to do. On the add-on page this is null,
             // so the sheet has no file to save or share, which is the truth of that page.
             asset = page,
+            // The level the Info button belongs to. Info is a property of the page on screen, not
+            // of the Task: a file's sheet describes the file, the Prompt body's sheet describes
+            // the Prompt, and the add-on's sheet describes the questionnaire. Handing every page
+            // the add-on made the three levels read as one.
+            level = when {
+                onAddOnPage -> ReviewInfoLevel.AddOn
+                currentModel is ReviewPage.Content -> ReviewInfoLevel.Content
+                else -> ReviewInfoLevel.Asset
+            },
             // The PDF's marks, placed and missing alike. The sheet is the only place a mark this
             // document cannot place is named; nothing on the page says so. Null for every other
             // kind, where a marks section would be a question the file cannot answer.
             marks = if (kind == AssetKind.PDF) pdfMarkInfo else null,
-            // What this Task's questionnaire asked and what the reviewer said, including answers
-            // its current version no longer asks. Drawn on every page of a Task that has one.
+            // The questionnaire's answers, read only on its own page. Its current version no
+            // longer asks some of them; those are kept and shown as no longer asked.
             addOnInfo = addOnInfoOf(storedAddOn, answers, addOnResolver),
             // What the latest submission's template caught. Null for a template that accepts no
             // events, so its sheet does not gain a section that could only ever say "None".
@@ -1453,6 +1593,7 @@ fun ReviewItemInfoSheet(
     info: ReviewItemInfo,
     asset: ReviewAsset?,
     onDismiss: () -> Unit,
+    level: ReviewInfoLevel = ReviewInfoLevel.Asset,
     marks: List<PdfMarkInfo>? = null,
     addOnInfo: AddOnInfo? = null,
     recordedEvents: List<ViewerEvent>? = null,
@@ -1461,7 +1602,11 @@ fun ReviewItemInfoSheet(
     val context = LocalContext.current
     val sourceUri = asset?.sourceUri?.takeIf { it.isNotEmpty() } ?: info.sourceUri
     val sourceMissing = asset?.sourceMissing ?: info.sourceMissing
-    val title = asset?.name?.takeIf { it.isNotEmpty() } ?: info.title
+    val title = when (level) {
+        ReviewInfoLevel.AddOn -> addOnInfo?.name ?: info.title
+        ReviewInfoLevel.Content -> info.title
+        ReviewInfoLevel.Asset -> asset?.name?.takeIf { it.isNotEmpty() } ?: info.title
+    }
     val facts by produceState(MediaFacts(), sourceUri) {
         value = sourceUri?.let { readMediaFacts(context, it) } ?: MediaFacts()
     }
@@ -1469,39 +1614,73 @@ fun ReviewItemInfoSheet(
     // record is the marks below. Listing "Actions None" on one would describe a control the file
     // deliberately does not offer.
     val isPdf = asset?.let { assetKindOf(it.name) == AssetKind.PDF } == true
+    val provenance = taskProvenance(
+        packageKey = info.packageKey,
+        packageTitle = info.packageTitle,
+        relativePath = info.relativePath,
+        rootRelativePath = null,
+        title = info.title
+    )
 
     ItemInfoSheet(
         title = title,
         onDismiss = onDismiss,
         rows = buildList {
-            info.relativePath?.let { add(InfoField("Path in source folder", it)) }
-            info.listTitle?.let { add(InfoField("List", it)) }
-            add(InfoField("Status", if (info.isCompleted) "Checked" else "Not checked"))
-            if (!isPdf) add(InfoField("Actions", info.actionLabel ?: "None"))
-            when {
-                sourceUri == null -> add(InfoField("Source", "Manual item — no file"))
-                sourceMissing ->
-                    add(InfoField("Source", "Missing from the source folder"))
+            when (level) {
+                // The questionnaire's own page: only the questionnaire. Its name, version and
+                // answers are already in `addOnInfoRows`; the Task's path, status and file facts
+                // are one level up and were never what this sheet was asked about.
+                ReviewInfoLevel.AddOn -> addOnInfo?.let { addAll(addOnInfoRows(it)) }
+
+                // The Prompt body is a Task-level page with no file: nothing here has a source,
+                // a mark or a media fact, and the Task's own events are still about the content.
+                ReviewInfoLevel.Content -> {
+                    provenance?.let {
+                        add(InfoField(provenanceLabel(info.packageKey), it))
+                    }
+                    info.listTitle?.let { add(InfoField("List", it)) }
+                    add(InfoField("Status", if (info.isCompleted) "Checked" else "Not checked"))
+                    recordedEvents?.let { addAll(recordedEventRows(it, recordedSourceNames)) }
+                }
+
+                // The file's own sheet. The Task's questionnaire deliberately does not appear:
+                // the add-on is a Task-level property, and folding its answers into every file
+                // made the two levels indistinguishable. It has its own page and its own sheet.
+                ReviewInfoLevel.Asset -> {
+                    provenance?.let {
+                        add(InfoField(provenanceLabel(info.packageKey), it))
+                    }
+                    info.listTitle?.let { add(InfoField("List", it)) }
+                    add(InfoField("Status", if (info.isCompleted) "Checked" else "Not checked"))
+                    if (!isPdf) add(InfoField("Actions", info.actionLabel ?: "None"))
+                    when {
+                        sourceUri == null -> add(InfoField("Source", "Manual item — no file"))
+                        sourceMissing ->
+                            add(InfoField("Source", "Missing from the source folder"))
+                    }
+                    // What this document carries, comment by comment and tag by tag — including
+                    // a mark whose passage is no longer in it. Null means the caller has no
+                    // resolution to report (a read-only viewer, or a file that is not a PDF), not
+                    // that the file is unmarked.
+                    marks?.let { addAll(pdfMarkRows(it)) }
+                    // What this Task's template caught in its latest submission — beside the marks
+                    // it already carries, because both are committed facts about the content
+                    // rather than current state. Null when no template accepted events; see
+                    // [recordedEventRows].
+                    recordedEvents?.let { addAll(recordedEventRows(it, recordedSourceNames)) }
+                    addAll(mediaFactRows(facts, title))
+                }
             }
-            // What this document carries, comment by comment and tag by tag — including a mark
-            // whose passage is no longer in it. Null means the caller has no resolution to report
-            // (a read-only viewer, or a file that is not a PDF), not that the file is unmarked.
-            marks?.let { addAll(pdfMarkRows(it)) }
-            // What this Task's template caught in its latest submission — beside the marks it
-            // already carries, because both are committed facts about the content rather than
-            // current state. Null when no template accepted events; see [recordedEventRows].
-            recordedEvents?.let { addAll(recordedEventRows(it, recordedSourceNames)) }
-            addAll(mediaFactRows(facts, title))
-            // The Task's questionnaire, after the file's own facts: the answers are about the
-            // whole Task, so they sit below whatever page happens to be on screen — and are drawn
-            // on every one of its pages, including the questionnaire's own.
-            addOnInfo?.let { addAll(addOnInfoRows(it)) }
         },
         footer = sourceUri
-            ?.takeIf { !sourceMissing }
+            ?.takeIf { level == ReviewInfoLevel.Asset && !sourceMissing }
             ?.let { uri -> { MediaFileActions(sourceUri = uri, name = title) } }
     )
 }
+
+/** What to call the provenance line for an item: a Package has a name, a file has a path. */
+private fun provenanceLabel(packageKey: String?): String =
+    if (packageKey != null) "Package" else "Path in source folder"
 
 /**
  * The marks section of a PDF's Info sheet: one summary line, then one row per mark.
