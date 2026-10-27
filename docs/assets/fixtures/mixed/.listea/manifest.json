@@ -1,0 +1,34 @@
+{
+  "protocol": "listea.package/1",
+  "packageKey": "mixed-demo",
+  "revision": 1,
+  "title": "Dating and words",
+  "prompts": [
+    {
+      "promptKey": "alice",
+      "kind": "profile",
+      "schema": 1,
+      "response": "choice.single",
+      "title": "Alice, 28",
+      "description": "prompts/alice.json",
+      "resources": [
+        { "resourceKey": "alice-photo", "required": true }
+      ]
+    },
+    {
+      "promptKey": "serendipity",
+      "kind": "vocabulary",
+      "schema": 1,
+      "response": "choice.single",
+      "title": "serendipity",
+      "description": "prompts/serendipity.json",
+      "resources": [
+        { "resourceKey": "serendipity-audio", "required": true }
+      ]
+    }
+  ],
+  "resources": [
+    { "resourceKey": "alice-photo", "kind": "image", "member": "media/alice.png" },
+    { "resourceKey": "serendipity-audio", "kind": "audio", "member": "media/serendipity.mp3" }
+  ]
+}

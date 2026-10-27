@@ -40,8 +40,8 @@ in a handful of strings, not in what any control does.
 
 | Gesture | What it does |
 |---|---|
-| **Swipe left** | Go forward one file; off the last file, mark the item checked and advance |
-| **Swipe right** | Go back one file; off the first, go back one item. Changes nothing |
+| **Swipe left** | Go forward one page; off the last page, mark the item checked and advance |
+| **Swipe right** | Go back one page; off the first, go back one item. Changes nothing |
 | **Pinch** | Zoom, up to 5× — a picture, or a PDF at the point between the fingers |
 | **Drag while zoomed** | Pan inside the picture |
 | **Drag a PDF** | Scroll its pages vertically; with a selection, drag a handle to extend it |
@@ -51,8 +51,17 @@ in a handful of strings, not in what any control does.
 
 An item holds one file most of the time, and then a swipe is exactly what it has always been: left
 checks it off and advances, right steps back. An item holding several — a folder imported as a
-Task — is one item and several files, and a swipe looks at all of them before it reaches the next
-item.
+Task — is one item and several pages, and a swipe looks at all of them before it reaches the next
+item. A Prompt Task's pages start with the Prompt and end with its add-on, when it has one; the
+swipe that leaves the add-on page is the one that completes the Task.
+
+**A page this build cannot answer has nothing to commit.** A Prompt whose body cannot be read,
+whose required file is missing, whose Task is blocked, or that no Task Review in force can catch a
+choice for draws no judgement control. It is an ordinary page in the run: a horizontal swipe turns
+it, and at the Task's edges crosses Tasks as navigation. The add-on page's forward edge follows the
+same rule — when the Task cannot be judged, leaving the add-on is a queue move rather than a second
+attempt to commit, so a Task is never trapped by a question that cannot be answered. Tapping such a
+page, like any other, shows and hides the file's own band.
 
 Both ways of moving exist, and they are deliberately different controls. Swiping turns a **page**:
 it moves between the files inside the item, and only leaves the item at either end of them. The
@@ -76,15 +85,23 @@ whatsapp                    xxxx.mp4              << ‹ 3(3/3)/3 › >>
 
 | Zone | What it is |
 |---|---|
-| **Left** | Back, then the item's name, with the tags it carries under it. |
-| **Middle** | The file on screen. Absent when the item holds only one file. |
+| **Left** | Back, then the item's name. The tags it carries are drawn on a line of their own across the bar, under this row. |
+| **Middle** | The file on screen. Absent when the item holds only one file, and on a bar too narrow to hold both names beside the arrows and the position. |
 | **Right** | The queue position — itself the control that opens the queue guide — bracketed by its arrows. |
 
-The item's name carries a second line when the item has tags: one badge per action set on it — ★,
-and each tag by its display name. It is the same row a List's item shows under its title, drawn by
-the same code from the same template's buttons, so an item reads the same inside a round as it does
-on the page it was queued from. It carries no tap of its own: the chips over the media are
-where a tag is set, and this is the line it is read back on.
+The bar carries a second line when the item has tags: one badge per action set on it — ★, and each
+tag by its display name. It is the same row a List's item shows under its title, drawn by the same
+code from the same template's buttons, so an item reads the same inside a round as it does on the
+page it was queued from. It carries no tap of its own: the chips over the media are where a tag is
+set, and this is the line it is read back on.
+
+The tags are drawn across the whole bar rather than inside the item's name column. A chip is a label
+and cannot be ellipsized without becoming meaningless, so it must not compete with the names for the
+same width; the row is measured by the bar and gets its own line. The file's name is the row's first
+casualty of the same pressure: on a bar narrower than 400dp — an ordinary phone held in portrait,
+where four arrows and a two-level position have already claimed most of the width — it is not drawn
+at all, and the item's name takes the leftover width instead of being capped and pushing the queue's
+last arrow off the screen. The file is still named in the Info sheet and in the queue guide.
 
 It sits on the frame rather than with those chips because it says something about the *item* and not
 about the file. The chips set the record of the file on screen; this line reports the item's whole
@@ -94,7 +111,9 @@ take that answer with it.
 
 The position reads `3(3/3)/3` on an item with several files: you are on item 3 of 3, showing file 3
 of its 3. On an item holding one file — still the overwhelming majority — there is no file level to
-speak of, so it is simply `3 / 3` and only two arrows are drawn.
+speak of, so it is simply `3 / 3` and only the queue's pair is drawn. That pair is **always** `<<`
+and `>>`, even where it is the only pair: the glyph names the level, not how many levels there
+happen to be below it.
 
 Four arrows are drawn on a multi-file item, and the outer and inner pairs do different things:
 
@@ -113,7 +132,11 @@ marker to say it can be touched. Tapping it opens a guide under the control, rig
 which is two levels deep when the queue is a queue of items.
 
 The first level names what the position's outer number counts: every item in the queue — the Task's
-name with its path underneath, or a file's name in the folder viewer. The row you are on is tinted
+name with its Package title or path underneath, or a file's name in the folder viewer. A Task
+imported from a Package carries the Package's manifest title (*Dating demo*), the same name the
+Catalog shows; it never shows the synthetic `<packageKey>/<promptKey>` catalog key under which the
+Task is addressed internally. A Task whose title and provenance would read the same carries the
+second line not at all. The row you are on is tinted
 and marked with a check. Tapping a row goes to that item's first file or page, exactly as the outer
 arrows do. A row that holds more than one page carries a right arrow of its own; tapping that arrow
 opens the second level, that item's pages, under a header naming the item. Tapping a page jumps to
@@ -140,7 +163,21 @@ a deliberate trade rather than an oversight: the name is what tells you which it
 40dp is still a target a thumb finds. Shrinking is all-or-nothing so that no control changes size
 under a finger that is already moving.
 
-The bottom band holds the completion checkbox, centred and alone.
+The bottom band is the Task's own state, and every template has one. When the review commits from
+the completion checkbox — no template at all, or a template whose named commit control is the
+checkbox — that checkbox is the band. When a template names a control of its own, the template's
+control lives in the file's dismissible band and this bottom band states the result instead: the
+same checkbox, read-only, with the state in the fill and no label beside it. A checkbox drawn here
+would complete the Task without recording what the template is waiting for; leaving the band empty
+would leave a headless Prompt template with no task-level display at all. Read-only is not
+disabled — it is the honest form of a state the template's own control owns, and it stays put when
+a tap puts the file's controls away.
+
+The band speaks one visual language on every Task: empty means not checked, filled means checked.
+Words are not added for the read-only form. v0.8.2f first wrote **Checked** / **Not checked** beside
+that checkbox, and in the same round a vocabulary Task and a picture Task ended up stating the same
+Task-level fact two different ways. The state is still named for a screen reader through the
+checkbox's description; that is access, not a second rendering.
 
 ## The file's controls
 
@@ -155,9 +192,15 @@ A file no attached template admits gets **no chips at all** rather than a defaul
 play/pause, elapsed time, a progress bar and mute. That transport is lifted clear of the chips
 rather than stacked on top of them, so both stay usable.
 
-Tapping the media puts this whole layer away and brings it back. The navigator and the checkbox do
-not go with it — they are the item's, and a round cannot be finished by a tap that hid the control
-that finishes it.
+**Info belongs to the page, not to the Task.** On a Prompt's Content page — including every
+headless Prompt template, which supplies no chips of its own — the band is the Info icon alone. On
+a file it is that file template's chips plus Info. On the add-on page it is Info alone, and that
+sheet describes the questionnaire, not the file shown a page earlier. The band reports the level
+you are on; it never folds another level's record into it.
+
+Tapping the media puts this whole layer away and brings it back. The navigator and the bottom band
+do not go with it — they are the item's, and a round cannot be finished by a tap that hid the
+control that finishes it.
 
 Checking and tagging are independent. Tapping ★ does not check an item; checking an item does not
 tag it. Nothing on this layer implies anything about the checkbox.
@@ -247,29 +290,38 @@ nothing else:
 
 ## The Info sheet
 
-Everything the media screen deliberately stopped saying. It scrolls, which is what keeps it usable
-in landscape.
+What the media screen deliberately stopped saying, scoped to the level it was opened from. It
+scrolls, which is what keeps it usable in landscape.
 
 <p align="center">
   <img src="assets/screenshots/review-item-info.jpg" width="300" alt="The Info sheet open over a reviewed file, listing its path in the source folder, owning List, status, actions, type, size and modified time, with Save and Share buttons at the bottom">
 </p>
 
-| Row | Notes |
-|---|---|
-| **Title** | The full filename, wrapped rather than cut. |
-| **Path in source folder** | Where the file sits, relative to the queue's folder. |
-| **List** | The owning List. Absent in a Quick Review, which came from no List — saying otherwise would be a claim about where the decision went. |
-| **Status** | *Checked* or *Not checked*. |
-| **Actions** | The actions on this item, or *None*. |
-| **Recorded** | The events the template caught on the latest submission: *None*, or *N event(s)* and then each point with its colour, position and the file it was taken on. Shown only when the template accepts events. History, not an editable value — a later submission adds its own record. |
-| **Source** | Only shown when there is something to say: *Manual item — no file*, or *Missing from the source folder*. |
-| **Type, Size, Modified** | Read from the storage provider when the sheet opens, so the sheet appears immediately and these rows fill in. |
+**The sheet describes the page whose Info icon opened it.** A Prompt's Content page is a Task-level
+page with no file; a file page is an asset; the add-on page is the questionnaire. The three
+inventories are deliberately disjoint: the Info on a picture never lists the Task's add-on answers,
+and the Info on the add-on never lists the picture's type, size or actions. That is the asset /
+Task / add-on hierarchy kept visible in the sheet as well as on the screen.
 
-At the bottom, two controls that act on the **file** rather than on the item:
+| Row | Level | Notes |
+|---|---|---|
+| **Title** | all | The file's filename, the Task's name on a Content page, or the add-on's name. Wrapped rather than cut. |
+| **Package** | Content, Asset | Shown instead of *Path in source folder* when the Task came from a Package: the Package's manifest title (*Dating demo*), never the synthetic `<packageKey>/<promptKey>` catalog key under which the Task is addressed internally. |
+| **Path in source folder** | Content, Asset | Where a file Task sits, relative to the queue's folder. |
+| **List** | Content, Asset | The owning List. Absent in a Quick Review, which came from no List — saying otherwise would be a claim about where the decision went. |
+| **Status** | Content, Asset | *Checked* or *Not checked*. |
+| **Actions** | Asset | The actions on this file, or *None*. Not drawn on a PDF, whose tools are passage-scoped. |
+| **Recorded** | Content, Asset | The events the template caught on the latest submission: *None*, or *N event(s)* and then each point with its colour, position and the file it was taken on. Shown only when the template accepts events. History, not an editable value — a later submission adds its own record. |
+| **Source** | Asset | Only shown when there is something to say: *Manual item — no file*, or *Missing from the source folder*. |
+| **Type, Size, Modified** | Asset | Read from the storage provider when the sheet opens, so the sheet appears immediately and these rows fill in. |
+| **Add-on** | Add-on | The questionnaire's name, version and answer count, then one row per question with the answer on record or *Not answered*. No other level lists it. |
+
+At the bottom of an **asset** sheet, two controls that act on the **file** rather than on the item:
 
 - **Save to Listea** — copies what you are looking at into a `DCIM/Listea` album.
 - **Share** — hands the file to another app through Android's own chooser.
 
+Neither is offered on a Content page, which has no file, or on the add-on page, which is not one.
 Neither is a tag, an action or a check. Neither is stored on the item, and no export hears about
 either. Full details, including the permission and caching behaviour, are in
 [File management](file-management.md#save-to-listea).
@@ -355,18 +407,65 @@ near-identical to each other is the point — none is a place where decisions ge
 a control that suggests otherwise. Save and Share are offered on the first four; the Info sheet on
 all but the Todo preview, which is the one that drops even that.
 
-**A Prompt's Content page turns on a swipe on the readers, and only there.** The page is a
-vertically scrolling card rather than a picture, so it never went through the media swipe. On the
-List item viewer and the Todo preview that left it feeling locked: the arrows worked, but the
-gesture every other page answers to did nothing. Both surfaces now take a **horizontal swipe as a
-page turn** — inside a multi-file Task it turns to the first file, and at the Task's edge it walks
-to the next Task in the level, exactly as the arrows do. Vertical drags still scroll the card.
-Nothing is decided by any of it; these are the surfaces with nothing they could decide.
+**The List item viewer follows the frame split.** Its Info icon sits in the dismissible file band,
+and beneath it the frame draws the Task's state read-only — the same bare checkbox Review shows —
+so a tap hides the file's controls and never the Task's state. Before
+v0.8.2f the Info sat in a Task-level bar and no task band was drawn at all. The Todo preview
+deliberately keeps neither: it shows the navigator and the steps and nothing that could be mistaken
+for a decision.
 
-In Review the same card takes no swipe. There the judgment is the tap on an option — or a
-template's own Submit — and a forward swipe already means *advance one page, complete at the end* on
-the Task's file pages. The Prompt page leaves commitment to the control the Viewer drew, rather than
-letting a page turn become an answer.
+**A Task has the same pages wherever it is shown.** The two Task readers — the List item viewer and
+the Todo preview — derive their count and their pages from the same model Review walks: the Prompt
+body when there is one, then its files, then the Task's add-on. That last page is drawn
+**read-only** there — the attached questionnaire's questions with the recorded answer, or
+*Not answered* — because these surfaces have no write they could make, and a
+questionnaire you could answer from a gallery would be one. Before v0.8.2f the List item viewer and
+the Todo preview modelled a Task as *Prompt plus files* only, so the same Task had one shape in a
+round and another in a preview, and an add-on could not be reached from a look at all. A separate
+file opened from a folder is not a Task: the File Viewer keeps its flat file-to-file pager and grows
+no add-on page.
+
+**A swipe turns a page inside the Task, and crosses at its edges.** A Prompt's Content page is a
+vertically scrolling card rather than a picture, so it never went through the media swipe; on the
+List item viewer and the Todo preview that left it feeling locked. Both now take a **horizontal
+swipe as a page turn**: from the Content page to the first file, between files, and from the last
+file onto the add-on; at the Task's last page, forward walks to the next Task in the level, exactly
+as the arrows do. At the near edge, swiping right off the first file returns to the Prompt's Content
+page, where the card began. Vertical drags still scroll the card. Nothing is decided by any of it;
+these are the surfaces with nothing they could decide.
+
+In Review the same card takes no swipe **while it can be judged**. There the judgment is the tap on
+an option — or a template's own Submit — and a forward swipe already means *advance one page,
+complete at the end* on the Task's file pages. The Prompt page leaves commitment to the control the
+Viewer drew, rather than letting a page turn become an answer. A Prompt page this build cannot
+judge — unreadable body, missing required file, blocked Task, or no Task Review that can catch its
+choice — has no such control and no answer to give, so it joins the ordinary run and takes the same
+swipe; its tap shows and hides the file band. It is the one Review page whose swipe never commits
+anything.
+
+**A vocabulary card is the same page, drawn by its own Viewer.** It has a stem, a word, optionally
+a phonetic line, and its options as full-width rows in **the order the Package declared**. The rows
+are not sorted or shuffled, and the correct answer is not moved to a fixed position. A **Listen**
+control plays the `audio` Resource through the screen's existing player; it stops and clears when
+the Content page leaves the screen, so a word cannot play over a video page or into the next Task. A
+missing *required* pronunciation is the same refusal as any missing required content: the options
+are inert and the page takes the ordinary swipe. A missing *optional* one only disables Listen and
+leaves the card answerable. Once an answer is on record — or on the read-only List item viewer and
+Todo preview, where a look is not an attempt — the card also shows the meaning, the example, and
+the declared correct answer. The recorded judgment is still one `choice.select` with the option id
+and label; the definition is content, not an answer.
+
+**An accepted judgment lands on the add-on page when the Task has one** (v0.8.2f). Before that, an
+option tap under an advancing template moved the queue to the next item, which passed over the
+questionnaire the Task was stamped with; a Prompt Todo's add-on could go unasked for the whole
+round. The judgment itself is unchanged and is still written by the tap; only the arrival changed.
+Forward from the add-on page is then a queue move and does not judge the Task again, and a template
+that keeps the reviewer on its own page still does. See [Templates → Add-ons](templates.md#add-ons).
+Reaching the add-on with the page arrow instead of a judgment leaves that forward edge inert, even
+when an answer from an earlier round is on record: the queue arrows still cross Tasks, but the
+swipe waits for a judgment — and on the last Task there is no queue arrow left, so the page has to
+be judged (or judged again) before the swipe will finish the round. A Prompt this build cannot
+judge is the exception above; its add-on edge always navigates.
 
 **Every row in the table has the queue guide**, including the Todo preview: the tappable position
 and its two levels are part of the navigator, which is the one band every surface keeps. Where the
@@ -391,12 +490,14 @@ act on the material has Quick Review at that folder and the Lists built from it.
 
 It has two levels of steps, the same two the List's item viewer has. Steps *within* a Task are kept,
 because a Task standing for a folder is several files and paging is the only way to see the rest of
-it. Steps *between* Tasks are kept too, and for a reason that does not soften the one above: the
-preview is opened from a level and the level is a sequence, so walking that sequence is still
-answering "what is this?" about the thing the user was already looking at. `‹` and `›` walk the
-Tasks of that level in catalog order, and swiping off either end of a Task's files moves to the next
-Task rather than stopping — the gesture and the arrows are one behaviour. At the ends of the *level*
-it stops, because there is no next Task to reach and nothing to complete.
+it; a Prompt Task adds its Content page at the front and its add-on page at the end. Steps *between*
+Tasks are kept too, and for a reason that does not soften the one above: the preview is opened from
+a level and the level is a sequence, so walking that sequence is still answering "what is this?"
+about the thing the user was already looking at. `<<` and `>>` walk the Tasks of that level in
+catalog order, and swiping off either end of a Task's pages moves to the next Task rather than
+stopping — the gesture and the arrows are one behaviour. At the ends of the *level* it stops,
+because there is no next Task to reach and nothing to complete. The pair is the queue's on this
+surface even when a Task has a single file, because that is what it moves.
 
 This reverses an earlier decision that steps between Tasks were absent. The reasoning then was that
 the catalog is a better way to choose the next thing to look at than a sideways step buried inside a

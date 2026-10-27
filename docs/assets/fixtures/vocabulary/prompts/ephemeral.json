@@ -1,0 +1,14 @@
+{
+  "stem": "Choose the meaning of the word.",
+  "word": "ephemeral",
+  "phonetic": "/ɪˈfemərəl/",
+  "definition": "lasting for a very short time",
+  "example": "the ephemeral beauty of cherry blossom",
+  "audio": "common-audio",
+  "answer": "a",
+  "options": [
+    { "id": "a", "label": "lasting a very short time" },
+    { "id": "c", "label": "lasting forever" },
+    { "id": "b", "label": "occurring only at night" }
+  ]
+}

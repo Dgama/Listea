@@ -32,6 +32,8 @@ where the other pages link to rather than repeat.
 | [v0.8 — framework (draft)](iterations/v0.8.md) | The v0.8.x arc: Package protocol, Prompt payloads, Resources, Structured Viewer and Headless Review Template, the typed page model, ReviewSubmission, and ExportMapping. |
 | [Package protocol](package-protocol.md) | `listea.package/1`: the Prompt vocabulary, manifest and member layout, response contracts, commit/revisability, reconciliation rules, limits, and the dating example. |
 | [v0.8.2 plan](iterations/v0.8.2-plan.md) | The v0.8.2 implementation plan: schema 32, Package import, the typed content page, the first Structured Viewer and Headless Template, and the dating acceptance walk. |
+| [v0.8.2f fixes](iterations/v0.8.2f.md) | The six issues the v0.8.2 acceptance found — Todo rename, card-level add-on edit, the one Templates list with nothing required, format-matched import, Prompt Tasks exporting no templates, and the stuck page swipe — plus the seventh found while verifying them: a judgment no longer skips the add-on page. The eighth makes every Task surface show the same pages: the read-only previews gain the add-on page, and one shared page model governs the count, the swipe and the guide. Its fixes ship in the `0.8.3-preview` build. |
+| [Vocabulary round plan](iterations/v0.8.0-vocabulary-plan.md) | The vocabulary round, delivered as the unreleased `0.8.3-preview`: a `vocabulary`/1 Viewer behind the same Package protocol, page model, single-choice template, add-on and v5 export, plus the fixtures for the mixed-List acceptance walk and the follow-up fixes the walk produced. |
 | [Development](development.md) | Environment and dependencies, build and test commands, project layout, and the architectural notes worth knowing before changing anything. |
 | [Roadmap](roadmap.md) | The current system, the architectural direction away from media-only review, and the possible future workloads that direction is for. Nothing on that page is implemented. |
 
@@ -74,12 +76,22 @@ Review rework; it should be re-shot or deleted.
 ## A note on what is current
 
 These pages describe **what Listea does today**, verified against the implementation. Product
-direction lives in [Roadmap](roadmap.md). v0.8.1 and v0.8.2 are implemented on `main` and
-unreleased (schema 31 and 32); v0.8.2 passed device acceptance on 2026-10-24, with minor fixes
-deferred to v0.8.3. Its grammar is in [Package protocol](package-protocol.md) and its
-implementation in [v0.8.2 plan](iterations/v0.8.2-plan.md). The wider direction is recorded in
+direction lives in [Roadmap](roadmap.md). v0.8.1, v0.8.2 and its fix round v0.8.2f are
+implemented and unreleased (schema 31 and 32); v0.8.2 passed device acceptance on 2026-10-24, and
+the six issues it found — and the two that verifying the fixes turned up — are implemented and
+device-verified in [v0.8.2f](iterations/v0.8.2f.md). Its grammar is in
+[Package protocol](package-protocol.md) and its implementation in
+[v0.8.2 plan](iterations/v0.8.2-plan.md). The wider direction is recorded in
 [Architecture](ARCHITECTURE.md#framework-evolution--v08x-planned) and
-[v0.8 (draft)](iterations/v0.8.md). Planned material is labelled as planned.
+[v0.8 (draft)](iterations/v0.8.md).
+
+The current build is **`0.8.3-preview`** (versionCode 803, unreleased): the
+[vocabulary round](iterations/v0.8.0-vocabulary-plan.md) and the v0.8.2f fixes gathered together.
+It adds the second structured Viewer (`vocabulary`/1) on the same protocol, schema 32 and export
+v5, and is device-verified through 2026-10-26. It is a preview, not the close of v0.8.3: the
+payload-revision policy, the independent-Todo proof and the protocol/capability freeze are still
+open in [v0.8 (draft)](iterations/v0.8.md#v0.8.3--shared-resources-and-the-reveal-card-proof).
+Planned material is labelled as planned.
 
 If a page disagrees with the app, the app is right and the page is a bug — please open an issue.
 

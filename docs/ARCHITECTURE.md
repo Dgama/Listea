@@ -2,8 +2,10 @@
 
 > **Status:** Normative architectural direction  
 > **Scope:** Long-lived product and domain boundaries  
-> **Last updated:** 2026-10-24 (the v0.8.2 Package protocol is recorded in
-> [Framework evolution — v0.8.x](#framework-evolution--v08x-planned), with the **Prompt** vocabulary
+> **Last updated:** 2026-10-27 (the v0.8.2 Package protocol, the v0.8.2f acceptance fixes and the
+> vocabulary round delivered as `0.8.3-preview` are
+> recorded in [Framework evolution — v0.8.x](#framework-evolution--v08x-planned), with the **Prompt**
+> vocabulary
 > and the question-setter/decision-maker distinction in [Prompt and Task](#prompt-and-task). The
 > shipped v0.7.1 Add-on model is retained unchanged. The pre-v0.8 revision is archived at
 > [ARCHITECTURE-v0.7.1.md](ARCHITECTURE-v0.7.1.md).)
@@ -26,12 +28,14 @@ Iteration documents may narrow the work for a release, but they must not contrad
 The code and the architecture are not the same artefact. This table says where the implementation
 stands so a later reader does not mistake a planned boundary for a shipped one.
 
-| Release | State (2026-10-24) | Established |
+| Release | State (2026-10-27) | Established |
 |---|---|---|
 | v0.7.1 | shipped, not published | Add-ons as Task-owned current state; schema 29; export v4 |
 | v0.8.1 | implemented, unreleased | stored Task Reviews, viewer events (`ImagePoint`), primary response envelope; schema 30 and the derived `review_event_answers` table (schema 31); the position label opens a two-level queue guide |
-| v0.8.2 | implemented, unreleased; accepted 2026-10-24, minor fixes deferred to v0.8.3 | Package protocol `listea.package/1`, Prompt payloads, schema 32, Package scope, typed content page, single-choice Viewer and Headless Template, ExportMapping and v5 |
-| v0.8.3 | planned | shared-Resource and reveal-card fixtures; contract freeze |
+| v0.8.2 | implemented, unreleased; accepted 2026-10-24 | Package protocol `listea.package/1`, Prompt payloads, schema 32, Package scope, typed content page, single-choice Viewer and Headless Template, ExportMapping and v5 |
+| v0.8.2f | implemented, device-verified, unreleased | Acceptance fixes: Todo rename, card-level add-on edit, one Templates list with nothing required, format-matched import, Prompt Tasks export no templates, page-detector fix. Schema 32 and export v5 unchanged |
+| `0.8.3-preview` | implemented, device-verified 2026-10-26; versionCode 803, unreleased | the vocabulary round carried with the v0.8.2f fixes: second structured Viewer (`vocabulary`/1) behind the same Package protocol, Template and page model; shared Prompt renderer and reveal card. Schema 32 and export v5 unchanged |
+| v0.8.3 | planned; the reveal-card fixture is delivered in `0.8.3-preview` | shared-Resource and reveal-card fixtures; compatible payload revisions, independent Todo identities, contract freeze |
 
 The v0.8.x rows are commitments of direction, not descriptions of code. Each release's iteration
 document is the authoritative statement of what that release actually does.
@@ -530,9 +534,12 @@ detaching the add-on hides the answer; restoring them brings it back. The rule i
 already follow on the pair layer.
 
 **The page is the Task's, not a file's.** A Task whose import carried an add-on has one extra page
-after its last Asset, counted in the navigator. The position is fixed; there are no start/end
-attributes, no required flag and no completion precondition in this round. The completion checkbox
-remains a direct path.
+after its last page — after its last Asset, or after the content page when it has no Asset — counted
+in the navigator. The position is fixed; there are no start/end attributes, no required flag and no
+completion precondition in this round. The completion checkbox remains a direct path. Since
+v0.8.2f this page is part of **every** Task surface's page list, not only Review's: the read-only
+Todo preview and List item viewer draw it through `AddOnAnswersPage`, which shows the questions and
+their recorded answers and offers no control. A single file that is not a Task has no add-on page.
 
 **One add-on per Todo.** The Todo holds one reference (`sources.addOn`, `addOnId \t version`);
 every Task it imports is stamped with the version that run used (`task_imports.addOn`). A refresh
@@ -569,8 +576,12 @@ Task's review pages are, in order: an optional structured **content page** (the 
 pages in their existing order, and the existing optional Add-on page. The payload is page 0, not a
 synthetic Asset. A payload-only Task has one labelled content page. Resources are rendered inside
 their referring page and never increase the count. This one list is the source for rendering, the
-position count, resume identity, and the queue guide's second level; `taskPageCount`, the
-queue-entry builders, and selection must not grow independent rules.
+position count, resume identity, and the queue guide's second level; `taskPageState` — which builds
+the list through `reviewPages` and derives the count, the current page and the Asset index — is the
+only place those are computed. Review, Quick Review, the List item viewer and the Todo preview all
+read it; none may grow independent arithmetic. The Asset index it hands `AssetRun` is `-1` on the
+content page and `assets.size` on the add-on page, the sentinel that page is recognised by, so a
+surface that derived the index itself would render the wrong page.
 
 A structured content page is an explicit **decision target** of its own. Opening it, selecting in it,
 showing its Info, navigating to it, and exporting it must not disguise it as
@@ -980,9 +991,12 @@ Resource-role changes are never manufactured into Asset-set changes to trigger i
 
 > **Status:** Direction, not shipped behavior. v0.8.1 and v0.8.2 are implemented on `main` and
 > unreleased (schema 31 and 32; export v5 for structured rounds); the released baseline is v0.7.1
-> (schema 29, export v4). v0.8.2 passed its device acceptance on 2026-10-24, with minor issues
-> deferred to v0.8.3. The release sequence at the end of this section is a set of bounded proposals;
-> each iteration document remains the authority for what a release actually does.
+> (schema 29, export v4). v0.8.2 passed its device acceptance on 2026-10-24, and the issues it
+> found are implemented and device-verified in the v0.8.2f fix round. The vocabulary round is
+> implemented and device-verified through 2026-10-26, and ships unreleased as `0.8.3-preview`
+> (versionCode 803) together with those fixes — a preview, not the close of v0.8.3. The release
+> sequence at the end of this section is a set of bounded proposals; each iteration document
+> remains the authority for what a release actually does.
 
 v0.8.x prepares the framework for v0.9.x vocabulary and primary-questionnaire work. It does not ship
 those products. Its job is to let structured content reach the same review engine as media without
@@ -1107,6 +1121,12 @@ range, response contract, and emitted intents — not by a one-to-one id. The re
 v0.8.2 and replaces a family of explicit id pairs; it is the same rule the Prompt and Task section
 states for Viewers generally.
 
+Two Viewers prove the split: `profile`/1 (a dating card) and `vocabulary`/1 (a word drill). They
+differ only in payload fields and drawing. Both normalize to the same stem-and-options shape, both
+render as one Content page inside the same review frame, and both emit `choice.select` to the same
+stored single-choice Template. No Core path names either kind: the Viewer registry supplies the
+parser, and the review surfaces decode whatever a payload's kind/schema resolves to.
+
 For upstream-defined choices, the ownership is:
 
 | Concern | Owner |
@@ -1119,7 +1139,9 @@ For upstream-defined choices, the ownership is:
 
 The initial proof implements single choice. Multiple choice, boolean, bounded number, and bounded
 text are later primitives when v0.9.x needs them. A recall grade is a single choice with declared
-options; Core does not acquire a `Recall` or `Vocabulary` response type.
+options; Core does not acquire a `Recall` or `Vocabulary` response type. `vocabulary`/1 is that
+proof in practice: the declared options are the recall candidates, the answer is one
+`choice.select`, and Core stores kind, schema and payload like any other Prompt.
 
 ### Validation and input limits
 
@@ -1194,7 +1216,9 @@ Existing module/package conventions are kept where they already satisfy this bou
 |---|---|---|
 | **v0.8.1** | Primary response contract, stored Task Reviews and viewer events, shared ReviewSubmission over the existing atomic transaction, per-Asset provenance for new events; sampled-point proof | Schema 30 (definition/attachment) and 31 (caught-event child table); export unchanged |
 | **v0.8.2** | Package protocol `listea.package/1` with member Prompt bodies; typed Package planning, payload persistence, per-Package checkpoints, keyed reconciliation, scoped Resources; typed page list, Package catalog scope, structured DecisionTarget, selection/Quick Review; one Structured Viewer, single-choice Headless Template with independent commit/revisable policy, submission-time checks; ExportMapping with v2/v3/v4 goldens and v5 for both Webhook and Txt | Schema 32; v5 only for structured rounds |
-| **v0.8.3** | Second fixture: prompt/reveal, declared grades, shared pronunciation Resource; optional/required diagnostics, compatible payload revisions, independent Todo identities; freeze protocol/capability contracts | v5 fixture; migration/regression docs |
+| **v0.8.2f** | Acceptance fixes within v0.8.2: Todo rename and card-level add-on edit; one Templates list, headless peer and all rows cancellable, no required template; import matches by viewable format; Prompt Tasks export no templates or file actions; page detector reads live navigation state | Schema 32 and export v5 unchanged |
+| **`0.8.3-preview`** | Vocabulary round on the same protocol: a second Structured Viewer (`vocabulary`/1), the shared Prompt renderer and reveal card, the single-choice template, add-on and v5 export, the mixed-List fixtures, and the follow-up fixes that walk produced — carried with the v0.8.2f fixes. Not the close of v0.8.3 | Schema 32 and export v5 unchanged |
+| **v0.8.3** | Second fixture: prompt/reveal, declared grades, shared pronunciation Resource; optional/required diagnostics, compatible payload revisions, independent Todo identities; freeze protocol/capability contracts. The reveal-card fixture is delivered in `0.8.3-preview`; the revision policy, the independent-Todo proof and the freeze remain open | v5 fixture; migration/regression docs |
 
 These are framework proofs, not the v0.9 product. Add-on restructuring is assigned to none of them.
 

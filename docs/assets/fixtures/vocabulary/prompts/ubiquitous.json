@@ -1,0 +1,14 @@
+{
+  "stem": "Choose the meaning of the word.",
+  "word": "ubiquitous",
+  "phonetic": "/juːˈbɪkwɪtəs/",
+  "definition": "present, appearing, or found everywhere",
+  "example": "phones are ubiquitous in modern life",
+  "audio": "common-audio",
+  "answer": "b",
+  "options": [
+    { "id": "b", "label": "found everywhere" },
+    { "id": "a", "label": "extremely rare" },
+    { "id": "c", "label": "carefully hidden" }
+  ]
+}

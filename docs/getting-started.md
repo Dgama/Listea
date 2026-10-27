@@ -102,12 +102,12 @@ The dialog asks six things, in this order:
 | Field | What it decides |
 |---|---|
 | **Name** | What the Todo is called. Defaults to the folder's own name |
-| **Importer** | Whether each **file** becomes a Task, or each **folder** does |
+| **Importer** | Whether each **file** becomes a Task, each **folder** does, or each **Prompt in each Package** does (nested under *One Task per file*) |
 | **Keep folder tree** | Whether the Todo shows the folder structure, or one flat list of Tasks |
 | **When a Task's content changes** | What later happens to a Task whose files changed or disappeared outside Listea — see [What a changed Task means](core-concepts.md#what-a-changed-task-means) |
 | **When a round over this Todo finishes** | Where this Todo's decisions go when a round ends: **Don't export**, **Webhook** or **Txt**. A new Todo starts at *Don't export* |
-| **Templates** | Which templates govern the files this run creates. **At least one is required** — see below |
-| **Add an add-on** | Optional (v0.7.1): one questionnaire to ask about each Task as a whole, on a page after its last file. *None* unless chosen — see [Templates → Add-ons](templates.md#add-ons) |
+| **Templates** | Which templates govern this run's Tasks. Optional: file templates multi-select, one headless template at most, every row cancellable — see below |
+| **Add an add-on** | Optional (v0.7.1): one questionnaire to ask about each Task as a whole, on a page after its last page. *None* unless chosen — see [Templates → Add-ons](templates.md#add-ons) |
 
 **One Task per folder** forces the tree off: a folder-as-Task run builds Tasks from the folders
 themselves and they are flat by construction, so the control is hidden rather than offered and then
@@ -122,13 +122,19 @@ The export question is the other one about *later*: where this Todo's decisions 
 it finishes. It defaults to **Don't export**, so a Todo nobody has configured sends nothing
 anywhere — see [Optional: wire up an export](#optional-wire-up-an-export).
 
-**The template step is the one gate in the dialog.** **Create** stays disabled until at least one
-template is attached, because a run with none produces a Todo whose every file draws an empty chip
-row and whose Tasks can carry no mark at all. Attaching a template decides which action chips the
-run's files will offer — see [Templates](templates.md). If the run holds documents, attach one
-scoped to **PDFs** as well: its Tag and Comment buttons become the passage tools in the reader. A
-PDF no template governs is still readable and Copy still works; it simply offers no review tools,
-draws no marks and exports none.
+**The template step is not a gate.** **Create** is enabled by the address field alone; a run may
+attach no template, in which case its Tasks draw no chips and record their own page decisions.
+File templates are multi-select and decide which action chips the run's files will offer. Headless
+templates are single-select and are the pen for a Task as a whole — a Package import starts on the
+single-choice one — and clearing the selected row says *no pen*. See [Templates](templates.md). If
+the run holds documents, attach a template scoped to **PDFs** as well: its Tag and Comment buttons
+become the passage tools in the reader. A PDF no template governs is still readable and Copy still
+works; it simply offers no review tools, draws no marks and exports none.
+
+**Only a file a Viewer can open becomes a Task.** Under either file importer, pictures, videos and
+PDFs are imported; anything else — a text note, a JSON Prompt body, a manifest — is skipped, and
+the run reports how many. A Package has its own importer, *Package Prompts*, which makes one Task
+per Prompt and leaves its `media` files as Resources rather than Tasks.
 
 <!-- screenshot: history-recovery — the "Decisions left behind" block in the Create tasks? dialog,
      with a Start fresh row and one kept history under it -->
@@ -169,14 +175,24 @@ Opening a Todo is how you get at its Tasks. On the **Todo** tab, tap the Todo's 
 the way in, and the only button left on it is **Refresh Import**, which re-runs the import that
 produced it.
 
+The card's **⋮** menu edits the Todo itself. **Rename…** changes the display name only — the folder
+on disk and the name each Task was imported under are untouched. **Add-on · …** attaches, changes
+or clears the Todo's questionnaire without another import, and re-stamps every Task it holds in one
+step. Below them are the content-policy switches, the webhook address and **Delete Todo**.
+
 A Todo opens as a tree of folders, or as one flat list of Tasks if the run was told not to keep the
 folder tree. Tapping a folder descends into it; the breadcrumb walks back up, and from the Todo's
 top level Back returns to the Todo tab. That top level is the folder the run was started on — for a
 Todo made over a subfolder of an Upstream, the Todo opens there rather than at the Upstream's own
 folder.
 
+Each Task row says what the Task holds: its Assets, any that are missing, and — when the Task was
+given one — its add-on page. A picture Task and a Package Prompt Task read the same line; the
+add-on is a page of the Task, not a file, so it is named beside the count rather than counted as
+one.
+
 Tapping a Task opens it to be looked at, and nothing more: no checkbox, no chips, no Save or Share.
-`‹` and `›` step sideways through the other Tasks in the folder you were standing in, so you can
+`<<` and `>>` step sideways through the other Tasks in the folder you were standing in, so you can
 read through a folder without going back to the list each time. Swiping off the end of a Task's
 files moves to the next Task the same way.
 
@@ -216,6 +232,11 @@ The two ways in divide the work between them: start a List from one Todo's catal
 another Todo, select its Tasks, and use **Add to list…** in the same bar to put them into the List
 you already have. A Task the List already shows is skipped rather than added a second time.
 
+A Task's row names the Task and, under it, where it came from: the file's path, or — for a Task
+imported from a Package — the Package's manifest title, such as *Dating demo*. The internal catalog
+key the Task is addressed by is never shown; it is an address, not a name. The queue guide and the
+Info sheet follow the same rule.
+
 **A List carries no meaning of its own.** It is an order over Tasks and nothing else — no tags of
 its own, no second copy of anything. What a Task is checked and tagged as, it is checked and tagged
 as in every List that shows it, because both Lists are showing the same Task.
@@ -242,14 +263,25 @@ Open a List and tap **Review**, or use **Quick Review** inside a Todo. Either wa
 
 | Gesture | What it does |
 |---|---|
-| **Swipe left** | Go forward one file; off the last one, show the Task's add-on page if it has one, otherwise mark the item checked and advance; off the add-on page, mark checked and advance |
-| **Swipe right** | Go back one file; off the add-on page, return to the last file; off the first file, go back one item, changing nothing |
+| **Swipe left** | Go forward one page; off the last one, show the Task's add-on page if it has one, otherwise mark the item checked and advance; off the add-on page, mark checked and advance |
+| **Swipe right** | Go back one page; off the add-on page, return to the last page; off the first page, go back one item, changing nothing |
 | **Pinch** | Zoom, up to 5×; drag to pan inside the picture |
 | **Tap the media** | Show or hide the file's own controls |
 
 An item holds one file most of the time, so most swipes are exactly what they look like. A folder
 imported as a Task is one item holding several files, and a swipe walks those files before it moves
-on.
+on. A Package Prompt adds its Prompt body before the files.
+
+A Package Prompt may be a dating profile or a vocabulary drill. Both are one Content page with the
+same frame, count and swipe rules; only the card differs. A vocabulary card shows the word, an
+optional phonetic line, a **Listen** control for its pronunciation Resource, and its options in the
+Package's declared order. Answering it is one tap, exactly like Like or Dislike.
+
+**A Prompt page this build cannot judge is plain navigation.** When the body cannot be read, a
+required file is missing, the Task is blocked, or no Task Review in force can catch its choice,
+there is no answer to give — so a swipe turns the page and crosses Tasks at the edges instead of
+being inert. The add-on page's forward swipe becomes a queue move for the same reason. A Prompt
+page that *can* be judged still refuses the swipe: its option tap is the answer.
 
 **A PDF opens in a reader rather than the media viewer** (v0.7.0). Pages scroll vertically, pinch
 zooms, and a horizontal swipe at the page edge still steps the queue. Long-press the text to start a
@@ -260,22 +292,39 @@ modified. The file bar's **Info** icon lists what the file carries, including a 
 this copy of the document can no longer place. See
 [Review and actions → PDFs](review-and-actions.md#pdfs).
 
-**A Task whose import carried an add-on has one extra page after its last file** (v0.7.1). It asks
-the Todo's questions — a rating, a Yes / No, or words — and answers are kept as you give them, with
-no Save button and nothing required. The position counts it as a page, so a three-file Task with an
-add-on reads `3(1/4)/7` … `3(4/4)/7`, and the file slot says **Add-on**. Swiping left again leaves
-the Task exactly as the last file does, and the completion checkbox still completes without an
-answer. See [Templates → Add-ons](templates.md#add-ons).
+**A Task whose import carried an add-on has one extra page after its last page** (v0.7.1) — after
+its last file, or after the Prompt body when it has no file. It asks the Todo's questions — a
+rating, a Yes / No, or words — and answers are kept as you give them, with no Save button and
+nothing required. The position counts it as a page, so a three-file Task with an add-on reads
+`3(1/4)/7` … `3(4/4)/7`, a Prompt Task with no file reads `3(2/2)/7`, and the file slot says
+**Add-on**. Swiping left again leaves the Task exactly as the last page does, and the completion
+checkbox still completes without an answer. Since v0.8.2f, a button that both judges the item and
+advances — a Prompt's **Like** / **Dislike**, a sampled point's **Submit** — also lands on this
+page rather than jumping to the next item, so the questionnaire is shown once for every judged
+Task. The same pages appear when you look at the Task without reviewing: the Todo preview and the
+List item viewer show the add-on page read-only, with the answers on record and no control to
+change them. See [Templates → Add-ons](templates.md#add-ons).
 
 The name along the top is the item; the filename beside it and the `3(2/3)/7` position say which of
 its files you are on and where that sits in the queue. The pair of double arrows there steps the
 queue, skipping files entirely, and the single arrows step the files. An item holding one file has
 no file level to speak of, so the bar is simply `3 / 7` between two arrows.
 
-The checkbox sits along the bottom, on its own. Above it, laid over the video or picture, are
-**★ Favourite**, your own custom action chips and **Info** — those come up and go away when you tap
-the media, while the checkbox and the name along the top stay. Tapping a chip tags the item; it
-does not check it. Checking and tagging are separate decisions and neither implies the other.
+The bottom band is the Task's own state and is always there. When the template commits from the
+completion checkbox, that is the band. When the template draws its own control — a Prompt's
+**Like** / **Dislike**, a sampled point's **Submit** — the bottom band shows the same checkbox
+read-only instead, with the state in its fill: empty is not checked, filled is checked. There is no
+word beside it; the template's control is what records the judgment. Above it,
+laid over the video or picture, are **★ Favourite**, your own custom action chips and **Info** —
+those come up and go away when you tap the media, while the task band and the name along the top
+stay. Tapping a chip tags the item; it does not check it. Checking and tagging are separate
+decisions and neither implies the other.
+
+**Info belongs to the page you are on.** On a file it lists that file's facts — path, status,
+actions, type, size, modified time, and any marks or recorded events. On a Prompt's Content page it
+lists the Task's provenance, List and status. On the add-on page it lists only the questionnaire's
+questions and answers. A file's Info never mixes in the Task's add-on answers, and the add-on's
+Info never lists a file's facts. Save and Share appear only on a file's sheet.
 
 The full behaviour of every control is in [Review and actions](review-and-actions.md).
 

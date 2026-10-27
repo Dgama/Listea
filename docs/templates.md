@@ -113,18 +113,32 @@ changes future payloads without touching a single stored item.
 
 A review surface is built from two kinds of component, and only one of them belongs to a template.
 
-**The frame is Listea's.** The navigator (back, title, queue position), the completion checkbox,
-and the file's own dismissible bar with its trailing **Info** icon are present for every template —
+**The frame is Listea's.** The navigator (back, title, queue position), the bottom task band, and
+the file's own dismissible bar with its trailing **Info** icon are present for every template —
 including no template at all. They are not buttons, versions or configuration: a template cannot
-add, remove or rename them. The Info icon is the frame's answer to *what is this file, and what does
-Listea hold about it*, so it stays available even when the template has nothing to offer. That is
-what keeps a file reviewable after its template is removed, and what lets a stored comment, a tag
-or a mark the document can no longer place still be found when the reviewer asks.
+add, remove or rename them. The task band is the completion checkbox when the review commits from
+it; when the template names its own commit control, the band states the result instead — the same
+checkbox, read-only, with its state in the fill and no label. The Info icon is the frame's answer to *what
+is this page, and what does Listea hold about it*, so it stays available even when the template has
+nothing to offer. It describes the page it is drawn on: a file's facts on a file page, the
+questionnaire and its answers on the add-on page, the Task's provenance on a Prompt's Content page.
+It never folds one level's record into another. That is what keeps a file reviewable after its
+template is removed, and what lets a stored comment, a tag or a mark the document can no longer
+place still be found when the reviewer asks.
 
 **The dynamic components are the template's.** A media template supplies the chip row over the
 file; a PDF template supplies the passage tools in the selection menu. Those change with scope,
 version and attachment, and they are the only parts a template editor can alter. A template version
 therefore records the dynamic components and never the frame.
+
+**A headless template changes the viewer, not the hierarchy.** A template that records a Task's own
+page decisions — a Prompt's **Like** / **Dislike**, for example — draws no chip row and takes its
+judgment from the viewer's own tap. It still sits inside the same frame: the task band states the
+Task at the bottom, the Content page's band holds Info, and a file's page keeps the file's band.
+The three levels — Task, Asset, add-on — remain distinct. An add-on is a bounded, Task-level
+property with a page of its own; resembling an asset in interaction does not make it one. So a
+headless Prompt's Content page sheet lists the Task's provenance, List and status, never the
+add-on's answers, which belong to the add-on page a page later.
 
 For a **PDF** the frame's file bar holds only Info; its dynamic components are not a chip row but
 the passage tools in the selection menu. See the next section.
@@ -180,16 +194,26 @@ A version is **never edited**. There is no path in the app that changes what ver
 
 ## Attaching one to a Todo
 
-**Create Tasks** is where a template is attached. The dialog's last step lists the templates that
-exist and lets a run say which of them govern the files it is about to create Tasks over. The same
-step carries a second, separate choice — the **Task review** every Task this run creates will be
-judged by; see [Task reviews, the pen](#task-reviews-the-pen).
+**Create Tasks** is where a template is attached. The dialog's last step lists both kinds under one
+heading, **Templates**: the file templates that can govern the files the run is about to create
+Tasks over, and the **headless templates** that witness a Task as a whole (see
+[Task reviews, the pen](#task-reviews-the-pen)). File templates are multi-select. Headless
+templates are single-select, because one page follows the Task, and they sit under a subheading
+rather than in a section of their own — a headless template is a peer of a file template, not a
+second decision.
 
-**A run with nothing attached is refused**, and it is one of the dialog's two gates. Since v0.6.2 the
-**Create** button stays enabled and pressing it opens the **Review** section with the template
-picker in front of the user, rather than a disabled button whose reason may be folded away. The
-alternative is a Todo whose every file draws an empty chip row and whose Tasks can carry no mark at
-all, which is a thing the user would discover after importing a folder rather than before it.
+**Nothing in that list is required.** Since v0.8.2f every row can be unticked, including the
+headless one, and **Create** is enabled by the address field alone. A Todo with no template is a
+legitimate Todo: its Tasks draw no chips and record their own page decisions. Before this round a
+run with nothing attached was refused and the Task review was a separate, mandatory choice, which
+turned a decision about *later* into a gate on *this* run. The starting selection still follows the
+importer — single choice for Package Prompts, file decisions otherwise — but it is a default, and
+clearing it is not undone.
+
+**A Package run offers no file templates at all.** Its Tasks are Prompts answered in a Viewer, and
+the files a Viewer shows are Resources rather than the thing being judged; a file template decides
+chips on a file that is itself the Task. The dialog says so in place of the file rows, and the
+write path stores no file attachment even for a Todo that held one before this round.
 
 **A Todo holds one version of a lineage, not several.** Attaching a newer version replaces the one
 the Todo holds, **in the position that one already occupied** rather than at the end, because the
@@ -233,20 +257,23 @@ that catches a point on a picture, or the blank form that only records that the 
 through the file. Any Task Review can sit beside any file template: choosing a pen does not choose a
 question, and answering a question does not depend on which pen drew the marks.
 
-**A run chooses one Task Review, and the picker is a radio group rather than a set.** There is no
-scope to reconcile and nothing to order, because one page follows the Task and two questionnaires
-would have to share it. The chosen version is stamped on every Task the run creates or touches, and
-a refresh may move a Todo held at an older version to the version the picker offers — the same
-version discipline the file templates follow. A run whose picker has no readable review falls back
-to the built-in, because a Task judged by nothing is not a shape this model has.
+**A run chooses at most one Task Review, and the rows are single-select rather than a set.** There
+is no scope to reconcile and nothing to order, because one page follows the Task and two
+questionnaires would have to share it. The chosen version is stamped on every Task the run creates
+or touches, and a refresh may move a Todo held at an older version to the version the picker offers
+— the same version discipline the file templates follow. **Choosing the selected row again clears
+it.** Since v0.8.2f a run with no Task Review is a reached state, not a failure: each Task records
+its files' own decisions through the built-in file-decisions review, written the way a null
+attachment has always been written. A run whose picker holds no readable review falls back to the
+same built-in.
 
 **What a review catches is declared, and every row says it in business terms.** A review that
 accepts a `choice.select` reads *catches a single choice*; one that accepts an `image.point` reads
 *catches a sampled point*; one that accepts nothing reads *records the Task's file decisions*. The
 last is still a useful pen — it is the "I read this and have nothing to write" answer — but it is
 not the matching pen for a Package, whose Prompts are answered through a Viewer. The dialog says so
-when that pairing is chosen, and a Package import starts on the single-choice review unless the user
-has already picked another.
+when that pairing is chosen — including when no review is chosen at all — and a Package import
+starts on the single-choice review until the user picks another or clears it.
 
 **Headless means the Viewer supplies the controls.** A headless Task Review has no chip row of its
 own and no question it draws: the Prompt's page is the questionnaire, and the template decides what
@@ -279,6 +306,12 @@ it is `T@2`'s scope that the next row is measured against.
 **A file no attached template admits gets no chips at all.** Not an empty row, not a star: the item
 offers nothing but the completion checkbox. This is the scope rule above arriving at the item, and
 it is why an empty scope is worth warning about.
+
+**That is about a file the run admitted; a file no Viewer can open is not made into a Task at all.**
+Since v0.8.2f the file importers take pictures, videos and PDFs and skip the rest — a Prompt body,
+a manifest, a text note — reporting how many were skipped after the run. A Task nothing can render
+is a Task nobody could judge, so it is not created. A run with no template attached is different:
+its files are openable, so they become Tasks, and those Tasks simply draw no chips.
 
 **The two Task-level surfaces speak about the Task, not about the file on screen.** The badge row
 under a filename, and the payload's `actions` array, are the union of **every attached template's
@@ -313,6 +346,12 @@ The `favorite` value is the one thing fixed about it — a mark made
 before templates existed names the same button a mark made after them does, so `favorite` is a
 promise rather than a value.
 
+**It governs files, so it does not govern a Package.** A Package's Tasks are Prompts answered in a
+Viewer, and a Package run attaches no file template. A Package Todo imported before v0.8.2f may
+still hold it; the card says *Templates: not used by Package Prompts* and the export sends no
+templates at all, rather than reporting the Prompt as marked up. See
+[the v0.8.2f fixes](iterations/v0.8.2f.md#4-a-packages-file-templates-and-what-matching-by-format-means).
+
 An install that had configured its own tags before v0.5.4 gets more than one template. The upgrade
 carries each Todo's own tag set across as a template named after that Todo, so nothing a user set up
 is lost — and so the templates they see were made by *their* configuration rather than by the app
@@ -331,6 +370,13 @@ files. The other two are the pens for the kinds of Viewer answer that exist so f
 one is the acceptance fixture for a template whose own button is its commit control, and the
 single-choice one is what a Package import starts on.
 
+**The single-choice template is not tied to the dating Viewer.** It catches `choice.select`, and any
+Viewer that emits it is compatible: the `profile`/1 card and the `vocabulary`/1 drill card both do.
+The template's `viewer` reference records the first Viewer it was written against, not an exclusive
+pairing. Revisability is the template's property, not the Viewer's: the built-in single-choice
+template is revisable, so a second answer supersedes the first. A drill Todo that wants one answer
+for good can point a non-revisable version at the same Viewer without any change to the card.
+
 **A built-in's name is data, and editing it is the owner's.** The rows are seeded under the names in
 the table and are never overwritten after that. The one exception is a repair on open: a row that
 still carries the name an earlier build seeded — *Rapid Review*, *Sample a point*, *Single Choice* —
@@ -348,25 +394,52 @@ the app that can be attached to a Todo, beside its templates. It is not a templa
 | What it governs | buttons on files of some kinds | questions about the whole Task |
 | Has a scope | yes, a conjunction of kind rules | **no** |
 | Produces | per-file actions, per-passage marks | Task-level answers |
-| Position | wherever its buttons apply | **fixed after the Task's last file** |
+| Position | wherever its buttons apply | **fixed after the Task's last page** |
 
-**A Task whose import carried an add-on has one extra page after its last Asset.** Swiping left off
-the last file shows the questionnaire; swiping left again completes the Task as leaving the last
-file does today; swiping right returns. The navigator counts it, so a three-file Task with an add-on
-reads `1(1/4)` … `1(4/4)`. The page is **never required**: the completion checkbox still completes
-without an answer, and no question has a required flag.
+**A Task whose import carried an add-on has one extra page after its last page.** *Last page* is
+the Prompt body when the Task has no file, otherwise its last Asset. Swiping left off it shows the
+questionnaire; swiping left again completes the Task as leaving the last page does today; swiping
+right returns. The navigator counts it, so a three-file Task with an add-on reads `1(1/4)` …
+`1(4/4)`, and a Prompt Task with no file reads `1(2/2)` rather than `1 / 1`. The page is **never
+required**: the completion checkbox still completes without an answer, and no question has a
+required flag.
+
+**The page is there wherever the Task is browsed.** Review, Quick Review, the List item viewer and
+the Todo preview share one page model, so the same Task reads the same counter and has the same
+pages on all four; before v0.8.2f the two read-only previews counted only the Prompt and the files.
+On a read-only surface the questionnaire is drawn **without controls** — every question the
+attached version still asks, with the recorded answer or *Not answered* — because those surfaces
+have no write they could make. A single file opened from a folder is not a Task and has no add-on
+page.
+
+**A judging commit lands on this page, it does not skip it.** Since v0.8.2f, when a template's
+button both writes the judgment and advances — a Prompt's **Like** / **Dislike** under the
+single-choice pen, a sampled point's **Submit** — the advance goes to the add-on page when the Task
+has one, whichever page the judgment was made from. The next forward move completes the Task. The
+questionnaire is therefore shown once per judged Task even when nobody swipes to it; a template
+that keeps the reviewer on its own page still does, and the inner arrow still reaches the add-on.
 
 **Three question types**: **Rating** (1–5), **Yes / No**, and **Text**. The prompts are yours. An
 answer is written as it is given — tapping a rating or Yes / No writes it, tapping it again clears
 it, text saves on Done or leaving the field, and a blank field clears. The answers are kept on the
-Task, not on any file, and the Task's **Info** sheet lists them, including answers a later version
-of the add-on no longer asks.
+Task, not on any file. The **add-on page's Info sheet** lists them — the questionnaire's name,
+version and answer count, then each question with its answer or *Not answered* — including answers
+a later version of the add-on no longer asks. A file's sheet and a Prompt Content page's sheet
+deliberately do not: repeating a Task-level answer beside a file would blur the level the answer
+belongs to. The add-on's sheet in turn lists nothing about the file shown a page earlier.
 
 **One add-on per Todo.** Create Tasks and Refresh Import gain an **Add an add-on** section drawn like
 *Add a template*: at most one choice, *None* by default, never part of the dialog's gate. The Todo
 records its choice; every Task the run creates or touches is stamped with the version it was built
 under. A Task imported before this round has no add-on and no extra page, and a List may mix Tasks
 with and without one.
+
+**The Todo card changes the same choice.** Since v0.8.2f its overflow menu carries
+**Add-on · …**, reading *none* or the questionnaire's name, and opens the same *None* / one choice
+dialog. Saving re-stamps the Todo and every Task it holds in one transaction, so the two cannot come
+to disagree about which questionnaire follows them. Answers a newly attached version no longer asks
+are kept but hidden, exactly as a refresh keeps them; changing stationery is not a reason to erase
+what was already answered.
 
 **An add-on is stored as a lineage with immutable versions**, exactly like a template: editing the
 questions appends a version; renaming edits in place; nothing is deleted. A refresh adopts the

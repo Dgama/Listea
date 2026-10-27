@@ -56,8 +56,14 @@ A **Task** is one unit of work. Running **Create Tasks** over a folder inside an
 
 | Importer | What a Task is |
 |---|---|
-| **One Task per file** | One Task per file in the folder. Its folder tree can be kept or flattened |
-| **One Task per folder** | One Task per immediate child folder, holding that folder's files. Flat by construction |
+| **One Task per file** | One Task per file in the folder that a Viewer can open — picture, video, PDF. Its folder tree can be kept or flattened |
+| **One Task per folder** | One Task per immediate child folder, holding that folder's openable files. Flat by construction |
+| **Package Prompts** | One Task per Prompt declared by each Package's manifest, nested under *One Task per file*. The Package's `media` members are Resources, not Tasks |
+
+Since v0.8.2f a file no Viewer can open is **skipped, not imported**: a text note, a JSON Prompt
+body, a manifest. A Task nothing can render is a Task nobody could judge, and refusing the judgment
+after creating the Task left the user with a row that could never be answered. The run reports how
+many files it skipped.
 
 A **Todo** is what one run produced: those Tasks, plus the provenance saying which folder they came
 out of and under which importer. Opening a Todo shows them — as a browsable tree of folders when the
@@ -113,6 +119,14 @@ clear its Tasks' decisions every time it is refreshed. Material already flagged 
 unchanged for the same reason. Second, a **refresh only looks at what it scanned**: a partial
 re-import of one folder says nothing about the Assets a Task holds outside it, and their absence
 from the plan is not a disappearance.
+
+**A file an earlier build imported and this one will not plan is reported missing once.** Before
+v0.8.2f the file importer admitted every file, so an older Todo may hold a Task whose only Asset is
+a text file or a JSON Prompt body. A refresh now skips that file, so the first run over the folder
+sees a held path the plan does not name: **Keep it** flags it missing and leaves the Task, **Start
+it over** clears the Task's decisions, and **Replace the Task** deletes it and mints no successor,
+because the run has no material for one. Nothing is rewritten at upgrade — the policy is applied by
+the next run, which is the run that has a policy to apply.
 
 ### Task lifetime
 
@@ -386,11 +400,16 @@ attached templates governs a file, where a template is edited, and what the buil
 — is [Templates](templates.md).
 
 **An add-on is the Task-level counterpart.** Since v0.7.1 a Todo may also carry one **add-on**: a
-questionnaire about the Task as a whole, answered on one page after the Task's last file. It has the
-same editing model as a template — a lineage with immutable versions, an edit appends — but no
-scope, no buttons and no storage in common: its answers live in `task_review_answers`, keyed by the
-Task. It is **not an Asset**: an Asset is a file a Task presents, and a questionnaire is not a file.
-A Task imported without an add-on has no extra page and behaves exactly as before.
+questionnaire about the Task as a whole, answered on one page after the Task's last page — after
+the Prompt body when it has no file. It has the same editing model as a template — a lineage with
+immutable versions, an edit appends — but no scope, no buttons and no storage in common: its
+answers live in `task_review_answers`, keyed by the Task. It is **not an Asset**: an Asset is a
+file a Task presents, and a questionnaire is not a file. A Task imported without an add-on has no
+extra page and behaves exactly as before. Since v0.8.2f the Todo card can attach, change or clear
+it without another import; the Todo and all its Tasks are re-stamped in one transaction, and answers
+the new version no longer asks are kept but hidden. The same page is shown, read-only, by every
+surface that browses a Task — the Todo preview and the List item viewer as well as Review — because
+a Task has one shape wherever it is looked at; a file that is not a Task has none.
 
 The three layers are deliberately separate: the **Task** (checked, and the add-on's answers), the
 **Task–Asset pair** (selections and PDF marks), and the **Asset** (the file itself). See

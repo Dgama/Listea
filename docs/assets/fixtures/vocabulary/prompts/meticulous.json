@@ -1,0 +1,13 @@
+{
+  "stem": "Choose the meaning of the word.",
+  "word": "meticulous",
+  "phonetic": "/məˈtɪkjələs/",
+  "definition": "showing great attention to detail; very careful and precise",
+  "example": "a meticulous record of every payment",
+  "answer": "c",
+  "options": [
+    { "id": "c", "label": "showing great attention to detail" },
+    { "id": "a", "label": "careless and hurried" },
+    { "id": "b", "label": "loud and confident" }
+  ]
+}

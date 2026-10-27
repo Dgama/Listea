@@ -143,7 +143,7 @@ they were.
 | `tasks[].id` | The Task's [public id](#task-and-asset-ids). Stable, never the database row number. |
 | `tasks[].title` | The name the round showed for this Task — the List row's title, or the name it was imported under. |
 | `tasks[].isCompleted` | Whether the Task was processed in Listea. |
-| `tasks[].templates[]` | The template versions the Task was imported under: `id`, `name`, `version`. |
+| `tasks[].templates[]` | The template versions the Task was imported under: `id`, `name`, `version`. `[]` for a Task with no template, and for a structured Prompt Task — see below. |
 | `tasks[].assets[]` | Every file the Task presents, ordered as the Task holds them. `[]` for a Task with no file. |
 | `tasks[].addOn` | The Task's questionnaire: `id`, `name`, `version` and `answers[]`, written **after `assets`** and **only when at least one answer is visible**. See [the add-on](#the-tasks-add-on-and-why-it-is-version-4). |
 | `tasks[].content` | A structured Prompt's identity: `kind`, `schema`, `revision`, `promptKey`. Written **after `addOn`** and **only when the Task has a payload**. See [structured Prompts](#structured-prompts-and-why-they-are-version-5). |
@@ -183,6 +183,14 @@ does not carry ★ sends no `favorite`. Everything else is whatever you set on t
 **`templates` names the attached version, never the template's current one.** A Task reviewed under
 version 4 goes on meaning version 4 after an edit appends version 5. `name` is `null` only when this
 build cannot read that version at all; the reference is still worth sending, so the entry remains.
+
+**A structured Prompt Task sends no `templates` and no file actions.** Its judgment is the
+`result`; the Prompt is answered in a Viewer, and a file template decides chips on a file that is
+itself the Task — which a Prompt's Resources are not. Since v0.8.2f a Package import attaches no
+file template at all, and the assembly suppresses one that older Package Todos still store: those
+bodies carry `templates: []` and empty `actions`, rather than telling a receiver the Prompt was
+marked up. History is not rewritten — a record already sent replays its own bytes, so an older
+dating export still shows what it sent at the time.
 
 ### Passages, and why they are version 3
 
@@ -246,8 +254,8 @@ writes no `marks` key at all, which is what lets the body keep saying `2`.
 ### The Task's add-on, and why it is version 4
 
 Since v0.7.1 a Task can carry an **add-on**: a questionnaire about the Task as a whole, answered on
-one page after its last file. The answers are a sibling of `assets`, never inside it, because they
-are not about any one file.
+one page after its last page — after its last file, or after the Prompt body when it has no file.
+The answers are a sibling of `assets`, never inside it, because they are not about any one file.
 
 ```json
 {

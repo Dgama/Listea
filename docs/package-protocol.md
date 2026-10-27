@@ -253,7 +253,11 @@ They are case-sensitive and must be unique in their scope:
 
 A key is not a path, a filename, or a display name. It is the identity import reconciliation uses:
 `(todoId, packageKey, promptKey)` names a Task, and `(todoId, packageKey, resourceKey)` names a
-Resource. Changing a key creates a new Task; changing a title does not.
+Resource. Changing a key creates a new Task; changing a title does not. Keys are internal addresses
+and are never shown where a person reads provenance: the List, the queue guide and the Info sheet
+show the Package's manifest `title` instead of the synthetic `<packageKey>/<promptKey>` catalog key
+the importer stores in the Task's path columns. Since v0.8.2f the same rule applies everywhere
+provenance is displayed.
 
 ## Prompt description
 
@@ -294,6 +298,54 @@ A dating-profile description:
 declares its options and that `alice-photo` is a Resource use; the Viewer for `profile@1` knows how
 to draw the rest.
 
+A vocabulary description (`kind` `vocabulary`, `schema` 1):
+
+```json
+{
+  "stem": "Choose the meaning of the word.",
+  "word": "serendipity",
+  "phonetic": "/ˌserənˈdɪpɪti/",
+  "definition": "the occurrence of events by chance in a happy way",
+  "example": "a fortunate stroke of serendipity",
+  "audio": "serendipity-audio",
+  "answer": "b",
+  "options": [
+    { "id": "c", "label": "a formal apology" },
+    { "id": "b", "label": "a happy accident" },
+    { "id": "a", "label": "a long journey" }
+  ]
+}
+```
+
+The `vocabulary`/1 Viewer's own fields:
+
+| Field | Required | Meaning |
+|---|---|---|
+| `word` | yes | The word being drilled, 1–200 characters. |
+| `phonetic` | no | Pronunciation line, 1–200 characters. |
+| `definition` | no | Meaning, 1–1,000 characters. |
+| `example` | no | Usage example, 1–1,000 characters. |
+| `audio` | no | A Resource key naming an `audio` Resource. It is played from the Resource, not from an Asset. |
+| `answer` | no | The id of one declared option. A read-only card may reveal it; the recorded event is still the option the person chose. |
+
+Unknown fields are refused by this Viewer, exactly as `profile`/1 refuses them. A body it cannot
+read is a Prompt this build cannot draw, not a card drawn from a guess.
+
+**The declared option order is the contract.** The array order is what the card draws; nothing in
+the importer, the store or the renderer sorts or shuffles it. The fixture's `c, b, a` order exists to
+catch a layer that does. Any future shuffle must be an explicit body or template option, never a
+default.
+
+The pronunciation Resource is declared once at Package level and may be used by more than one
+Prompt:
+
+```json
+{ "resourceKey": "serendipity-audio", "kind": "audio", "member": "media/serendipity.mp3" }
+```
+
+It is a Resource, so it is neither an Asset nor a page of the Task. A `required: true` use that is
+missing blocks submission; an optional missing one only disables the Listen control.
+
 ## Response contracts (v1)
 
 The response contract says what a valid answer looks like. It is part of the Prompt, not of the
@@ -305,9 +357,11 @@ Viewer, because it is what the question setter asked for.
 | `choice.multiple` | one or more option ids, no duplicates | one `choice.select` per selected id, in payload order |
 | `freeform` | no declared option set; the Template decides | template-defined |
 
-`choice.single` is the only contract implemented end to end in v0.8.2. `choice.multiple` is a
-declared protocol value and is rejected as unsupported until a Viewer and Template for it exist;
-`freeform` is reserved for the degenerate Prompts described below.
+`choice.single` is the only contract implemented end to end. It serves both the dating `profile`/1
+and the vocabulary `vocabulary`/1 Viewer, because the contract is what the question setter asked
+for and both cards emit the same `choice.select` intent. `choice.multiple` is a declared protocol
+value and is rejected as unsupported until a Viewer and Template for it exist; `freeform` is
+reserved for the degenerate Prompts described below.
 
 A choice event's stored value is:
 
@@ -472,7 +526,16 @@ the same envelope without changing what a Task is.
 ## Relationship to the current app
 
 - **File-as-Task and folder-as-Task remain.** They are printing conventions, not Packages. A file
-  Task is a degenerate Prompt created by the importer rather than declared by a Package.
+  Task is a degenerate Prompt created by the importer rather than declared by a Package. Under
+  either, the importer matches files by **format**: pictures, videos and PDFs become Tasks, and a
+  file no Viewer can open — a Prompt body, a manifest, a text note — is skipped and counted
+  (v0.8.2f). Match by format is the file importer's rule; Package Prompts are matched by the
+  manifest, and their `media` members stay Resources.
+- **A Package is still a directory, not a file.** `.listea/`, `prompts/` and `media/` are visible in
+  the folder tree, and selecting the folder is how a Package is opened. The intended envelope is
+  one `dating.listea` archive, zip-like, with the same members inside; v0.8.2f does not implement
+  it, because extraction and selection change where a Package begins rather than fix its edges,
+  and [archives are rejected](#package-layout) by `listea.package/1`.
 - **Creation currently fuses printing and tool choice.** One Todo dialog picks the importer (the
   printing convention) and attaches the Template (the answer tool). The model keeps them distinct —
   a Package and a Viewer never choose a Template — so a later round may split the two steps without
@@ -553,6 +616,10 @@ Resolution in this build:
 - the event retains the option id and label, and the Prompt's kind/schema/revision — not the
   profile body. The body is content, not a judgment record.
 
+The same manifest shape with one `profile` and one `vocabulary` Prompt is
+[`fixtures/mixed`](assets/fixtures/mixed/README.md). It imports as two Tasks, each resolved by its
+own Viewer, and both are answerable through the single-choice template.
+
 ## Versioning
 
 - A breaking grammar change updates `protocol` to `listea.package/2`; the app supports the versions
@@ -564,8 +631,10 @@ Resolution in this build:
 - Additive manifest fields still require a protocol-version decision: v1 rejects unknown fields so
   that a typo is a diagnostic, not a silent change of meaning.
 
-## Open for v0.8.2 acceptance
+## Acceptance fixtures
 
-The exact assertions, fixture bytes, and pass/fail threshold for the dating run are recorded in
-[v0.8.2-plan.md](iterations/v0.8.2-plan.md). The v5 export shape and the decision to keep the
-Prompt body out of it are also recorded there; this document fixes only what enters the app.
+The dating run's exact assertions, fixture bytes, and pass/fail threshold are recorded in
+[v0.8.2-plan.md](iterations/v0.8.2-plan.md). The vocabulary round and its fixtures are recorded in
+[v0.8.0-vocabulary-plan.md](iterations/v0.8.0-vocabulary-plan.md). The v5 export shape and the
+decision to keep the Prompt body out of it are also recorded there; this document fixes only what
+enters the app.

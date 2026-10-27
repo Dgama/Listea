@@ -33,3 +33,18 @@ Push it to the phone for the walk:
 ```text
 adb push docs/assets/fixtures/sample-point.png /sdcard/Pictures/ListeaSample/
 ```
+
+## Package fixtures
+
+Each folder is a complete `.listea` Package tree with its own README, generator and committed
+bytes. The generator is what explains the bytes; see the folder README before regenerating.
+
+| Folder | Contents | Used by |
+|---|---|---|
+| [`dating/`](dating/README.md) | `profile`/1 Prompts with photo and color Resources | v0.8.2 dating acceptance |
+| [`vocabulary/`](vocabulary/README.md) | four `vocabulary`/1 Prompts with non-alphabetical option orders, shared and per-Prompt pronunciation Resources, one without audio | vocabulary round, acceptances 1, 2, 5 |
+| [`mixed/`](mixed/README.md) | one Package holding one `profile` and one `vocabulary` Prompt | vocabulary round, acceptance 3 |
+| [`mixed-list/`](mixed-list/README.md) | media files for a mixed List: a single two-page PDF, and a PDF + PNG + MP4 Task | vocabulary round, acceptance 6 |
+
+The dating and media folders used elsewhere are indexed in their own READMEs; only the fixtures
+added by the vocabulary round are listed here.

@@ -1,0 +1,53 @@
+{
+  "protocol": "listea.package/1",
+  "packageKey": "vocabulary-demo",
+  "revision": 1,
+  "title": "Vocabulary demo",
+  "prompts": [
+    {
+      "promptKey": "serendipity",
+      "kind": "vocabulary",
+      "schema": 1,
+      "response": "choice.single",
+      "title": "serendipity",
+      "description": "prompts/serendipity.json",
+      "resources": [
+        { "resourceKey": "serendipity-audio", "required": true }
+      ]
+    },
+    {
+      "promptKey": "ubiquitous",
+      "kind": "vocabulary",
+      "schema": 1,
+      "response": "choice.single",
+      "title": "ubiquitous",
+      "description": "prompts/ubiquitous.json",
+      "resources": [
+        { "resourceKey": "common-audio", "required": true }
+      ]
+    },
+    {
+      "promptKey": "ephemeral",
+      "kind": "vocabulary",
+      "schema": 1,
+      "response": "choice.single",
+      "title": "ephemeral",
+      "description": "prompts/ephemeral.json",
+      "resources": [
+        { "resourceKey": "common-audio", "required": true }
+      ]
+    },
+    {
+      "promptKey": "meticulous",
+      "kind": "vocabulary",
+      "schema": 1,
+      "response": "choice.single",
+      "title": "meticulous",
+      "description": "prompts/meticulous.json"
+    }
+  ],
+  "resources": [
+    { "resourceKey": "serendipity-audio", "kind": "audio", "member": "media/serendipity.mp3" },
+    { "resourceKey": "common-audio", "kind": "audio", "member": "media/common.mp3" }
+  ]
+}

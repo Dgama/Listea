@@ -1,0 +1,13 @@
+{
+  "stem": "Alice, 28 — likes hiking and old films.",
+  "profile": {
+    "name": "Alice",
+    "age": 28,
+    "bio": "Likes hiking and old films."
+  },
+  "photo": "alice-photo",
+  "options": [
+    { "id": "like", "label": "Like" },
+    { "id": "dislike", "label": "Dislike" }
+  ]
+}
