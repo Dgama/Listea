@@ -1,0 +1,13 @@
+{
+  "stem": "The starter: soup or salad?",
+  "profile": {
+    "name": "Soup",
+    "age": 28,
+    "bio": "A warm bowl on a cold day."
+  },
+  "photo": "q1-photo",
+  "options": [
+    { "id": "soup", "label": "Soup" },
+    { "id": "salad", "label": "Salad" }
+  ]
+}

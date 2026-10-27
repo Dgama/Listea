@@ -269,17 +269,57 @@ same built-in.
 
 **What a review catches is declared, and every row says it in business terms.** A review that
 accepts a `choice.select` reads *catches a single choice*; one that accepts an `image.point` reads
-*catches a sampled point*; one that accepts nothing reads *records the Task's file decisions*. The
-last is still a useful pen — it is the "I read this and have nothing to write" answer — but it is
-not the matching pen for a Package, whose Prompts are answered through a Viewer. The dialog says so
-when that pairing is chosen — including when no review is chosen at all — and a Package import
-starts on the single-choice review until the user picks another or clears it.
+*catches a sampled point*. A review that accepts no viewer event has two honest cases since
+`0.8.4-preview`: the media review reads *records the Task's file decisions*, and the Form review
+reads *records the form's answer*. The first is still a useful pen — it is the "I read this and have
+nothing to write" answer — but it is not the matching pen for a Package, whose Prompts are answered
+through a Viewer. The dialog says so when that pairing is chosen — including when no review is
+chosen at all — and a Package import starts on the single-choice review until the user picks
+another or clears it.
 
 **Headless means the Viewer supplies the controls.** A headless Task Review has no chip row of its
 own and no question it draws: the Prompt's page is the questionnaire, and the template decides what
 an answer means — whether one tap is the commit, whether the answer may be revised, whether the
 Task completes and advances. "Headless" names that division of labour, not a missing part. The pen
 is real; it simply does not draw the question, because the Viewer is already holding it.
+
+**A review also says when a Task is finished.** Since `0.8.4-preview` a Task may hold several
+questions, and one answer no longer says anything about the others. Each version carries a
+completion policy:
+
+| Policy | The Task completes when… | Used by |
+|---|---|---|
+| **single part** | the template's commit says the response completed the Task | every pre-v0.8.4 version, including both media reviews and the single-choice version 1 |
+| **all required parts** | every required part is answered and none is unavailable | *Headless Template for Several Choices* — version 2 of the single-choice lineage |
+| **any part** | at least one required part is answered | none of the built-ins; a template a later round may offer |
+| **explicit only** | a person checks the box; answers never complete it | none of the built-ins; a checklist-style template |
+
+The two built-ins a Section import can use are the single-choice version 1 and version 2. Version 1
+completes a Task on its first choice, which is what a one-question Task wants; version 2 waits for
+the last required question, which is what a Section Task wants. They are versions of one lineage
+rather than two templates because the judgment is the same — one choice per Prompt — and only the
+aggregation differs. Choosing version 2 for a one-part Task is harmless: its single required part
+completes it exactly as version 1 would.
+
+Every install starts with these five Task Reviews:
+
+| Picker name | Lineage | Viewer | Catches | Commit | Completion |
+|---|---|---|---|---|---|
+| Headless Template for File Decisions | `builtin.media.rapid-review` v1 | Media | no event — the file decisions | the completion checkbox | single part |
+| Headless Template for Sampling a Point | `builtin.image.sample-review` v1 | Media | `image.point` | its **Submit** | single part |
+| Headless Template for Single Choice | `builtin.structured.single-choice` v1 | Profile | `choice.select` | immediate — the tap is the commit | single part |
+| Headless Template for Several Choices | `builtin.structured.single-choice` v2 | Profile | `choice.select` | immediate | all required parts |
+| Headless Template for a Form | `builtin.structured.form` v1 | Form | no event — the structured answer | its **Submit** | single part |
+
+A new built-in does not wait for a database to be created: the seed repairs any missing Task Review
+on open, so an install that already holds an earlier release's built-ins gains this release's
+without losing a name somebody changed.
+
+**The Form review is version 1 of its own lineage.** It catches no viewer event, because a form's
+answer is a structured record rather than a tap; its named **Submit** control is the commit, and the
+write boundary refuses a Submit with a visible required field unanswered. A row that accepts no
+event says what it records: the media review says *records the Task's file decisions*, and the Form
+review says *records the form's answer*.
 
 ## Which template governs a file
 

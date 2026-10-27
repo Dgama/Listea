@@ -1,11 +1,13 @@
-# The Listea Package protocol — v1
+# The Listea Package protocol — v1 and v2
 
-> **Status:** **v1 implemented for v0.8.2 (2026-10-24), unreleased.** The protocol identifier is
-> `listea.package/1`; it remains the shipped reader. **v2 is designed, not implemented** — see
-> [v2 planned for v0.8.4](#v2-planned-for-v084). A breaking change bumps the identifier; additive,
-> backward-compatible changes are made only when the reader can be extended without guessing.
+> **Status:** **v1 implemented for v0.8.2 (2026-10-24); v2 implemented for `0.8.4-preview`
+> (versionCode 804, 2026-10-27).** Both are unreleased. The reader accepts both identifiers and
+> reads each under its own grammar; [v2](#v2-implemented-for-v084) adds `files`, `sections` and
+> `structured`, and v1 remains the compatibility contract for every Package written before it. A
+> breaking change bumps the identifier; additive, backward-compatible changes are made only when
+> the reader can be extended without guessing.
 > **Audience:** the person preparing a Package, and the coding agent implementing the reader.
-> **Related:** [ARCHITECTURE → Framework evolution](ARCHITECTURE.md#framework-evolution--v08x-planned),
+> **Related:** [ARCHITECTURE → Framework evolution](ARCHITECTURE.md#framework-evolution--v08x),
 > [v0.8.2 plan](iterations/v0.8.2-plan.md), [v0.8.4 design](iterations/v0.8.4.md).
 
 ## Why a protocol
@@ -29,7 +31,7 @@ These words are used precisely in this document and in the code that implements 
 | **Upstream** | Registered access to material, and therefore to the question setter's work: a grant, a locator, a name, provenance. | A Package, a Task, a review context |
 | **Prompt** | One question setter's unit: a statement, a response contract, and the materials it needs. A Package stores Prompts. | A Task, a TaskPart, an Asset, a List, a review event |
 | **Decision-maker intent** | A Todo: which Prompts a person takes on, under which upstream, in what scope and order, printed how, and answered with which tool. | The question setter's intent; a List; a Package |
-| **Task** | A decision-maker's undertaking to answer one or more Prompts in one Todo, and the durable record of that undertaking and its judgments. In v1 it answers one Prompt; v0.8.4 plans 1..N **TaskParts**. | A file, an image, a Prompt, a List membership |
+| **Task** | A decision-maker's undertaking to answer one or more Prompts in one Todo, and the durable record of that undertaking and its judgments. A v1 Task answers one Prompt; a v2 Task may hold 1..N **TaskParts**. | A file, an image, a Prompt, a List membership |
 | **Asset** | Material a Prompt **presents**: a page the person looks at. In a Task, it belongs to one TaskPart and is never the decision unit. | A Resource, a prompt body, a TaskPart |
 | **Resource** | Material a Prompt **depends on** but does not present: a photo beside a profile, pronunciation audio, a reference image. | An Asset, a page, a judgment target |
 | **Viewer** | The renderer for a Prompt family. It draws the Prompt, resolves Resources, and emits named intents. | A template, a completion policy, a database writer |
@@ -44,7 +46,7 @@ decision-maker — a Todo — takes a Prompt on. The same Prompt may be taken on
 is two Tasks with two independent judgments. Re-importing the same Package into the same Todo is
 the same Task, reconciled by key.
 
-**Planned for v0.8.4:** a Task may hold several Prompts as **TaskParts**, and the taker's
+**Since `0.8.4-preview`:** a Task may hold several Prompts as **TaskParts**, and the taker's
 **Composition** decides the grouping — one Prompt per Task, or all Prompts tagged with a Section in
 one Task. The same Prompt taken on by two Todos is still two TaskParts with independent judgments.
 In a multi-part Task the Task reconciles on `(todoId, packageKey, compositionKey)` and each Prompt
@@ -267,7 +269,7 @@ show the Package's manifest `title` instead of the synthetic `<packageKey>/<prom
 the importer stores in the Task's path columns. Since v0.8.2f the same rule applies everywhere
 provenance is displayed.
 
-**Planned for v0.8.4:** the Task's reconciliation key becomes
+**Since `0.8.4-preview`:** the Task's reconciliation key is
 `(todoId, packageKey, compositionKey)`, and `promptKey` identifies a **TaskPart** within the Task.
 For the default one-Prompt composition the composition key is `prompt:<promptKey>`, so renaming the
 Prompt is a new Task exactly as before. In a `section:<sectionKey>` composition a renamed
@@ -379,10 +381,11 @@ for and both cards emit the same `choice.select` intent. `choice.multiple` is a 
 value and is rejected as unsupported until a Viewer and Template for it exist; `freeform` is
 reserved for the degenerate Prompts described below.
 
-**`structured` is planned for v2**, not accepted by this reader. The Prompt body declares a field
-set, the Viewer for `kind`/`schema` interprets it, and the protocol validates the envelope rather
-than the fields. A structured response is still one TaskPart; its fields are internal answers, not
-parts. See [v2 planned for v0.8.4](#v2-planned-for-v084).
+**`structured` belongs to v2**, and a v1 manifest declaring it is rejected as an unsupported
+contract. In v2 the Prompt body declares a field set, the Viewer for `kind`/`schema` interprets it,
+and the protocol validates the envelope rather than the fields. A structured response is still one
+TaskPart; its fields are internal answers, not parts. See
+[v2 implemented for v0.8.4](#v2-implemented-for-v084).
 
 A choice event's stored value is:
 
@@ -544,11 +547,13 @@ importer, where they already work. The concept is recorded here because it is th
 protocol has a `freeform` response contract at all, and because a later round may move them into
 the same envelope without changing what a Task is.
 
-## v2 planned for v0.8.4
+## v2 implemented for v0.8.4
 
-> **Status: design only, 2026-10-27.** No reader and no writer for this version exist yet; the
-> shipped reader is v1. The design is [v0.8.4](iterations/v0.8.4.md); the implementation plan is
-> [v0.8.4-plan.md](iterations/v0.8.4-plan.md). The grammar below freezes at acceptance, not before.
+> **Status: implemented in `0.8.4-preview` (versionCode 804, 2026-10-27), unreleased.** The reader
+> accepts `listea.package/2` under the grammar below and keeps reading v1 under its own. The design
+> is [v0.8.4](iterations/v0.8.4.md); the implementation plan is
+> [v0.8.4-plan.md](iterations/v0.8.4-plan.md); the device acceptance is in
+> [the design check](iterations/v0.8.4-design-check.md#gate-7--implementation-acceptance).
 
 `listea.package/2` is the same envelope with three changes: presented files are named `files`, a
 Package may declare **Sections**, and a Prompt may ask for a **structured** response. It still
@@ -637,7 +642,8 @@ field set lives in the Prompt body and belongs to the `kind`/`schema`; the proto
 envelope and the declared contract only. The Viewer interprets the fields, their visibility and
 their validation.
 
-`form`/1 is the planned first structured Viewer. Its body is illustrative, not a protocol rule:
+`form`/1 is the first structured Viewer, shipped in `0.8.4-preview`. Its body is illustrative of
+the Viewer's own contract, not a protocol rule:
 
 ```json
 {
@@ -814,8 +820,8 @@ own Viewer, and both are answerable through the single-choice template.
 ## Versioning
 
 - A breaking grammar change updates `protocol` to `listea.package/2`; the app supports the versions
-  it ships readers for and rejects the rest whole. v0.8.4 plans exactly that step — `files`,
-  `sections` and `structured` — and is design only until accepted; v1 remains the shipped reader.
+  it ships readers for and rejects the rest whole. `0.8.4-preview` took exactly that step — `files`,
+  `sections` and `structured` — and still reads v1 under its own grammar.
 - A new `kind` does not change the protocol. It needs a Viewer that declares support.
 - A new `response` contract is a protocol change, because it changes what a valid answer is.
 - A new optional field inside a description is a schema change for that `kind`; the Viewer

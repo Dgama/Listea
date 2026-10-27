@@ -1,10 +1,11 @@
 # The two vocabularies — setter and taker
 
-> **Status:** v0.8.4 design (2026-10-27). This page is the canonical reference for the words the
-> v0.8.4 documentation uses; the terms are not yet code. Where a term is marked **planned**, the
-> current build still behaves as [Core concepts](core-concepts.md) describes. The
-> [architecture](ARCHITECTURE.md) remains the one normative page; this one fixes the naming it
-> relies on.
+> **Status:** v0.8.4, implemented 2026-10-27 in `0.8.4-preview` (804). This page is the canonical
+> reference for the words the v0.8.4 documentation uses; the terms are now code — TaskPart is the
+> decision unit in the schema and the UI, Composition is the import's `compositionKey`, and
+> ImportPlan is the shared importer output. The open items at the end remain deliberately
+> unaligned. The [architecture](ARCHITECTURE.md) remains the one normative page;
+> this one fixes the naming it relies on.
 > **Why this page exists:** Listea began as a file-review app with one vocabulary. A Package makes
 > the question **setter** a second speaker: the setter declares questions and material, the
 > decision-maker takes them on, and the app is the boundary between the two. The file-era words —
@@ -58,12 +59,12 @@ nor **Asset** (the presented file/page).
 | Term | Meaning | Not |
 |---|---|---|
 | **Prompt** | The question setter's smallest declared decision unit. It has a response contract, may present files, and may declare internal steps/fields/conditions in its body. A Prompt is content; it is never stored as a Task. | A Task, a TaskPart, an Asset, a List membership |
-| **TaskPart** *(new, planned)* | One Prompt instantiated in one Task: the decision-maker's unit of judgment. It owns its current response(s), its part-level events, its completion contribution and its pages. A media Task has one **degenerate** TaskPart with no Prompt payload. | An Asset, a Prompt, a second Task |
+| **TaskPart** *(new)* | One Prompt instantiated in one Task: the decision-maker's unit of judgment. It owns its current response(s), its part-level events, its completion contribution and its pages. A media Task has one **degenerate** TaskPart with no Prompt payload. | An Asset, a Prompt, a second Task |
 | **Task** | The decision-maker's undertaking. It contains **1..N TaskParts** and remains the durable object for identity, List membership, Task completion, the Add-on and the export envelope. | A Prompt, a Package, a file, a List membership |
 | **Asset** | A file **presented as a page** within a TaskPart. It is material, not the decision unit. | A TaskPart, a Resource, a judgment target |
 | **Resource** | A file a TaskPart **depends on** but does not present as a page: pronunciation audio, a prompt illustration, a reference image. | An Asset, a page, a decision unit |
 | **Section** | A **declared tag** on Prompts, with an entry in the Package's `sections` registry for its title and order. Structurally drawable as a parent, semantically an attribute of the Prompt. | A Task constructor, a semantic boundary, a third Task level |
-| **Composition** *(new, planned)* | The decision-maker's rule for which Prompts become TaskParts of one Task, and in what order. It is recorded as the import's `compositionKey`. It may select by Section tag, by individual Prompt, or (later) by a custom list. | A Section, a setter declaration, a Task id |
+| **Composition** *(new)* | The decision-maker's rule for which Prompts become TaskParts of one Task, and in what order. It is recorded as the import's `compositionKey`. It may select by Section tag, by individual Prompt, or (later) by a custom list. | A Section, a setter declaration, a Task id |
 | **Package** | The setter's exchange envelope: manifest, members, keys, revision. It is an input format, not an internal entity. | A Task, a Todo, a stored owner, a lifecycle |
 | **Todo** | The decision-maker's intent and configuration for one run: Upstream, importer, scope, composition rule, templates, one Add-on, export choice. | A question setter, a List, a review context |
 | **Upstream** | Registered access to material: a grant, a locator, a name, provenance. | A Package, a Task, a review context |
@@ -71,7 +72,7 @@ nor **Asset** (the presented file/page).
 | **Viewer** | The renderer for a Prompt/Asset family; it draws the content and emits named intents. | A Template, a completion policy, a database writer |
 | **Response** | The recorded answer inside a TaskPart. The **response contract** is the setter's declaration of what a legal answer looks like; the Response is the taker's recorded value. | A Task, a TaskPart, a state edit |
 | **Add-on** | A questionnaire about a Task as a whole, answered after its parts. A Task-level current state, not a primary event. | A TaskPart, an Asset, a Prompt |
-| **ImportPlan** *(new, planned)* | The normalized output of any importer: Tasks, TaskParts, Assets, Resources, payloads, diagnostics. Both the file importer and the Package importer produce one. | A Package, a renderer, a database write |
+| **ImportPlan** *(new)* | The normalized output of any importer: Tasks, TaskParts, Assets, Resources, payloads, diagnostics. Both the file importer and the Package importer produce one. | A Package, a renderer, a database write |
 
 ## The equalities
 
@@ -330,5 +331,5 @@ state unit, not a third arrow level. A single-part Task behaves exactly as today
 ---
 
 Next: [v0.8.4 design](iterations/v0.8.4.md) for the model and its state machine,
-[Package protocol](package-protocol.md) for the v1 grammar and the planned v2, and
+[Package protocol](package-protocol.md) for the v1 grammar and the v2 grammar, and
 [Core concepts](core-concepts.md) for the shipped behaviour.

@@ -2,15 +2,16 @@
 
 > **Status:** Normative architectural direction  
 > **Scope:** Long-lived product and domain boundaries  
-> **Last updated:** 2026-10-27 (the v0.8.2 Package protocol, the v0.8.2f acceptance fixes and the
-> vocabulary round delivered as `0.8.3-preview` are
-> recorded in [Framework evolution — v0.8.x](#framework-evolution--v08x-planned), with the **Prompt**
-> vocabulary
-> and the question-setter/decision-maker distinction in [Prompt and Task](#prompt-and-task). The
-> v0.8.4 design — a Task over 1..N **TaskParts**, **Section** as a tag, and the taker's
-> **Composition** — is recorded in [TaskPart and Composition](#taskpart-and-composition-v084-planned)
-> and the v0.8.4 block of [Framework evolution](#framework-evolution--v08x-planned); it is design
-> only. The shipped v0.7.1 Add-on model is retained unchanged. The pre-v0.8 revision is archived at
+> **Last updated:** 2026-10-27 (the v0.8.2 Package protocol, the v0.8.2f acceptance fixes, the
+> vocabulary round delivered as `0.8.3-preview`, and the v0.8.4 TaskParts round delivered as
+> `0.8.4-preview` are recorded in [Framework evolution — v0.8.x](#framework-evolution--v08x), with
+> the **Prompt** vocabulary and the question-setter/decision-maker distinction in
+> [Prompt and Task](#prompt-and-task). The v0.8.4 implementation — a Task over 1..N **TaskParts**,
+> **Section** as a tag, and the taker's **Composition** — is recorded in
+> [TaskPart and Composition](#taskpart-and-composition-v084) and the v0.8.4 block of
+> [Framework evolution](#framework-evolution--v08x); it is implemented, device-verified on
+> 2026-10-27, and ships unreleased as `0.8.4-preview` (versionCode 804). The shipped v0.7.1 Add-on
+> model is retained unchanged. The pre-v0.8 revision is archived at
 > [ARCHITECTURE-v0.7.1.md](ARCHITECTURE-v0.7.1.md).)
 > **Earlier revisions:** v0.7.0's PDF viewer, passage mark and renderer-neutral seam are recorded in
 > [Asset](#asset), [Asset Viewer Template](#asset-viewer-template) and
@@ -39,9 +40,11 @@ stands so a later reader does not mistake a planned boundary for a shipped one.
 | v0.8.2f | implemented, device-verified, unreleased | Acceptance fixes: Todo rename, card-level add-on edit, one Templates list with nothing required, format-matched import, Prompt Tasks export no templates, page-detector fix. Schema 32 and export v5 unchanged |
 | `0.8.3-preview` | implemented, device-verified 2026-10-26; versionCode 803, unreleased | the vocabulary round carried with the v0.8.2f fixes: second structured Viewer (`vocabulary`/1) behind the same Package protocol, Template and page model; shared Prompt renderer and reveal card. Schema 32 and export v5 unchanged |
 | v0.8.3 | not closed; the reveal-card fixture is delivered in `0.8.3-preview` | shared-Resource and reveal-card fixtures. The revision policy, the independent-Todo proof and the contract freeze are carried into v0.8.4 |
-| v0.8.4 | **design only, 2026-10-27** | Task = 1..N TaskParts; Section as a declared tag; taker Composition (`prompt:` / `section:`); protocol v2 (`files`, `sections`, `structured`); planned schema 33 and export v6 |
+| `0.8.4-preview` | implemented, device-verified 2026-10-27; versionCode 804, unreleased | Task = 1..N TaskParts; Section as a declared tag; taker Composition (`prompt:` / `section:`); protocol v2 (`files`, `sections`, `structured`) with v1 compatibility; schema 33 and export v6 (v5 kept for single-part bodies) |
+| v0.8.4 | not closed; TaskParts, Composition and the v2 protocol ship in `0.8.4-preview` | the v0.8.3 close items carried forward, and this round's release decision, remain open |
 
-The v0.8.x rows are commitments of direction, not descriptions of code. Each release's iteration
+The unreleased v0.8.x rows describe code on `main`; the rows named for a release without the
+`-preview` suffix are commitments of direction, not descriptions of code. Each release's iteration
 document is the authoritative statement of what that release actually does.
 
 ## Product principles
@@ -147,7 +150,7 @@ Template 1 ---- N TemplateVersion
                          v
 List 1 -------- N ListEntry N -------- 1 Task
                                              |
-                                             +---- 1..N TaskPart          (v0.8.4 planned)
+                                             +---- 1..N TaskPart          (v0.8.4)
                                              |        |
                                              |        +---- 0..1 structured payload
                                              |        +---- 0..N Asset
@@ -166,13 +169,14 @@ Headless Review Template ------- is a Task Review Template whose controls the Vi
 
 This is a semantic model, not a required physical schema. Before v0.8.4 the Task was the decision
 unit and the diagram put payload, Assets and Resource uses directly under it; a one-part Task is
-exactly that older shape. The v0.8.4 TaskPart is the decision unit inside the Task; the Asset stays
-a presented file and never becomes the decision. See
-[TaskPart and Composition](#taskpart-and-composition-v084-planned).
+exactly that older shape, and schema 33 backfills every pre-v0.8.4 Task as exactly one part so an
+old database reads through the same model as a new one. The v0.8.4 TaskPart is the decision unit
+inside the Task; the Asset stays a presented file and never becomes the decision. See
+[TaskPart and Composition](#taskpart-and-composition-v084).
 
 The v0.8.x additions do not put a Package in that model. A Package is import provenance inside a
 Todo's run — it declares Prompts and Resources but owns neither. See
-[Framework evolution — v0.8.x](#framework-evolution--v08x-planned).
+[Framework evolution — v0.8.x](#framework-evolution--v08x).
 
 ### Prompt and Task
 
@@ -183,7 +187,7 @@ Prompt when it is one logical judgment. A Prompt is stored in a Package. It is n
 Todo, and not a judgment.
 
 A **Task** is the decision-maker's undertaking to make one or more judgments in one Todo. Its
-judgments are **TaskParts** (v0.8.4, planned). A Task with one declared TaskPart answers one
+judgments are **TaskParts** (v0.8.4). A Task with one declared TaskPart answers one
 Prompt; a Task with several TaskParts answers several Prompts in one sitting. A media Task has one
 degenerate TaskPart, no stored Prompt, and still carries the intent to tag, check, or mark. The same Prompt may
 become two TaskParts under two Todos, with independent state, history, and export. The pair is not
@@ -238,15 +242,15 @@ with no compatible Viewer is unavailable, not vacuously presentable.
 
 ### Task
 
-A **Task** is the smallest durable object that carries a person's judgment. Since v0.8.4 (planned)
-it is an undertaking over **1..N TaskParts**, and a TaskPart is the judgment unit inside it; before
+A **Task** is the smallest durable object that carries a person's judgment. Since v0.8.4 it is an
+undertaking over **1..N TaskParts**, and a TaskPart is the judgment unit inside it; before
 v0.8.4 the Task and the judgment unit were the same object, which is why a one-part Task is exactly
 the older shape.
 
 A Task:
 
 - has a stable, opaque, globally unique identity;
-- has **1..N TaskParts** (v0.8.4, planned); each part may contain structured fields, reference
+- has **1..N TaskParts** (v0.8.4); each part may contain structured fields, reference
   zero, one, or many Assets, use Resources, and own a current response and events;
 - owns its current review state (completion, with the Add-on beside it);
 - has zero or more historical review events, at Task level and per part;
@@ -274,15 +278,18 @@ carry at most one optional **payload**: the normalized description of the Prompt
 schema version, revision, and the body (stem, options, material references). A payload is content,
 not identity, not a lifetime, and not a second Task. A part may have a payload and no Assets; that is
 a complete part whose Prompt needs no page beyond its content page, not a partial one. A Task with
-one part is the older one-question case; a multi-part Task (v0.8.4, planned) carries one payload per
-part. The Prompt's long stem remains payload content, while the short label that names the Task in
-the queue is the existing import `displayName`, not a new title column. See
-[Framework evolution — v0.8.x](#framework-evolution--v08x-planned).
+one part is the older one-question case; a multi-part Task (v0.8.4) carries one payload per part.
+The Prompt's long stem remains payload content, while the short label that names the Task in the
+queue is the existing import `displayName`, not a new title column. See
+[Framework evolution — v0.8.x](#framework-evolution--v08x).
 
-### TaskPart and Composition (v0.8.4, planned)
+### TaskPart and Composition (v0.8.4)
 
-> **Status:** design recorded 2026-10-27; no code, schema or version change yet. The normative
-> decisions are [v0.8.4](iterations/v0.8.4.md); the vocabulary is
+> **Status:** implemented 2026-10-27 and device-verified; schema 33 and export v6 ship in
+> `0.8.4-preview` (versionCode 804), unreleased. The normative decisions are
+> [v0.8.4](iterations/v0.8.4.md); the implementation plan and its acceptance record are
+> [v0.8.4-plan.md](iterations/v0.8.4-plan.md) and
+> [v0.8.4-design-check.md](iterations/v0.8.4-design-check.md); the vocabulary is
 > [the two vocabularies](vocabulary.md).
 
 A **TaskPart** is one Prompt instantiated in one Task: the decision unit inside a Task. It owns its
@@ -310,7 +317,7 @@ import's `compositionKey`:
 | Key | Meaning | Shipped |
 |---|---|---|
 | `prompt:<promptKey>` | One Prompt per Task (today's shape) | yes |
-| `section:<sectionKey>` | All Prompts tagged with the Section in one Task | v0.8.4, planned |
+| `section:<sectionKey>` | All Prompts tagged with the Section in one Task | v0.8.4 |
 | `custom:<userKey>` | A stored member list | representable; not shipped |
 
 The protocol does **not** declare Task boundaries. The setter may say "these belong to drill-1"; the
@@ -395,7 +402,10 @@ version recorded on the mark, which is authored-under history. A template or too
 therefore hides its marks and stops their export without deleting a row, and restoring the same id
 brings them back. See [Templates](templates.md#pdfs-and-passage-tools) and [v0.7.0](iterations/v0.7.0.md).
 
-### Resource (v0.8.x, planned)
+### Resource (v0.8.x)
+
+> **Status:** implemented for Package Resources in `0.8.4-preview` (schema 33). Cross-Todo and
+> global deduplication remain deferred, as the bullet below says.
 
 A **Resource** is content a TaskPart's page depends on but does not present as a page: pronunciation
 audio, a prompt illustration, a reference image. It is not an Asset. It does not appear in
@@ -487,7 +497,7 @@ A review event should be able to retain:
 - its own stable identity;
 - the Task identity;
 - the TaskPart identity (`partKey`) for a primary submission; Task-level events (complete /
-  uncomplete, Add-on) may leave it null with an explicit kind (v0.8.4, planned);
+  uncomplete, Add-on) may leave it null with an explicit kind (v0.8.4);
 - the exact Task Review Template Version that gave the response meaning;
 - a timestamp;
 - semantic response/action data;
@@ -503,7 +513,7 @@ the fact that a point was taken on it stands. This table records what happened; 
 can be revised is template policy, not a schema constraint**, and a future revisable-answer family
 would keep its current value in a separate row rather than rewrite history here.
 
-**v0.8.4 (planned) scopes a primary submission to a TaskPart.** A commit names
+**v0.8.4 scopes a primary submission to a TaskPart.** A commit names
 `(taskId, partKey)`; the event records it, and the part's current response is the projection. A Task
 with one part and pre-v0.8.4 events keeps those events with a null `partKey`: absence is not
 reinterpretation, and the part's current response may be empty while the Task is complete under
@@ -677,7 +687,7 @@ Review context
 ```
 
 **v0.8.x adds a typed page model to this hierarchy without changing the navigator boundaries.** A
-Task's review pages are grouped by **TaskPart** (v0.8.4, planned). In order, for each present part:
+Task's review pages are grouped by **TaskPart** (v0.8.4). In order, for each present part:
 an optional structured **content page** (the part's payload), then that part's Asset pages in their
 existing order; the existing optional Add-on page comes last, once per Task. A payload is a page of
 its part, not a synthetic Asset and not a Task-level page beside the parts. A payload-only part has
@@ -1046,7 +1056,10 @@ The consequence for identity is that the sharing boundary sits at the **Task**, 
 
 And for reconciliation: a locator held by another Todo is not a collision, so a re-import mints its own Tasks beside them rather than reporting a conflict. Only a locator held by the *same* Todo is still a conflict, because that is the grouping rule disagreeing with itself. See [v0.4.0](iterations/v0.4.0.md).
 
-### Package reconciliation and checkpoints (v0.8.x, planned)
+### Package reconciliation and checkpoints (v0.8.x)
+
+> **Status:** implemented for the v1 and v2 protocols in `0.8.4-preview` (schema 33). The
+> `custom:<userKey>` composition remains representable but unshipped.
 
 Protocol-declared Prompts reconcile on `(todoId, packageKey, promptKey)`; Resources on
 `(todoId, packageKey, resourceKey)`. Domain IDs are still opaque and minted separately. Two Todos
@@ -1055,7 +1068,7 @@ Existing unkeyed Tasks keep path-based reconciliation under their existing impor
 backfilled from `groupPath`, and a keyed Task is never auto-merged with an unkeyed one merely
 because paths match.
 
-v0.8.4 (planned) makes the **Task** reconcile on `(todoId, packageKey, compositionKey)` and each
+v0.8.4 makes the **Task** reconcile on `(todoId, packageKey, compositionKey)` and each
 selected Prompt a TaskPart within it; `promptKey` remains the part's member key. A composition
 membership change keeps the Task id and detaches removed parts — it does not delete their responses
 or history. A changed `compositionKey` is a different composition and a new Task; the old Task is
@@ -1087,7 +1100,7 @@ uses the conservative rules below; it does not silently extend `reset`/`drop` to
 | Incompatible kind/schema or identity conflict | Report and block affected replacement; retain prior data |
 | Importer/grouping change | Separate import or explicit migration; no silent merge/split |
 
-v0.8.4 (planned) applies these rules at the **part** level when a Task has several parts: a
+v0.8.4 applies these rules at the **part** level when a Task has several parts: a
 withdrawn Prompt detaches its part and the Task remains; a payload revision change follows
 keep/reset/drop per part and keeps history; a composition-key change is a new Task, not a grouping
 migration. The rows above remain true for a one-part Task and for the media case.
@@ -1108,18 +1121,19 @@ Resource-role changes are never manufactured into Asset-set changes to trigger i
 9. An Asset Viewer never decides Task navigation, completion, or import grouping.
 10. Adding PDF support changes Asset kind and viewer capability; it does not redefine Task, List, Quick Review, or import semantics.
 
-## Framework evolution — v0.8.x (planned)
+## Framework evolution — v0.8.x
 
-> **Status:** Direction, not shipped behavior. v0.8.1 and v0.8.2 are implemented on `main` and
-> unreleased (schema 31 and 32; export v5 for structured rounds); the released baseline is v0.7.1
-> (schema 29, export v4). v0.8.2 passed its device acceptance on 2026-10-24, and the issues it
-> found are implemented and device-verified in the v0.8.2f fix round. The vocabulary round is
-> implemented and device-verified through 2026-10-26, and ships unreleased as `0.8.3-preview`
-> (versionCode 803) together with those fixes — a preview, not the close of v0.8.3. **v0.8.4 is
-> design only as of 2026-10-27**: TaskParts, the taker Composition, protocol v2, and the planned
-> schema 33 / export v6 are not code. The release sequence at the end of this section is a set of
-> bounded proposals; each iteration document remains the authority for what a release actually
-> does.
+> **Status:** Implemented through `0.8.4-preview`, unreleased. v0.8.1 and v0.8.2 are implemented on
+> `main` and unreleased (schema 31 and 32; export v5 for structured rounds); the released baseline
+> is v0.7.1 (schema 29, export v4). v0.8.2 passed its device acceptance on 2026-10-24, and the
+> issues it found are implemented and device-verified in the v0.8.2f fix round. The vocabulary
+> round is implemented and device-verified through 2026-10-26, and ships unreleased as
+> `0.8.3-preview` (versionCode 803) together with those fixes — a preview, not the close of
+> v0.8.3. **v0.8.4 is implemented and device-verified on 2026-10-27** and ships unreleased as
+> `0.8.4-preview` (versionCode 804): TaskParts, the taker Composition, protocol v2, schema 33 and
+> export v6 are code, and the v1 protocol and v5 export stay for compatible bodies. The release
+> sequence at the end of this section is a set of bounded proposals; each iteration document
+> remains the authority for what a release actually does.
 
 v0.8.x prepares the framework for v0.9.x vocabulary and primary-questionnaire work. It does not ship
 those products. Its job is to let structured content reach the same review engine as media without
@@ -1198,8 +1212,7 @@ rule, not a manifest field.
 
 ### Task payload
 
-The storage seam is optional and one-to-one per TaskPart (v0.8.4 planned; schema 32 still stores one
-payload per Task), for example:
+The storage seam is optional and one-to-one per TaskPart (v0.8.4, schema 33), for example:
 
 ```text
 task_part_payloads(taskId, partKey, kind, schemaVersion, normalizedPayload, revision, updatedAt)
@@ -1275,14 +1288,15 @@ options; Core does not acquire a `Recall` or `Vocabulary` response type. `vocabu
 proof in practice: the declared options are the recall candidates, the answer is one
 `choice.select`, and Core stores kind, schema and payload like any other Prompt.
 
-### v0.8.4 — TaskParts and Composition (design only)
+### v0.8.4 — TaskParts and Composition
 
 v0.8.4 answers the question the v0.8.2 protocol left open: can one Task hold more than one
 question? Yes — as **1..N TaskParts**. The full design is
 [v0.8.4](iterations/v0.8.4.md), with the implementation plan in
-[v0.8.4-plan.md](iterations/v0.8.4-plan.md), the gate in
+[v0.8.4-plan.md](iterations/v0.8.4-plan.md), the gate and its implementation acceptance in
 [v0.8.4-design-check.md](iterations/v0.8.4-design-check.md), and the vocabulary in
-[the two vocabularies](vocabulary.md). The architecture-level points:
+[the two vocabularies](vocabulary.md). It is implemented and device-verified on 2026-10-27 and
+ships unreleased as `0.8.4-preview` (versionCode 804). The architecture-level points:
 
 - **TaskPart is the decision unit inside a Task.** A Task with one part behaves exactly as today; a
   file or folder Task is one degenerate part; a vocabulary Task is one part and zero Assets. A
@@ -1301,7 +1315,7 @@ question? Yes — as **1..N TaskParts**. The full design is
   and `sections[]` are added, `response: "structured"` is accepted, and conditions stay inside the
   Prompt body. A v1 Package imports as one-Prompt compositions; v2 is rejected by an older reader
   rather than misread.
-- **Schema 33 and export v6 are planned, not shipped.** Schema 33 moves payloads and Resource uses
+- **Schema 33 and export v6 ship in this round.** Schema 33 moves payloads and Resource uses
   to the part, adds `partKey` to primary events, part state and composition provenance, and
   migrates additively (every existing Task gains one part). Export v6 carries `parts[]` with
   per-part results and an explicit partial-completion shape; a compatible single-part body still
@@ -1310,8 +1324,8 @@ question? Yes — as **1..N TaskParts**. The full design is
   Re-import matches `(todoId, packageKey, compositionKey)`, keeps the Task id across membership
   changes, and detaches removed parts without deleting their responses or history. Absence is not
   deletion. The independent-Todo proof remains an implementation test, not a design claim.
-- **This round is documentation only.** No Kotlin, schema, protocol, export or version change.
-  `0.8.3-preview` (803) remains the build.
+- **The build is `0.8.4-preview` (804).** `0.8.3-preview` (803) remains the last preview on the
+  same line; the payload, schema, protocol and export changes above are carried in 804.
 
 The v0.8.4 scope decision keeps the structured Viewers to a minimal conditional `form` Viewer for
 the questionnaire scenario, isolated so it can be cut without touching the TaskPart framework.
@@ -1359,7 +1373,7 @@ schema 32 for Package provenance and Prompt payloads: `task_payloads`, `package_
 `package_prompt_tasks`, `package_resources`, and `task_resources`, all additive, with their
 migration, exported schema JSON, migration test, and fixture subtraction. `MIGRATION_31_32` creates
 tables only; a populated v31 fixture must come through with every existing row byte-identical.
-v0.8.4 (planned, schema 33) moves payloads and Resource uses to the TaskPart and adds part state,
+v0.8.4 (schema 33, shipped in `0.8.4-preview`) moves payloads and Resource uses to the TaskPart and adds part state,
 composition provenance, `assets.partKey`, `review_events.partKey`, structured field identity,
 `dissolved_task_state.partRecords` and `sources.composition`. It is additive in meaning but rebuilds
 the tables whose primary key must change (per-part payloads, per-part Resource uses, composition
@@ -1397,7 +1411,8 @@ Existing module/package conventions are kept where they already satisfy this bou
 | **v0.8.2f** | Acceptance fixes within v0.8.2: Todo rename and card-level add-on edit; one Templates list, headless peer and all rows cancellable, no required template; import matches by viewable format; Prompt Tasks export no templates or file actions; page detector reads live navigation state | Schema 32 and export v5 unchanged |
 | **`0.8.3-preview`** | Vocabulary round on the same protocol: a second Structured Viewer (`vocabulary`/1), the shared Prompt renderer and reveal card, the single-choice template, add-on and v5 export, the mixed-List fixtures, and the follow-up fixes that walk produced — carried with the v0.8.2f fixes. Not the close of v0.8.3 | Schema 32 and export v5 unchanged |
 | **v0.8.3** | Second fixture: prompt/reveal, declared grades, shared pronunciation Resource; optional/required diagnostics, compatible payload revisions, independent Todo identities; freeze protocol/capability contracts. The reveal-card fixture is delivered in `0.8.3-preview`; the revision policy, the independent-Todo proof and the freeze remain open | v5 fixture; migration/regression docs |
-| **v0.8.4** | Task = 1..N TaskParts; Section tag and taker Composition; per-part page/state/events and available completion policies; protocol v2 (`files`, `sections`, `structured`) with v1 compatibility; composition choice in import; export v6 for multi-part or structured Tasks. **Design only in this round** | Planned schema 33; export v6, v5 kept for compatible single-part bodies |
+| **`0.8.4-preview`** | TaskParts round on the v2 protocol: Task = 1..N TaskParts; Section tag and taker Composition; per-part page/state/events and per-version completion policies; protocol v2 (`files`, `sections`, `structured`) with v1 compatibility retained; composition choice in import; the conditional `form` Viewer and its two Task Reviews; export v6 for multi-part or structured Tasks. Not the close of v0.8.4 | Schema 33; export v6, v5 kept for compatible single-part bodies |
+| **v0.8.4** | Close of the line: the v0.8.3 items carried forward (revision policy, independent-Todo proof, contract freeze) and the release decision | Migration/regression docs for schema 33 |
 
 These are framework proofs, not the v0.9 product. Add-on restructuring is assigned to none of them.
 
@@ -1454,9 +1469,9 @@ A change is architecturally additive when it can be expressed as one of the foll
 
 **v0.8.4 is an explicit architecture decision, not an additive extension.** It changes the internal
 decision unit of a Task from the Task itself to 1..N **TaskParts**. It is recorded in
-[TaskPart and Composition](#taskpart-and-composition-v084-planned) and does not change Task
+[TaskPart and Composition](#taskpart-and-composition-v084) and does not change Task
 identity, List membership, Asset meaning, the ReviewEvent state/history split, or the Add-on. Its
-planned schema 33 and export v6 are the storage and wire consequences of that decision.
+schema 33 and export v6 are the storage and wire consequences of that decision.
 
 A change requires explicit architecture review when it:
 

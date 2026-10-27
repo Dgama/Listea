@@ -1,0 +1,22 @@
+{
+  "title": "Meal",
+  "fields": [
+    {
+      "key": "ate",
+      "type": "choice.single",
+      "label": "Did you eat?",
+      "required": true,
+      "options": [
+        { "id": "yes", "label": "Yes" },
+        { "id": "no", "label": "No" }
+      ]
+    },
+    {
+      "key": "what",
+      "type": "text",
+      "label": "What did you eat?",
+      "required": true,
+      "when": { "field": "ate", "equals": "yes" }
+    }
+  ]
+}

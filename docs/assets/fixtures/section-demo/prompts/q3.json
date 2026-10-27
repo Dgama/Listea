@@ -1,0 +1,14 @@
+{
+  "stem": "Choose the meaning of the word.",
+  "word": "savoury",
+  "phonetic": "/ˈseɪvəri/",
+  "definition": "salty or spicy in flavour rather than sweet",
+  "example": "a savoury pie",
+  "audio": "q3-audio",
+  "answer": "b",
+  "options": [
+    { "id": "a", "label": "sweet" },
+    { "id": "b", "label": "salty or spicy" },
+    { "id": "c", "label": "served cold" }
+  ]
+}

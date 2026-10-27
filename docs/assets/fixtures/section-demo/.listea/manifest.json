@@ -1,0 +1,51 @@
+{
+  "protocol": "listea.package/2",
+  "packageKey": "section-demo",
+  "revision": 3,
+  "title": "Section demo",
+  "sections": [
+    { "sectionKey": "meal", "title": "Meal", "order": 1 }
+  ],
+  "prompts": [
+    {
+      "promptKey": "q1",
+      "kind": "profile",
+      "schema": 1,
+      "response": "choice.single",
+      "title": "Starter",
+      "description": "prompts/q1.json",
+      "section": "meal",
+      "files": [
+        { "member": "media/q1.png", "name": "q1.png" }
+      ],
+      "resources": [
+        { "resourceKey": "q1-photo", "required": true }
+      ]
+    },
+    {
+      "promptKey": "q2",
+      "kind": "profile",
+      "schema": 1,
+      "response": "choice.single",
+      "title": "Drink",
+      "description": "prompts/q2.json",
+      "section": "meal"
+    },
+    {
+      "promptKey": "q3",
+      "kind": "vocabulary",
+      "schema": 1,
+      "response": "choice.single",
+      "title": "Word",
+      "description": "prompts/q3.json",
+      "section": "meal",
+      "resources": [
+        { "resourceKey": "q3-audio", "required": true }
+      ]
+    }
+  ],
+  "resources": [
+    { "resourceKey": "q1-photo", "kind": "image", "member": "media/q1.png" },
+    { "resourceKey": "q3-audio", "kind": "audio", "member": "media/q3.mp3" }
+  ]
+}

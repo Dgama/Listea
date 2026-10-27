@@ -1,0 +1,20 @@
+{
+  "protocol": "listea.package/2",
+  "packageKey": "form-demo",
+  "revision": 1,
+  "title": "Form demo",
+  "sections": [
+    { "sectionKey": "meal", "title": "Meal", "order": 1 }
+  ],
+  "prompts": [
+    {
+      "promptKey": "meal",
+      "kind": "form",
+      "schema": 1,
+      "response": "structured",
+      "title": "Meal",
+      "description": "prompts/meal.json",
+      "section": "meal"
+    }
+  ]
+}

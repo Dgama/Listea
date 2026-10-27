@@ -120,34 +120,39 @@ Posted as `Content-Type: application/json; charset=utf-8`. Timestamps are epoch 
 2xx counts as success; every other status code and every network failure is a failure. The timeout
 is 10 seconds on both connect and read.
 
-**`version` is `2`, `3`, `4` or `5`, and the cut from the old body is hard.** The v0.1 body had no
-version and no Tasks: it was one flat `items` array in which each entry was a file and the thing
-judged at the same time. A receiver built on it must be pointed at the new shape deliberately; a
-body never says `2` while meaning the old layout. **Version 3 adds only the `marks` array** — an
+**`version` is `2`, `3`, `4`, `5` or `6`, and the cut from the old body is hard.** The v0.1 body
+had no version and no Tasks: it was one flat `items` array in which each entry was a file and the
+thing judged at the same time. A receiver built on it must be pointed at the new shape deliberately;
+a body never says `2` while meaning the old layout. **Version 3 adds only the `marks` array** — an
 Asset writes it only when it has passages to send, and a body with no such Asset says `2`. **Version
 4 adds only the Task's `addOn` object**, written only when at least one visible answer exists.
 **Version 5 adds the Task's `content` and `result` objects**, written only on structured Prompt
-Tasks. Each version is a superset, not a combination code: a round carrying marks, an add-on and a
-structured answer says `5`, and each of the older keys is still written under its own rule. Every
-image and video body with nothing to add is therefore byte for byte the one v0.6.2 sent. Stored
-history is not rewritten — [Resend](#results-and-notices) replays an old record's bytes exactly as
-they were.
+Tasks. Versions 2–5 are supersets, not combination codes: a round carrying marks, an add-on and a
+structured answer says `5`, and each of the older keys is still written under its own rule.
+**Version 6 replaces a Task's single decision with `parts[]`** — a new Task shape rather than a
+superset, so a receiver must branch on the version line; one Task that needs it puts every Task in
+the round into the v6 shape. Every image and video body with nothing to add is therefore byte for
+byte the one v0.6.2 sent, and a single-part body with no structured answer stays v5. Stored history
+is not rewritten — [Resend](#results-and-notices) replays an old record's bytes exactly as they
+were.
 
 | Field | Meaning |
 |---|---|
-| `version` | `2`; `3` when the body carries at least one `marks` array; `4` when it carries at least one `addOn` object; `5` when it carries at least one `content` object. |
+| `version` | `2`; `3` when the body carries at least one `marks` array; `4` when it carries at least one `addOn` object; `5` when it carries at least one `content` object; `6` when any Task carried more than one part or a structured answer. |
 | `event` | One of the four above. |
 | `list.id` | The List's id, or **`0`** for a round with no List — Quick Review, which stands the folder in as the subject. |
 | `list.title` | The List's title, or the **folder's name** for a Quick Review round. |
 | `list.completedAt` | When the List completed, or `null`. |
 | `tasks[].id` | The Task's [public id](#task-and-asset-ids). Stable, never the database row number. |
 | `tasks[].title` | The name the round showed for this Task — the List row's title, or the name it was imported under. |
-| `tasks[].isCompleted` | Whether the Task was processed in Listea. |
+| `tasks[].isCompleted` | Whether the Task was processed in Listea (v2–v5). A v6 Task says `completed` instead. |
 | `tasks[].templates[]` | The template versions the Task was imported under: `id`, `name`, `version`. `[]` for a Task with no template, and for a structured Prompt Task — see below. |
-| `tasks[].assets[]` | Every file the Task presents, ordered as the Task holds them. `[]` for a Task with no file. |
+| `tasks[].assets[]` | Every file the Task presents, ordered as the Task holds them. `[]` for a Task with no file. In v6 the files sit under `parts[].assets` instead. |
 | `tasks[].addOn` | The Task's questionnaire: `id`, `name`, `version` and `answers[]`, written **after `assets`** and **only when at least one answer is visible**. See [the add-on](#the-tasks-add-on-and-why-it-is-version-4). |
-| `tasks[].content` | A structured Prompt's identity: `kind`, `schema`, `revision`, `promptKey`. Written **after `addOn`** and **only when the Task has a payload**. See [structured Prompts](#structured-prompts-and-why-they-are-version-5). |
-| `tasks[].result` | A structured Prompt's answer: `completed` and, for a choice, `choice` (`id`, `label`). Written **only with `content`**. |
+| `tasks[].content` | A structured Prompt's identity: `kind`, `schema`, `revision`, `promptKey`. Written **after `addOn`** and **only when the Task has a payload** (v5). In v6 the identity is per part. See [structured Prompts](#structured-prompts-and-why-they-are-version-5). |
+| `tasks[].result` | A structured Prompt's answer: `completed` and, for a choice, `choice` (`id`, `label`). Written **only with `content`** (v5). |
+| `tasks[].completed` | v6 only: whether the Task is complete, the same fact `isCompleted` carries. |
+| `tasks[].parts[]` | v6 only: the Task's present parts in composition order — `partKey`, `promptKey`, `kind`, `schema`, `revision`, `required`, `result`, `assets[]`. See [TaskParts](#taskparts-and-why-they-are-version-6). |
 | `assets[].id` | The Asset's [public id](#task-and-asset-ids). Stable, never the database row number. |
 | `assets[].title` | The file name. |
 | `assets[].relativePath` | The file's **folder**, relative to the Upstream's linked folder, without the file name. |
@@ -331,6 +336,66 @@ after `addOn`, because both are about the Task and neither is a file.
 - **The txt method writes the same body**, so a dated round is a version 5 file and appears in
   History exactly like a webhook round. Both writers consume the same `ExportMapping`, so the two
   outputs cannot disagree about the version or the key order.
+
+### TaskParts, and why they are version 6
+
+Since `0.8.4-preview` one Task can hold **several decisions**. Version 6 says so by replacing the
+Task's single decision with a `parts[]` array: one entry per present TaskPart, in composition
+order, each with its own provenance, answer and files.
+
+```json
+{
+  "id": "task-public-id",
+  "title": "Section demo",
+  "completed": false,
+  "templates": [],
+  "parts": [
+    {
+      "partKey": "q1",
+      "promptKey": "q1",
+      "kind": "profile",
+      "schema": 1,
+      "revision": 3,
+      "required": true,
+      "result": { "choice": { "id": "tea", "label": "Tea" } },
+      "assets": [
+        { "id": "asset-public-id", "title": "q1.png", "relativePath": "media", "sourceMissing": false, "actions": [] }
+      ]
+    },
+    {
+      "partKey": "q2",
+      "promptKey": "q2",
+      "kind": "profile",
+      "schema": 1,
+      "revision": 3,
+      "required": true,
+      "result": null,
+      "assets": []
+    }
+  ]
+}
+```
+
+- **`completed` is the Task's own state**, the same fact `isCompleted` carries. It is not derived
+  from the parts in the body: the Task may be complete explicitly while a part is pending, and a
+  pending part is no reason to rewrite the Task's answer.
+- **`result` is `null`, `""` or an object.** `null` means nobody has answered the part yet; `""`
+  means somebody answered without a typed value this build can spell; an object carries the typed
+  answer — `{"choice":{"id","label"}}` for a choice Prompt, `{"fields":[…]}` for a form. Pending is
+  never spelled as empty, and a pending part is never omitted.
+- **`assets[]` sits under its part**, because the file is the part's material. A degenerate part —
+  the one a file or folder import creates — has no provenance: `promptKey`, `kind`, `schema` and
+  `revision` are all `null` and its `assets[]` is its decision's material.
+- **`required` is the composition's current claim**, not the setter's. A Prompt declares no
+  Task requiredness.
+- **Detached parts are excluded.** A part the latest revision no longer names keeps its answer and
+  history on the device but describes a Task that no longer exists; the version stays 6 because the
+  Task still *held* several decisions.
+- **`templates` and `addOn` stay at Task level**, after `parts`, because they are about the Task and
+  not about one decision.
+- **A single-part Task with no structured answer still exports v5**, byte for byte. v6 appears only
+  for a Task that holds more than one part or answers with a structured result.
+- **The txt method writes the same body**, so a v6 round is a v6 `.txt` file as well.
 
 **Keys are always present — except `marks`, `addOn`, `content` and `result`.** `completedAt`,
 `relativePath` and a template's `name` may be `null`, and `assets` or `templates` may be `[]`; none

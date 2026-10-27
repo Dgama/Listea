@@ -106,6 +106,14 @@ Both methods consume one `ExportMapping`, so the webhook body and the txt file a
 construction rather than by convention. The full shape: [Webhooks → Structured Prompts, and why they
 are version 5](webhooks.md#structured-prompts-and-why-they-are-version-5).
 
+**Since `0.8.4-preview` a Task may hold several questions, and the body says so with version 6.**
+The Task keeps its `completed` flag, and each question appears in `tasks[].parts[]` with its own
+`result`: `null` while pending, `""` when it was answered but carries no content, or an object with
+the choice or the form's fields. The Task's `templates` and `addOn` stay where they were. A round
+whose Tasks each have one part and no structured form still exports v5, byte for byte; v6 is taken
+only when a Task has several parts or a form's field record. The full shape:
+[Webhooks → TaskParts, and why they are version 6](webhooks.md#taskparts-and-why-they-are-version-6).
+
 ## Where the choice lives
 
 **A Todo picks one method when it is created. A List can override it for everything it holds.** Both

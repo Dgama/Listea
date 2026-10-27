@@ -1,0 +1,12 @@
+{
+  "stem": "Pick a drink.",
+  "profile": {
+    "name": "Tea",
+    "age": 34,
+    "bio": "Steeped, not brewed."
+  },
+  "options": [
+    { "id": "tea", "label": "Tea" },
+    { "id": "coffee", "label": "Coffee" }
+  ]
+}

@@ -51,9 +51,12 @@ in a handful of strings, not in what any control does.
 
 An item holds one file most of the time, and then a swipe is exactly what it has always been: left
 checks it off and advances, right steps back. An item holding several — a folder imported as a
-Task — is one item and several pages, and a swipe looks at all of them before it reaches the next
-item. A Prompt Task's pages start with the Prompt and end with its add-on, when it has one; the
-swipe that leaves the add-on page is the one that completes the Task.
+Task, or a Task over several questions — is one item and several pages, and a swipe looks at all of
+them before it reaches the next item. A Prompt Task's pages start with the Prompt and end with its
+add-on, when it has one; the swipe that leaves the add-on page is the one that completes the Task.
+For a Task with several questions the swipe turns pages through the parts in order, and committing
+a question is the control's act, not the swipe's: see [Tasks with several
+parts](#tasks-with-several-parts).
 
 **A page this build cannot answer has nothing to commit.** A Prompt whose body cannot be read,
 whose required file is missing, whose Task is blocked, or that no Task Review in force can catch a
@@ -111,9 +114,12 @@ take that answer with it.
 
 The position reads `3(3/3)/3` on an item with several files: you are on item 3 of 3, showing file 3
 of its 3. On an item holding one file — still the overwhelming majority — there is no file level to
-speak of, so it is simply `3 / 3` and only the queue's pair is drawn. That pair is **always** `<<`
-and `>>`, even where it is the only pair: the glyph names the level, not how many levels there
-happen to be below it.
+speak of, so it is simply `3 / 3` and only the queue's pair is drawn. On a Task of several
+questions the middle slot counts **pages across the parts** — `1(2/6)/1` is the second page of the
+only Task — because the page list is one list whether the pages came from one part or six. The part
+boundary has no number and no arrow of its own; the queue guide is where a part is named. That pair
+is **always** `<<` and `>>`, even where it is the only pair: the glyph names the level, not how many
+levels there happen to be below it.
 
 Four arrows are drawn on a multi-file item, and the outer and inner pairs do different things:
 
@@ -178,6 +184,35 @@ Words are not added for the read-only form. v0.8.2f first wrote **Checked** / **
 that checkbox, and in the same round a vocabulary Task and a picture Task ended up stating the same
 Task-level fact two different ways. The state is still named for a screen reader through the
 checkbox's description; that is access, not a second rendering.
+
+## Tasks with several parts
+
+A Task may be one sitting over several questions. Since `0.8.4-preview` its pages are ordered part
+by part: each present part contributes its Content page when it has a Prompt body, followed by its
+own files; the Add-on, when there is one, comes after the last part. The inner arrows and a swipe
+walk that one list, so they cross from a part's last page into the next part's first without a
+separate level. A Task with one part — every file, folder and pre-v0.8.4 Package Task — has exactly
+the page list it always had.
+
+**A commit answers a part.** With a template that commits per part, the commit advances to the
+**next part's first page**, not through the rest of the committed part's files; after the last part
+it lands on the Add-on, and from there the Task completes or the queue advances as it always did. A
+failed commit writes nothing and does not advance.
+
+The checkbox still belongs to the Task, and what fills it depends on the Task Review in force:
+
+| Completion policy | The Task completes when… |
+|---|---|
+| **single part** | the template's commit says the response completed the Task — the rule every pre-v0.8.4 template keeps |
+| **all required parts** | every required part is answered and no required part is unavailable |
+| **any part** | the first required part is answered |
+| **explicit only** | a person checks the box; answers never complete it |
+
+A detached part — one the Package's latest revision no longer names — does not hold the Task open.
+A required part this build cannot present still does: not being able to draw a question is not the
+Package withdrawing it. An explicit check is a person's fact and survives later part answers; an
+automatic completion is recomputed when a commit, a reset or a re-import changes the parts. Checking
+the box while required parts are open asks first and names how many are pending.
 
 ## The file's controls
 
