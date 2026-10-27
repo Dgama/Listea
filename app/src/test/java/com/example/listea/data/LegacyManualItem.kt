@@ -35,9 +35,21 @@ internal fun ListeaDatabase.writeLegacyManualItem(
         arrayOf<Any?>(taskId, now)
     )
     items.execSQL(
-        "INSERT INTO task_state (taskId, isCompleted, isFavorite, customActions, updatedAt) " +
-            "VALUES (?, ?, 0, '', ?)",
+        "INSERT INTO task_state (taskId, isCompleted, isFavorite, customActions, updatedAt, " +
+            "completionSource) VALUES (?, ?, 0, '', ?, '')",
         arrayOf<Any?>(taskId, if (isCompleted) 1 else 0, now)
+    )
+    // Since schema 33 a Task holds 1..N parts. A manual item has no Prompt, so it gets the one
+    // part the migration gives every pre-Package Task: a legacy part with nothing attached.
+    items.execSQL(
+        "INSERT INTO task_parts (taskId, partKey, position, origin, promptKey, required, " +
+            "present, availability, updatedAt) VALUES (?, ?, 0, 'legacy', NULL, 1, 1, NULL, ?)",
+        arrayOf<Any?>(taskId, "legacy:$taskId", now)
+    )
+    items.execSQL(
+        "INSERT INTO task_part_state (taskId, partKey, response, answeredAt, revision, updatedAt) " +
+            "VALUES (?, ?, '', NULL, NULL, ?)",
+        arrayOf<Any?>(taskId, "legacy:$taskId", now)
     )
     items.execSQL("INSERT INTO legacy_manual_tasks (taskId) VALUES (?)", arrayOf<Any?>(taskId))
     items.execSQL(

@@ -10,6 +10,7 @@ import com.example.listea.data.DecisionTarget
 import com.example.listea.data.ListeaDatabase
 import com.example.listea.data.ListsDao
 import com.example.listea.data.ReviewItem
+import com.example.listea.data.ReviewPart
 import com.example.listea.data.TemplateStore
 import com.example.listea.domain.CommitPolicy
 import com.example.listea.domain.PlannedPackageResource
@@ -168,7 +169,8 @@ class PromptSubmissionTest {
     fun `a body revised under an open review is refused`() = runTest(dispatcher) {
         val taskId = importedPrompt()
 
-        val stale = itemOf(taskId).copy(payloadRevision = 2)
+        val fresh = itemOf(taskId)
+        val stale = fresh.copy(parts = fresh.parts.map { it.copy(payloadRevision = 2) })
         val accepted = submit(stale, Templates.StructuredSingleChoice, listOf(like))
 
         assertFalse(accepted)
@@ -192,8 +194,22 @@ class PromptSubmissionTest {
         val accepted = submit(itemOf(taskId), Templates.StructuredSingleChoice, listOf(wordRight))
 
         assertTrue(accepted)
-        assertEquals("vocabulary", rawText("SELECT kind FROM task_payloads WHERE taskId = '$taskId'"))
-        assertEquals(1, rawInt("SELECT schemaVersion FROM task_payloads WHERE taskId = '$taskId'"))
+        // The body is the part's since v0.8.4: a Package Prompt writes `task_part_payloads` under
+        // its own part key, and `task_payloads` no longer exists.
+        assertEquals(
+            "vocabulary",
+            rawText(
+                "SELECT kind FROM task_part_payloads " +
+                    "WHERE taskId = '$taskId' AND partKey = '$VOCABULARY_PROMPT_KEY'"
+            )
+        )
+        assertEquals(
+            1,
+            rawInt(
+                "SELECT schemaVersion FROM task_part_payloads " +
+                    "WHERE taskId = '$taskId' AND partKey = '$VOCABULARY_PROMPT_KEY'"
+            )
+        )
         assertEquals(1, rawInt("SELECT COUNT(*) FROM review_events WHERE taskId = '$taskId'"))
         assertEquals(1, rawInt("SELECT isCompleted FROM task_state WHERE taskId = '$taskId'"))
         assertEquals(
@@ -214,9 +230,10 @@ class PromptSubmissionTest {
         assertEquals(
             1,
             rawInt(
-                "SELECT COUNT(*) FROM task_resources tr " +
+                "SELECT COUNT(*) FROM task_part_resources tr " +
                     "JOIN package_resources pr ON pr.id = tr.resourceId " +
-                    "WHERE tr.taskId = '$taskId' AND pr.resourceKey = 'word-audio'"
+                    "WHERE tr.taskId = '$taskId' AND tr.partKey = '$VOCABULARY_PROMPT_KEY' " +
+                    "AND pr.resourceKey = 'word-audio'"
             )
         )
     }
@@ -334,8 +351,12 @@ class PromptSubmissionTest {
         events: List<ViewerEvent>
     ): Boolean {
         var accepted = false
+        // A Prompt's answer is scoped to the part whose page it was made on; every item here is a
+        // single Prompt Task, so naming its one part is what the surface does when it submits.
         viewModel()
-            .submitItemReview(item, terms, template, events) { accepted = it }
+            .submitItemReview(item, terms, template, events, item.parts.firstOrNull()?.partKey) {
+                accepted = it
+            }
             .join()
         return accepted
     }
@@ -365,15 +386,28 @@ class PromptSubmissionTest {
                     PlannedTask(
                         groupPath = catalogKey(PACKAGE_KEY, promptKey),
                         displayName = promptKey,
-                        assets = emptyList(),
-                        prompt = PlannedTaskPrompt(
-                            packageKey = PACKAGE_KEY,
-                            promptKey = promptKey,
-                            kind = kind,
-                            schema = 1,
-                            payload = payload,
-                            revision = 1,
-                            resources = listOf(PlannedPromptResource(resourceKey, required = true))
+                        // A Package Prompt is one part: the Prompt body and its Resources live on
+                        // the part since v0.8.4, exactly as `PackageImport` plans one.
+                        parts = listOf(
+                            PlannedPart(
+                                partKey = promptKey,
+                                position = 0,
+                                origin = PartOrigin.PACKAGE,
+                                prompt = PlannedTaskPrompt(
+                                    packageKey = PACKAGE_KEY,
+                                    promptKey = promptKey,
+                                    kind = kind,
+                                    schema = 1,
+                                    payload = payload,
+                                    revision = 1,
+                                    resources = listOf(
+                                        PlannedPromptResource(resourceKey, required = true)
+                                    )
+                                ),
+                                resources = listOf(
+                                    PlannedPromptResource(resourceKey, required = true)
+                                )
+                            )
                         )
                     )
                 ),
@@ -414,7 +448,12 @@ class PromptSubmissionTest {
             member = "media/serendipity.mp3"
         )
 
-    /** The item a review surface hands the write, with the envelope the catalog resolved. */
+    /**
+     * The item a review surface hands the write, with the envelope the catalog resolved.
+     *
+     * A Package Prompt is one part, and the part is where the envelope lives since v0.8.4: the
+     * item's [ReviewItem.promptKey] and `payload*` reads are derived from the first such part.
+     */
     private suspend fun itemOf(taskId: String): ReviewItem {
         val row = catalogRow(taskId)
         return ReviewItem(
@@ -427,10 +466,16 @@ class PromptSubmissionTest {
             sourceMissing = false,
             target = DecisionTarget.File(rootUri = ROOT, relativePath = row.groupPath),
             packageKey = row.packageKey,
-            promptKey = row.promptKey,
-            payloadKind = row.payloadKind,
-            payloadSchema = row.payloadSchema,
-            payloadRevision = row.payloadRevision
+            parts = listOf(
+                ReviewPart(
+                    partKey = row.promptKey ?: "local:0",
+                    position = 0,
+                    promptKey = row.promptKey,
+                    payloadKind = row.payloadKind,
+                    payloadSchema = row.payloadSchema,
+                    payloadRevision = row.payloadRevision
+                )
+            )
         )
     }
 

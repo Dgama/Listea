@@ -165,8 +165,9 @@ class PackageProtocolTest {
 
     @Test
     fun `an unknown protocol rejects the whole package`() {
+        // v2 is a known protocol since 0.8.4; only a version the build cannot read is rejected.
         val plan = PackageProtocol.plan(
-            snapshot(manifest = manifest().replace("listea.package/1", "listea.package/2"))
+            snapshot(manifest = manifest().replace("listea.package/1", "listea.package/3"))
         )
         assertFalse(plan.accepted)
         assertEquals(listOf("protocol-unknown"), plan.codes(DiagnosticScope.PACKAGE))
@@ -252,7 +253,7 @@ class PackageProtocolTest {
 
     @Test
     fun `an unknown kind is stored with its payload but unavailable`() {
-        val plan = PackageProtocol.plan(snapshot(manifest = manifest(prompts = prompt(kind = "form"))))
+        val plan = PackageProtocol.plan(snapshot(manifest = manifest(prompts = prompt(kind = "quiz"))))
         assertTrue(plan.accepted)
         val stored = plan.prompts.single()
         assertEquals(PromptAvailability.Unavailable("unsupported-viewer"), stored.availability)

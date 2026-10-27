@@ -214,10 +214,10 @@ class WebhookHistoryTest {
             severalDestinations = false
         )
 
-        assertEquals("Review left - 4 items - example.com", progress.summaryLabel)
+        assertEquals("Review left - 4 Tasks - example.com", progress.summaryLabel)
         // The asking dialog does not repeat the event inside its facts line — its first line is a
         // sentence that already names it — so the two are compared on the part they share.
-        assertEquals("4 items - example.com", confirmation().factsLabel)
+        assertEquals("4 Tasks - example.com", confirmation().factsLabel)
         // A split round says so in the same words in both dialogs.
         val split = WebhookProgress(
             event = EVENT_REVIEW_EXITED,
@@ -226,9 +226,9 @@ class WebhookHistoryTest {
             itemCount = 4,
             severalDestinations = true
         )
-        assertEquals("Review left - 4 items - several webhook addresses", split.summaryLabel)
+        assertEquals("Review left - 4 Tasks - several webhook addresses", split.summaryLabel)
         assertEquals(
-            "4 items - several webhook addresses",
+            "4 Tasks - several webhook addresses",
             confirmation(severalDestinations = true).factsLabel
         )
     }
@@ -281,10 +281,10 @@ class WebhookHistoryTest {
     }
 
     @Test
-    fun `a payload with one item is not described in the plural`() {
-        assertEquals("1 item", countOfItems(1))
-        assertEquals("0 items", countOfItems(0))
-        assertEquals("42 items", countOfItems(42))
+    fun `a payload with one Task is not described in the plural`() {
+        assertEquals("1 Task", countOfTasks(1))
+        assertEquals("0 Tasks", countOfTasks(0))
+        assertEquals("42 Tasks", countOfTasks(42))
     }
 
     @Test

@@ -313,8 +313,8 @@ class ImportRunTest {
             arrayOf<Any?>(assetId, taskId, ROOT, relativePath)
         )
         db.execSQL(
-            "INSERT INTO task_state (taskId, isCompleted, isFavorite, customActions, updatedAt) " +
-                "VALUES (?, ?, 0, '', 1000)",
+            "INSERT INTO task_state (taskId, isCompleted, isFavorite, customActions, updatedAt, " +
+                "completionSource) VALUES (?, ?, 0, '', 1000, '')",
             arrayOf<Any?>(taskId, if (completed) 1 else 0)
         )
         db.execSQL("INSERT INTO legacy_source_tasks (taskId) VALUES (?)", arrayOf<Any?>(taskId))

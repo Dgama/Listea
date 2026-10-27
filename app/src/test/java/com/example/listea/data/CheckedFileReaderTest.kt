@@ -3,6 +3,7 @@ package com.example.listea.data
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.example.listea.domain.CompletionPolicy
 import com.example.listea.domain.ReviewContext
 import com.example.listea.domain.ReviewResponse
 import com.example.listea.domain.Templates
@@ -58,9 +59,13 @@ class CheckedFileReaderTest {
 
             dao.submitReview(
                 taskId = dao.getItems(listId).single().taskId,
+                partKey = null,
                 response = media(completed = true),
                 template = Templates.MediaRapidReview.ref,
                 context = ReviewContext.InFolder(ROOT, ""),
+                completion = CompletionPolicy.SinglePart,
+                completesTask = true,
+                explicitCompletion = false,
                 now = 2000
             )
 
@@ -72,19 +77,23 @@ class CheckedFileReaderTest {
 
     @Test
     fun `a migrated membership with no historical registration is seen the same way`() = runTest {
-        // The shape MIGRATION_12_13 leaves behind for a membership whose file had never had a
-        // decision recorded against it: a Task, one Asset, one state row, and a list_items row —
-        // and no file_review_state, because there was nothing to register. Reproduced by hand
-        // rather than through createFolderList so the fixture is the migration's and not the live
-        // write path's.
+        // The shape the schema-33 migration leaves behind for a membership whose file had never had
+        // a decision recorded against it: a Task, its one part and part-state row, one Asset, one
+        // state row, and a list_items row — and no file_review_state, because there was nothing to
+        // register. Reproduced by hand rather than through createFolderList so the fixture is the
+        // migration's and not the live write path's.
         val listId = manualList()
         val taskId = writeMigratedSourceItem(listId, "a.jpg")
 
         dao.submitReview(
             taskId = taskId,
+            partKey = null,
             response = media(completed = true),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InList(com.example.listea.domain.ListId(listId)),
+            completion = CompletionPolicy.SinglePart,
+            completesTask = true,
+            explicitCompletion = false,
             now = 2000
         )
 
@@ -119,16 +128,33 @@ class CheckedFileReaderTest {
     private fun writeMigratedSourceItem(listId: Long, relativePath: String): String {
         val taskId = UUID.randomUUID().toString()
         val assetId = UUID.randomUUID().toString()
+        // A Task with no import row of its own is `legacy:<taskId>` after the schema-33 migration.
+        val partKey = "legacy:$taskId"
         val db = database.openHelper.writableDatabase
         db.execSQL("INSERT INTO tasks (id, createdAt) VALUES (?, ?)", arrayOf<Any?>(taskId, 1000))
         db.execSQL(
-            "INSERT INTO assets (id, taskId, sortOrder, rootUri, relativePath, sourceMissing) " +
-                "VALUES (?, ?, 0, ?, ?, 0)",
-            arrayOf<Any?>(assetId, taskId, ROOT, relativePath)
+            "INSERT INTO task_parts (" +
+                "taskId, partKey, position, origin, promptKey, required, present, " +
+                "availability, updatedAt) " +
+                "VALUES (?, ?, 0, 'legacy', NULL, 1, 1, NULL, 1000)",
+            arrayOf<Any?>(taskId, partKey)
         )
         db.execSQL(
-            "INSERT INTO task_state (taskId, isCompleted, isFavorite, customActions, updatedAt) " +
-                "VALUES (?, 0, 0, '', 1000)",
+            "INSERT INTO task_part_state (" +
+                "taskId, partKey, response, answeredAt, revision, updatedAt) " +
+                "VALUES (?, ?, '', NULL, NULL, 1000)",
+            arrayOf<Any?>(taskId, partKey)
+        )
+        db.execSQL(
+            "INSERT INTO assets (" +
+                "id, taskId, sortOrder, rootUri, relativePath, sourceMissing, partKey) " +
+                "VALUES (?, ?, 0, ?, ?, 0, ?)",
+            arrayOf<Any?>(assetId, taskId, ROOT, relativePath, partKey)
+        )
+        db.execSQL(
+            "INSERT INTO task_state (" +
+                "taskId, isCompleted, isFavorite, customActions, completionSource, updatedAt) " +
+                "VALUES (?, 0, 0, '', '', 1000)",
             arrayOf<Any?>(taskId)
         )
         db.execSQL(

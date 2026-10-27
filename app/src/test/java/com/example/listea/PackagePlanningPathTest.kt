@@ -42,7 +42,9 @@ class PackagePlanningPathTest {
         assertEquals("media/alice.png", plan.packages.single().resources.single().member)
         assertNotNull(plan.packages.single().resources.single().uri)
         assertEquals(1, plan.tasks.size)
-        assertTrue(plan.tasks.single().assets.isEmpty())
+        // The Prompt is one Package part carrying the payload; it has no file Asset of its own.
+        assertTrue(plan.tasks.single().allAssets().isEmpty())
+        assertEquals("alice", plan.tasks.single().parts.single().prompt?.promptKey)
     }
 
     @Test

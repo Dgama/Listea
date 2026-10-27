@@ -7,6 +7,7 @@ import com.example.listea.data.DecisionTarget
 import com.example.listea.data.FileReviewStateEntity
 import com.example.listea.data.ReviewAsset
 import com.example.listea.data.ReviewItem
+import com.example.listea.data.ReviewPart
 import com.example.listea.data.TaskStateEntity
 import com.example.listea.data.encodeActionIds
 import com.example.listea.data.taskDecisions
@@ -75,15 +76,21 @@ class QuickReviewQueueTest {
         sizeBytes = sizeBytes,
         lastModified = lastModified,
         hasUnviewableAsset = unviewable,
-        assets = listOf(
-            ReviewAsset(
-                assetId = "$taskId#0",
-                sourceUri = "content://tree/Listea/doc/$groupPath",
-                name = displayName,
-                sourceMissing = false,
-                sizeBytes = sizeBytes,
-                lastModified = lastModified,
-                decisions = AssetDecisions(selections = selections)
+        parts = listOf(
+            ReviewPart(
+                partKey = "local:0",
+                position = 0,
+                assets = listOf(
+                    ReviewAsset(
+                        assetId = "$taskId#0",
+                        sourceUri = "content://tree/Listea/doc/$groupPath",
+                        name = displayName,
+                        sourceMissing = false,
+                        sizeBytes = sizeBytes,
+                        lastModified = lastModified,
+                        decisions = AssetDecisions(selections = selections)
+                    )
+                )
             )
         )
     )
@@ -377,18 +384,24 @@ class QuickReviewQueueTest {
         // The bug v0.5.1 was opened for, at the level the fix lives on: two files of one Task, and a
         // re-read that names only the first leaves the second exactly as the queue resolved it.
         val row = catalogRow("task-a", "a.jpg", "a.jpg").copy(
-            assets = listOf(
-                ReviewAsset(
-                    assetId = "task-a#0",
-                    sourceUri = "content://tree/Listea/doc/a.jpg",
-                    name = "a.jpg",
-                    sourceMissing = false
-                ),
-                ReviewAsset(
-                    assetId = "task-a#1",
-                    sourceUri = "content://tree/Listea/doc/b.jpg",
-                    name = "b.jpg",
-                    sourceMissing = false
+            parts = listOf(
+                ReviewPart(
+                    partKey = "local:0",
+                    position = 0,
+                    assets = listOf(
+                        ReviewAsset(
+                            assetId = "task-a#0",
+                            sourceUri = "content://tree/Listea/doc/a.jpg",
+                            name = "a.jpg",
+                            sourceMissing = false
+                        ),
+                        ReviewAsset(
+                            assetId = "task-a#1",
+                            sourceUri = "content://tree/Listea/doc/b.jpg",
+                            name = "b.jpg",
+                            sourceMissing = false
+                        )
+                    )
                 )
             )
         )

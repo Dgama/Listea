@@ -139,21 +139,29 @@ class MigrationV16ToV17Test {
     // --- and the rule that was not -----------------------------------------------------------------
 
     @Test
-    fun `one Task still holds at most one Asset per file`() {
+    fun `one part still holds at most one Asset per file`() {
         writeFixture()
         val database = migrate()
 
-        // The invariant that was always the one worth keeping. Two Assets of one Task at one path
+        // The invariant that was always the one worth keeping. Two Assets of one part at one path
         // would be two answers to the same question — which URI to render, which size to show — and
-        // relaxing the *cross*-Task rule is not licence to allow it within a Task.
+        // relaxing the *cross*-Task rule is not licence to allow it within a part.
+        //
+        // Since 32 -> 33 the uniqueness is scoped to the part rather than the Task, because two
+        // parts of one Task may legitimately ask different questions about the same file. The insert
+        // therefore names the part the migration gave `task-1`; without one it would carry a null
+        // `partKey`, which SQLite's unique index treats as distinct and would let through.
         try {
             database.raw(
-                "INSERT INTO assets (id, taskId, sortOrder, rootUri, relativePath, sourceMissing, " +
-                    "sourceUri, sizeBytes, lastModified) VALUES " +
-                    "('asset-dup', 'task-1', 1, 'content://root', 'photos/a.jpg', 0, " +
+                "INSERT INTO assets (id, taskId, partKey, sortOrder, rootUri, relativePath, " +
+                    "sourceMissing, sourceUri, sizeBytes, lastModified) VALUES " +
+                    "('asset-dup', 'task-1', " +
+                    "(SELECT partKey FROM task_parts WHERE taskId = 'task-1' " +
+                    "ORDER BY position LIMIT 1), " +
+                    "1, 'content://root', 'photos/a.jpg', 0, " +
                     "'content://root/a.jpg', 4096, 555)"
             )
-            fail("one Task held the same file twice")
+            fail("one part held the same file twice")
         } catch (expected: SQLiteConstraintException) {
             assertTrue(expected.message.orEmpty().isNotEmpty())
         }
@@ -398,7 +406,8 @@ class MigrationV16ToV17Test {
             ListeaDatabase.MIGRATION_28_29,
             ListeaDatabase.MIGRATION_29_30,
             ListeaDatabase.MIGRATION_30_31,
-            ListeaDatabase.MIGRATION_31_32
+            ListeaDatabase.MIGRATION_31_32,
+            ListeaDatabase.MIGRATION_32_33
         )
             .build()
 

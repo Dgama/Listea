@@ -2,6 +2,7 @@ package com.example.listea
 
 import com.example.listea.data.CatalogRow
 import com.example.listea.data.ReviewBlock
+import com.example.listea.data.ReviewPart
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -93,10 +94,18 @@ class PackageCatalogTest {
         hasUnviewableAsset = false,
         packageKey = packageKey,
         packageTitle = title,
-        promptKey = prompt,
-        payloadKind = kind,
-        payloadSchema = schema,
-        payloadRevision = if (kind == null) null else 1
+        // The Prompt envelope lives on the part now: a Package Prompt Task holds one part whose
+        // payload is what the eligibility question reads.
+        parts = listOf(
+            ReviewPart(
+                partKey = prompt,
+                position = 0,
+                promptKey = prompt,
+                payloadKind = kind,
+                payloadSchema = schema,
+                payloadRevision = if (kind == null) null else 1
+            )
+        )
     )
 
     private companion object {

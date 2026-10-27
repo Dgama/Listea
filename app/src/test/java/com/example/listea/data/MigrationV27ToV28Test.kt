@@ -151,7 +151,8 @@ class MigrationV27ToV28Test {
                 ListeaDatabase.MIGRATION_28_29,
                 ListeaDatabase.MIGRATION_29_30,
                 ListeaDatabase.MIGRATION_30_31,
-                ListeaDatabase.MIGRATION_31_32
+                ListeaDatabase.MIGRATION_31_32,
+                ListeaDatabase.MIGRATION_32_33
             )
             .allowMainThreadQueries()
             .build()
@@ -213,6 +214,6 @@ class MigrationV27ToV28Test {
     private companion object {
         const val V27_DB = "v27-fixture.db"
         const val V27 = 27
-        const val CURRENT = 32
+        const val CURRENT = 33
     }
 }

@@ -61,7 +61,12 @@ class TemplateSeedTest {
         val templates = database.templateDao().observeTemplates().first()
         // The Asset Control and the built-in Task Reviews. Read from the same list the seed writes,
         // so a fourth built-in is a row here rather than a number to remember to edit.
-        assertEquals(1 + Templates.StoredTaskReviews.size, templates.size)
+        // One template row per distinct id, not one per version: the single-choice lineage ships a
+        // second version under the same id.
+        assertEquals(
+            1 + Templates.StoredTaskReviews.map { it.ref.templateId.value }.toSet().size,
+            templates.size
+        )
         val seedRow = templates.single { it.id == seedId }
         assertEquals(Templates.AssetControlSeed.name, seedRow.name)
         assertEquals(
@@ -90,20 +95,63 @@ class TemplateSeedTest {
     }
 
     @Test
-    fun `the seed is not applied again to a database that already exists`() = runTest {
+    fun `an open never overwrites the name of a built-in the user renamed`() = runTest {
         open()
         database.templateWriteDao().renameTemplate(seedId, "Renamed by the user")
         database.close()
 
-        // The guard is *the table is empty*, and this is why it is not *the built-in is missing*: a
-        // rename is the user's, and an open that put the name back would be an app that undoes an
-        // edit on every launch. Read the other way round, this is the delete case the store's note
-        // names — a table with rows in it is a table somebody is using.
+        // The repair fills in rows that are missing; it does not rewrite rows that exist. A rename
+        // is the user's, and an open that put the name back would be an app that undoes an edit on
+        // every launch. Read the other way round, this is the delete case the store's note names —
+        // a table with rows in it is a table somebody is using.
         open()
         assertEquals(
             "Renamed by the user",
             database.templateDao().template(seedId)?.name
         )
+    }
+
+    @Test
+    fun `a built-in added by a later release is restored on open`() = runTest {
+        open()
+
+        // The state of an install that upgraded from a build whose seed list ended at one
+        // single-choice version: the form lineage is absent entirely, and the newer version of the
+        // single-choice lineage was never written. Deleting the rows is the closest a test gets to
+        // that database, because the app itself can neither delete nor forget a built-in.
+        val form = Templates.StructuredForm
+        val multi = Templates.StructuredMultiPart
+        val db = database.openHelper.writableDatabase
+        db.execSQL(
+            "DELETE FROM template_versions WHERE templateId = ?",
+            arrayOf(form.ref.templateId.value)
+        )
+        db.execSQL("DELETE FROM templates WHERE id = ?", arrayOf(form.ref.templateId.value))
+        db.execSQL(
+            "DELETE FROM template_versions WHERE templateId = ? AND version = ?",
+            arrayOf<Any?>(multi.ref.templateId.value, multi.ref.version)
+        )
+        database.close()
+
+        open()
+
+        assertEquals(
+            Templates.StructuredForm.name,
+            database.templateDao().template(form.ref.templateId.value)?.name
+        )
+        val versions = database.templateDao().observeVersions().first()
+        assertTrue(
+            versions.any {
+                it.templateId == form.ref.templateId.value && it.version == form.ref.version
+            }
+        )
+        assertTrue(
+            versions.any {
+                it.templateId == multi.ref.templateId.value && it.version == multi.ref.version
+            }
+        )
+        // The older version of the same lineage was already there and is left exactly as it was.
+        assertTrue(versions.any { it.templateId == multi.ref.templateId.value && it.version == 1 })
     }
 
     @Test
@@ -162,7 +210,7 @@ class TemplateSeedTest {
         open()
 
         assertEquals(
-            1 + Templates.StoredTaskReviews.size,
+            1 + Templates.StoredTaskReviews.map { it.ref.templateId.value }.toSet().size,
             database.templateDao().observeTemplates().first().size
         )
         assertTrue(

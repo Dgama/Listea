@@ -3,6 +3,7 @@ package com.example.listea
 import com.example.listea.data.DecisionTarget
 import com.example.listea.data.ReviewAsset
 import com.example.listea.data.ReviewItem
+import com.example.listea.data.ReviewPart
 import com.example.listea.domain.AddOnId
 import com.example.listea.domain.AddOnVersionRef
 import com.example.listea.domain.StoredAddOnVersion
@@ -30,7 +31,7 @@ class MediaQueueGuideTest {
         )
 
         val entries = reviewQueueEntries(items) { queued ->
-            reviewPageEntries(pages.getValue(queued.taskId), addOn = null)
+            reviewPageEntries(listOf(part(pages.getValue(queued.taskId))), addOn = null)
         }
 
         assertEquals(listOf("camera", "receipts"), entries.map { it.label })
@@ -46,7 +47,10 @@ class MediaQueueGuideTest {
 
         val entries = reviewQueueEntries(items) { queued ->
             val addOn = if (queued.taskId == "task-2") addOn("Field notes") else null
-            reviewPageEntries(listOf(asset("scan-1.png"), asset("scan-2.png")), addOn)
+            reviewPageEntries(
+                listOf(part(listOf(asset("scan-1.png"), asset("scan-2.png")))),
+                addOn
+            )
         }
 
         assertTrue("a Task without an add-on has no page for one", entries[0].pages.none { it.label.startsWith("add-on") })
@@ -102,6 +106,13 @@ class MediaQueueGuideTest {
         target = DecisionTarget.File("content://root", title),
         rowId = id,
         rootRelativePath = rootRelativePath
+    )
+
+    // A media Task is one degenerate part: its files and no Viewer body.
+    private fun part(assets: List<ReviewAsset>) = ReviewPart(
+        partKey = "p1",
+        position = 0,
+        assets = assets
     )
 
     private fun asset(name: String) = ReviewAsset(

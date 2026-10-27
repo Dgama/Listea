@@ -3,6 +3,7 @@ package com.example.listea.data
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.example.listea.domain.CompletionPolicy
 import com.example.listea.domain.ListId
 import com.example.listea.domain.ReviewContext
 import com.example.listea.domain.ReviewResponse
@@ -67,9 +68,13 @@ class ReviewSubmissionTest {
 
         val transitioned = dao.submitReview(
             taskId = taskId,
+            partKey = null,
             response = media(completed = true),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InFolder(ROOT, ""),
+            completion = CompletionPolicy.SinglePart,
+            completesTask = true,
+            explicitCompletion = false,
             now = 2000
         )
 
@@ -104,6 +109,7 @@ class ReviewSubmissionTest {
 
         dao.submitReview(
             taskId = taskId,
+            partKey = null,
             // What the review surface was showing when the person committed.
             response = media(
                 completed = true,
@@ -111,6 +117,9 @@ class ReviewSubmissionTest {
             ),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InFolder(ROOT, ""),
+            completion = CompletionPolicy.SinglePart,
+            completesTask = true,
+            explicitCompletion = false,
             now = 2000
         )
 
@@ -132,6 +141,7 @@ class ReviewSubmissionTest {
 
         dao.submitReview(
             taskId = taskId,
+            partKey = null,
             // What a template that offers something other than "deal with this" would commit, and
             // the reason the response leads the write: a submission is a judgment being recorded,
             // and whether that judgment leaves the Task complete is the response's to say. Hard-
@@ -139,6 +149,9 @@ class ReviewSubmissionTest {
             response = media(completed = false),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InFolder(ROOT, ""),
+            completion = CompletionPolicy.SinglePart,
+            completesTask = false,
+            explicitCompletion = false,
             now = 2000
         )
 
@@ -159,9 +172,13 @@ class ReviewSubmissionTest {
 
         dao.submitReview(
             taskId = taskId,
+            partKey = null,
             response = media(completed = true),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InList(ListId(listId)),
+            completion = CompletionPolicy.SinglePart,
+            completesTask = true,
+            explicitCompletion = false,
             now = 2000
         )
 
@@ -176,9 +193,13 @@ class ReviewSubmissionTest {
 
         dao.submitReview(
             taskId = taskId,
+            partKey = null,
             response = media(completed = true),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InFolder(ROOT, "holiday"),
+            completion = CompletionPolicy.SinglePart,
+            completesTask = true,
+            explicitCompletion = false,
             now = 2000
         )
 
@@ -198,9 +219,13 @@ class ReviewSubmissionTest {
 
         dao.submitReview(
             taskId = milk.taskId,
+            partKey = null,
             response = media(completed = true),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InList(ListId(listId)),
+            completion = CompletionPolicy.SinglePart,
+            completesTask = true,
+            explicitCompletion = false,
             now = 2000
         )
 
@@ -248,9 +273,13 @@ class ReviewSubmissionTest {
         val taskId = dao.getItems(listId).single().taskId
         dao.submitReview(
             taskId = taskId,
+            partKey = null,
             response = media(completed = true),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InFolder(ROOT, ""),
+            completion = CompletionPolicy.SinglePart,
+            completesTask = true,
+            explicitCompletion = false,
             now = 2000
         )
 
@@ -290,23 +319,31 @@ class ReviewSubmissionTest {
         dao.setAssetAction(taskId, fileAsset("a.jpg"), ItemAction.Favourite, enabled = true, now = 1500)
         dao.submitReview(
             taskId = taskId,
+            partKey = null,
             response = media(
                 completed = true,
                 selections = setOf(Templates.FAVOURITE_BUTTON_ID)
             ),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InFolder(ROOT, ""),
+            completion = CompletionPolicy.SinglePart,
+            completesTask = true,
+            explicitCompletion = false,
             now = 2000
         )
 
         val second = dao.submitReview(
             taskId = taskId,
+            partKey = null,
             response = media(
                 completed = true,
                 selections = setOf(Templates.FAVOURITE_BUTTON_ID)
             ),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InFolder(ROOT, ""),
+            completion = CompletionPolicy.SinglePart,
+            completesTask = true,
+            explicitCompletion = false,
             now = 3000
         )
 
@@ -333,12 +370,16 @@ class ReviewSubmissionTest {
 
         dao.submitReview(
             taskId = taskId,
+            partKey = null,
             response = primary(
                 ViewerEvent.ImagePoint(0.10, 0.20, "#43A047", assetUri),
                 ViewerEvent.ImagePoint(0.30, 0.40, "#E53935", "$ROOT//gone.jpg")
             ),
             template = Templates.ImageSampleReview.ref,
             context = ReviewContext.InFolder(ROOT, ""),
+            completion = CompletionPolicy.SinglePart,
+            completesTask = true,
+            explicitCompletion = false,
             now = 2000
         )
 
@@ -378,9 +419,13 @@ class ReviewSubmissionTest {
 
         dao.submitReview(
             taskId = taskId,
+            partKey = null,
             response = media(completed = true),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InFolder(ROOT, ""),
+            completion = CompletionPolicy.SinglePart,
+            completesTask = true,
+            explicitCompletion = false,
             now = 2000
         )
 
@@ -398,19 +443,27 @@ class ReviewSubmissionTest {
 
         dao.submitReview(
             taskId = taskId,
+            partKey = null,
             response = primary(ViewerEvent.ImagePoint(0.1, 0.2, "#43A047", assetUri)),
             template = Templates.ImageSampleReview.ref,
             context = ReviewContext.InFolder(ROOT, ""),
+            completion = CompletionPolicy.SinglePart,
+            completesTask = true,
+            explicitCompletion = false,
             now = 2000
         )
         dao.submitReview(
             taskId = taskId,
+            partKey = null,
             response = primary(
                 ViewerEvent.ImagePoint(0.7, 0.8, "#1E88E5", assetUri),
                 ViewerEvent.ImagePoint(0.9, 0.6, "#FDD835", assetUri)
             ),
             template = Templates.ImageSampleReview.ref,
             context = ReviewContext.InFolder(ROOT, ""),
+            completion = CompletionPolicy.SinglePart,
+            completesTask = true,
+            explicitCompletion = false,
             now = 3000
         )
 
@@ -439,9 +492,13 @@ class ReviewSubmissionTest {
 
         val transitioned = dao.submitReview(
             taskId = taskId,
+            partKey = null,
             response = media(completed = true),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InList(ListId(listId)),
+            completion = CompletionPolicy.SinglePart,
+            completesTask = true,
+            explicitCompletion = false,
             now = 2000
         )
 
@@ -474,9 +531,13 @@ class ReviewSubmissionTest {
 
         dao.submitReview(
             taskId = taskId,
+            partKey = null,
             response = media(completed = true, selections = setOf("stale")),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InFolder(ROOT, ""),
+            completion = CompletionPolicy.SinglePart,
+            completesTask = true,
+            explicitCompletion = false,
             now = 2000
         )
 

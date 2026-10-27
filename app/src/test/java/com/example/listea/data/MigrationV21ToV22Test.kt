@@ -100,10 +100,13 @@ class MigrationV21ToV22Test {
 
         // Named in full rather than counted: the claim is not "one fewer column" but "these columns,
         // in this order", which is what Room validates and what a reader of the entity expects.
+        // `partRecords`, appended by 32 -> 33, is named because the fixture is opened at the current
+        // version; the two columns this test is about are the ones that are *not* here.
         assertEquals(
             listOf(
                 "id", "sourceId", "sourceName", "rootUri", "sourcePath", "groupPath",
-                "importerKind", "isCompleted", "recordVersion", "records", "dissolvedAt"
+                "importerKind", "isCompleted", "recordVersion", "records", "dissolvedAt",
+                "partRecords"
             ),
             database.columns("dissolved_task_state")
         )
@@ -215,7 +218,12 @@ class MigrationV21ToV22Test {
         // step does not revisit that: clearing them here would be a release taking away the only
         // remaining copy of somebody's work in a step that never read it.
         assertEquals(
-            listOf("taskId", "isCompleted", "isFavorite", "customActions", "updatedAt"),
+            // `completionSource` is 32 -> 33's, and is named for the same reason as `partRecords`
+            // above: the fixture is read at the current version.
+            listOf(
+                "taskId", "isCompleted", "isFavorite", "customActions", "updatedAt",
+                "completionSource"
+            ),
             database.columns("task_state")
         )
         assertEquals(1, database.count("SELECT isFavorite FROM task_state WHERE taskId = 'task-a'"))
@@ -516,7 +524,8 @@ class MigrationV21ToV22Test {
             ListeaDatabase.MIGRATION_28_29,
             ListeaDatabase.MIGRATION_29_30,
             ListeaDatabase.MIGRATION_30_31,
-            ListeaDatabase.MIGRATION_31_32
+            ListeaDatabase.MIGRATION_31_32,
+            ListeaDatabase.MIGRATION_32_33
         )
             .build()
 

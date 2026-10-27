@@ -3,6 +3,7 @@ package com.example.listea.data
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.example.listea.domain.CompletionPolicy
 import com.example.listea.domain.ReviewContext
 import com.example.listea.domain.ReviewResponse
 import com.example.listea.domain.Templates
@@ -67,12 +68,16 @@ class TaskWriteTest {
     fun `a submission for a Task that does not exist writes no state and no event`() = runTest {
         val transitioned = dao.submitReview(
             taskId = "no-such-task",
+            partKey = null,
             response = ReviewResponse.MediaReview(
                 completed = true,
                 selections = emptySet()
             ),
             template = Templates.MediaRapidReview.ref,
             context = ReviewContext.InFolder(ROOT, ""),
+            completion = CompletionPolicy.SinglePart,
+            completesTask = true,
+            explicitCompletion = false,
             now = 2000
         )
 

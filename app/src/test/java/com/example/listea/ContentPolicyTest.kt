@@ -338,18 +338,32 @@ class ContentPolicyTest {
         sourceMissing = sourceMissing
     )
 
+    /**
+     * A planned Task as the local planners make one: a single degenerate part holding its files.
+     *
+     * A Task's Assets live on its parts since v0.8.4, and [taskChanges] counts what a plan adds by
+     * walking them, so a fixture that still put the files at Task level would test a shape the
+     * planner never produces.
+     */
     private fun task(groupPath: String, vararg paths: String) = PlannedTask(
         groupPath = groupPath,
         displayName = groupPath,
-        assets = paths.mapIndexed { index, path ->
-            PlannedAsset(
-                rootRelativePath = path,
-                name = path.substringAfterLast('/'),
-                uri = "content://root/$path",
-                sizeBytes = null,
-                lastModified = null,
-                sortOrder = index
+        parts = listOf(
+            PlannedPart(
+                partKey = "local:0",
+                position = 0,
+                origin = PartOrigin.FILE,
+                assets = paths.mapIndexed { index, path ->
+                    PlannedAsset(
+                        rootRelativePath = path,
+                        name = path.substringAfterLast('/'),
+                        uri = "content://root/$path",
+                        sizeBytes = null,
+                        lastModified = null,
+                        sortOrder = index
+                    )
+                }
             )
-        }
+        )
     )
 }

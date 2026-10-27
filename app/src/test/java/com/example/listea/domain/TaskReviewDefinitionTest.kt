@@ -64,16 +64,50 @@ class TaskReviewDefinitionTest {
         // reader would call the same cannot be told apart by a diff.
         assertEquals(
             listOf(
-                "v=2",
+                "v=3",
                 "viewer=builtin.media.viewer@1",
                 "accepts=image.point",
                 "commit=confirm:control:submit",
                 "revisable=true",
                 "completes=true",
-                "advance=true"
+                "advance=true",
+                "completion=single-part"
             ).joinToString("\n"),
             encodeTaskReviewDefinition(definition())
         )
+    }
+
+    @Test
+    fun `every completion policy round-trips`() {
+        for (policy in CompletionPolicy.entries) {
+            val definition = TaskReviewDefinition(
+                viewer = viewer,
+                accepts = setOf(ViewerEventType.IMAGE_POINT),
+                commit = CommitPolicy.ConfirmControl("submit"),
+                revisable = true,
+                completesTask = true,
+                advanceAfterCommit = true,
+                completion = policy
+            )
+            assertEquals(policy, decode(encodeTaskReviewDefinition(definition))?.completion)
+        }
+    }
+
+    @Test
+    fun `a version 2 definition reads as single part`() {
+        // v2 predates multiple parts, so its only honest reading is the one it had: one decision.
+        val old = listOf(
+            "v=2",
+            "viewer=builtin.media.viewer@1",
+            "accepts=image.point",
+            "commit=confirm:control:submit",
+            "revisable=true",
+            "completes=true",
+            "advance=true"
+        ).joinToString("\n")
+        assertEquals(CompletionPolicy.SinglePart, decode(old, version = 2)?.completion)
+        // A v2 text claiming a completion line is a line that version never wrote.
+        assertNull(decode(old + "\ncompletion=any-part", version = 2))
     }
 
     @Test
@@ -151,7 +185,7 @@ class TaskReviewDefinitionTest {
         assertNull(decode(text, TASK_REVIEW_DEFINITION_VERSION + 1))
         // And the same answer from inside the text, for a caller that passed the row's version by
         // mistake rather than reading the envelope's.
-        assertNull(decode(text.replaceFirst("v=2", "v=3")))
+        assertNull(decode(text.replaceFirst("v=3", "v=4")))
     }
 
     @Test
@@ -193,7 +227,8 @@ class TaskReviewDefinitionTest {
     fun `every required line is required`() {
         val lines = encodeTaskReviewDefinition(definition()).split('\n')
         for (missing in listOf(
-            "viewer=", "accepts=", "commit=", "revisable=", "completes=", "advance="
+            "viewer=", "accepts=", "commit=", "revisable=", "completes=", "advance=",
+            "completion="
         )) {
             val text = lines.filterNot { it.startsWith(missing) }.joinToString("\n")
             assertNull("without $missing", decode(text))

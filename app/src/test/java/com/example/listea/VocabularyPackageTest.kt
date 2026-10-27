@@ -47,19 +47,27 @@ class VocabularyPackageTest {
         val tasks = plan.tasks.associateBy { it.groupPath }
         val dating = requireNotNull(tasks["mixed-demo/alice"])
         val vocabulary = requireNotNull(tasks["mixed-demo/serendipity"])
-        assertEquals("profile", dating.prompt!!.kind)
-        assertEquals("vocabulary", vocabulary.prompt!!.kind)
-        assertEquals(listOf("alice-photo"), dating.prompt.resources.map { it.resourceKey })
-        assertEquals(listOf("word-audio"), vocabulary.prompt.resources.map { it.resourceKey })
+        // A Prompt is one Task holding one Package part, and the payload travels on that part.
+        val datingPart = dating.parts.single()
+        val vocabularyPart = vocabulary.parts.single()
+        val datingPrompt = requireNotNull(datingPart.prompt)
+        val vocabularyPrompt = requireNotNull(vocabularyPart.prompt)
+        assertEquals(PartOrigin.PACKAGE, datingPart.origin)
+        assertEquals("prompt:alice", dating.compositionKey)
+        assertEquals("alice", datingPrompt.promptKey)
+        assertEquals("profile", datingPrompt.kind)
+        assertEquals("vocabulary", vocabularyPrompt.kind)
+        assertEquals(listOf("alice-photo"), datingPrompt.resources.map { it.resourceKey })
+        assertEquals(listOf("word-audio"), vocabularyPrompt.resources.map { it.resourceKey })
 
         val packagePlan = plan.packages.single()
         assertEquals(setOf("image", "audio"), packagePlan.resources.map { it.kind }.toSet())
         assertNotNull(packagePlan.resources.single { it.kind == "audio" }.uri)
 
         val content = decodePrompt(
-            vocabulary.prompt.kind,
-            vocabulary.prompt.schema,
-            vocabulary.prompt.payload
+            vocabularyPrompt.kind,
+            vocabularyPrompt.schema,
+            vocabularyPrompt.payload
         )
         assertTrue(content is VocabularyPrompt)
         assertEquals("serendipity", (content as VocabularyPrompt).word)

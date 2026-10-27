@@ -138,12 +138,16 @@ class MigrationV22ToV23Test {
 
         assertEquals(
             "every object that existed at v22 is as it was",
-            before.filterKeys { it !in ColumnsFromLaterSteps },
-            after.filterKeys { it in before && it !in ColumnsFromLaterSteps }
+            before.filterKeys {
+                it !in ColumnsFromLaterSteps && it !in ObjectsReplacedByLaterSteps
+            },
+            after.filterKeys {
+                it in before && it !in ColumnsFromLaterSteps && it !in ObjectsReplacedByLaterSteps
+            }
         )
         assertEquals(
             "and a later step is the only thing that added anything",
-            TablesFromLaterSteps.toSet(),
+            TablesFromLaterSteps.toSet() - ObjectsReplacedByLaterSteps,
             after.keys - before.keys
         )
         // And the three a later step takes from here, by their columns rather than their SQL: the
@@ -152,6 +156,10 @@ class MigrationV22ToV23Test {
         // `task_asset_state` is — v0.5.4 puts a `selections` on all three — and if it ever stops
         // being true of one of them, this line fails rather than the exclusion quietly widening.
         ColumnsFromLaterSteps.forEach { (table, columns) ->
+            // A table that did not exist at v22 is in the list because a later step *appends* a
+            // column to it once it has been created; its creation is covered by the assertion above,
+            // and there is no "columns plus" for it to be checked against here.
+            if (table !in before) return@forEach
             assertEquals(
                 "columns of $table",
                 columnsBefore.getValue(table) + columns.toList(),
@@ -194,9 +202,9 @@ class MigrationV22ToV23Test {
                 "('t1', 1), ('t2', 1), ('t3', 1), ('t4', 1), ('t5', 1)"
         )
         database.exec(
-            "INSERT INTO task_state (taskId, isCompleted, isFavorite, customActions, updatedAt) " +
-                "VALUES ('t1', 1, 0, '', 1), ('t2', 1, 0, '', 1), ('t3', 0, 0, '', 1), " +
-                "('t4', 1, 0, '', 1), ('t5', 0, 0, '', 1)"
+            "INSERT INTO task_state (taskId, isCompleted, isFavorite, customActions, updatedAt, " +
+                "completionSource) VALUES ('t1', 1, 0, '', 1, ''), ('t2', 1, 0, '', 1, ''), " +
+                "('t3', 0, 0, '', 1, ''), ('t4', 1, 0, '', 1, ''), ('t5', 0, 0, '', 1, '')"
         )
         var membership = 0
         // `isCompleted = 0` on every row, on purpose: the dead column, and the trap this test
@@ -255,7 +263,8 @@ class MigrationV22ToV23Test {
             ListeaDatabase.MIGRATION_28_29,
             ListeaDatabase.MIGRATION_29_30,
             ListeaDatabase.MIGRATION_30_31,
-            ListeaDatabase.MIGRATION_31_32
+            ListeaDatabase.MIGRATION_31_32,
+            ListeaDatabase.MIGRATION_32_33
         )
             .build()
             .also { it.openHelper.writableDatabase }

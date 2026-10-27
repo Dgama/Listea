@@ -4,6 +4,7 @@ import com.example.listea.data.ScannedFile
 import com.example.listea.domain.TemplateId
 import com.example.listea.domain.TemplateVersionRef
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
@@ -53,9 +54,17 @@ class ImportPlanTest {
         assertEquals(listOf("a.jpg", "b.mp4", "sub/notes.pdf"), plan.tasks.map { it.displayName })
         assertEquals(listOf("a.jpg", "b.mp4", "sub/notes.pdf"), plan.tasks.map { it.groupPath })
         plan.tasks.forEach { task ->
-            assertEquals(1, task.assets.size)
-            assertEquals(task.groupPath, task.assets.single().rootRelativePath)
-            assertEquals(0, task.assets.single().sortOrder)
+            assertEquals(1, task.allAssets().size)
+            assertEquals(task.groupPath, task.allAssets().single().rootRelativePath)
+            assertEquals(0, task.allAssets().single().sortOrder)
+            // A file is one decision unit: the local rule synthesizes exactly one part, keyed
+            // `local:0`, with no Prompt payload and no composition of its own.
+            val part = task.parts.single()
+            assertEquals("local:0", part.partKey)
+            assertEquals(0, part.position)
+            assertEquals(PartOrigin.FILE, part.origin)
+            assertNull(part.prompt)
+            assertNull(task.compositionKey)
         }
         assertEquals(listOf(ImportNotice.UnsupportedFile("sub/c.txt")), plan.notices)
     }
@@ -139,10 +148,15 @@ class ImportPlanTest {
         val alice = plan.tasks.first { it.displayName == "alice" }
         assertEquals(
             listOf("alice/cv.pdf", "alice/papers/sample.pdf"),
-            alice.assets.map { it.rootRelativePath }
+            alice.allAssets().map { it.rootRelativePath }
         )
-        assertEquals(listOf(0, 1), alice.assets.map { it.sortOrder })
-        assertEquals(listOf("bob/cv.pdf"), plan.tasks.first { it.displayName == "bob" }.assets.map { it.rootRelativePath })
+        assertEquals(listOf(0, 1), alice.allAssets().map { it.sortOrder })
+        // A folder is one synthesized part, exactly as a file is; its files are that part's Assets.
+        assertEquals(PartOrigin.FOLDER, alice.parts.single().origin)
+        assertEquals(
+            listOf("bob/cv.pdf"),
+            plan.tasks.first { it.displayName == "bob" }.allAssets().map { it.rootRelativePath }
+        )
 
         // The unsupported files are reported, not Assets: the stray text under the root and the one
         // inside bob.
@@ -178,6 +192,6 @@ class ImportPlanTest {
         // The snapshot is relative to the folder scanned; the identity every other part of Listea
         // speaks in is relative to the grant, so the importer prefixes the import root.
         assertEquals("2026-07-11/a.jpg", plan.tasks.single().groupPath)
-        assertEquals("2026-07-11/a.jpg", plan.tasks.single().assets.single().rootRelativePath)
+        assertEquals("2026-07-11/a.jpg", plan.tasks.single().allAssets().single().rootRelativePath)
     }
 }

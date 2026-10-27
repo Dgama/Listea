@@ -111,8 +111,10 @@ class MigrationV30ToV31Test {
 
         assertEquals(CURRENT, version(database))
         assertTrue(tables().contains("review_event_answers"))
+        // `fieldKey` is 32 -> 33's; the fixture is read at the current version, and this list names
+        // the whole shape rather than counting this step's five columns.
         assertEquals(
-            listOf("reviewEventId", "ordinal", "assetId", "type", "value"),
+            listOf("reviewEventId", "ordinal", "assetId", "type", "value", "fieldKey"),
             columnsOf(database, "review_event_answers")
         )
     }
@@ -251,7 +253,8 @@ class MigrationV30ToV31Test {
     private fun migrate(): ListeaDatabase {
         val database = Room.databaseBuilder(context, ListeaDatabase::class.java, V30_DB)
             .addMigrations(ListeaDatabase.MIGRATION_30_31,
-ListeaDatabase.MIGRATION_31_32
+ListeaDatabase.MIGRATION_31_32,
+ListeaDatabase.MIGRATION_32_33
 )
             .allowMainThreadQueries()
             .build()
@@ -302,7 +305,7 @@ ListeaDatabase.MIGRATION_31_32
     private companion object {
         const val V30_DB = "v30-fixture.db"
         const val V30 = 30
-        const val CURRENT = 32
+        const val CURRENT = 33
 
         const val REVIEW_ONE = "r-1"
         const val REVIEW_TWO = "r-2"

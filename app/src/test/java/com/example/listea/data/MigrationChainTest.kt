@@ -51,7 +51,8 @@ class MigrationChainTest {
 
         val database = Room.databaseBuilder(context, ListeaDatabase::class.java, V7_DB)
             .addMigrations(*CHAIN_FROM_7,
-ListeaDatabase.MIGRATION_31_32
+ListeaDatabase.MIGRATION_31_32,
+ListeaDatabase.MIGRATION_32_33
 )
             .build()
 
@@ -222,7 +223,8 @@ ListeaDatabase.MIGRATION_31_32
 
         val database = Room.databaseBuilder(context, ListeaDatabase::class.java, V9_DB)
             .addMigrations(*CHAIN_FROM_9,
-ListeaDatabase.MIGRATION_31_32
+ListeaDatabase.MIGRATION_31_32,
+ListeaDatabase.MIGRATION_32_33
 )
             .build()
 
@@ -507,7 +509,8 @@ ListeaDatabase.MIGRATION_31_32
         ListeaDatabase.MIGRATION_28_29,
         ListeaDatabase.MIGRATION_29_30,
         ListeaDatabase.MIGRATION_30_31,
-        ListeaDatabase.MIGRATION_31_32
+        ListeaDatabase.MIGRATION_31_32,
+        ListeaDatabase.MIGRATION_32_33
     )
 
         val CHAIN_FROM_9 = arrayOf(
@@ -533,7 +536,8 @@ ListeaDatabase.MIGRATION_31_32
         ListeaDatabase.MIGRATION_28_29,
         ListeaDatabase.MIGRATION_29_30,
         ListeaDatabase.MIGRATION_30_31,
-        ListeaDatabase.MIGRATION_31_32
+        ListeaDatabase.MIGRATION_31_32,
+        ListeaDatabase.MIGRATION_32_33
     )
     }
 }

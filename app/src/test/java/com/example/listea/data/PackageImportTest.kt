@@ -5,7 +5,9 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.listea.ImportPlan
 import com.example.listea.ImporterKind
+import com.example.listea.PartOrigin
 import com.example.listea.PlannedPackage
+import com.example.listea.PlannedPart
 import com.example.listea.PlannedTask
 import com.example.listea.PlannedTaskPrompt
 import com.example.listea.catalogKey
@@ -66,13 +68,14 @@ class PackageImportTest {
         assertEquals(0, result.packagesRejected)
         assertEquals(3, result.tasksCreated)
         assertEquals(3, rawInt("SELECT COUNT(*) FROM tasks"))
-        assertEquals(3, rawInt("SELECT COUNT(*) FROM task_payloads"))
-        assertEquals(3, rawInt("SELECT COUNT(*) FROM package_prompt_tasks WHERE present = 1"))
+        assertEquals(3, rawInt("SELECT COUNT(*) FROM task_part_payloads"))
+        assertEquals(3, rawInt("SELECT COUNT(*) FROM task_parts WHERE origin = 'package'"))
+        assertEquals(3, rawInt("SELECT COUNT(*) FROM package_composition_prompts WHERE present = 1"))
         assertEquals(1, rawInt("SELECT COUNT(*) FROM package_resources WHERE missing = 0"))
-        assertEquals(3, rawInt("SELECT COUNT(*) FROM task_resources WHERE required = 1"))
+        assertEquals(3, rawInt("SELECT COUNT(*) FROM task_part_resources WHERE required = 1"))
         assertEquals(1, rawInt("SELECT COUNT(*) FROM package_checkpoints"))
-        assertEquals("profile", rawText("SELECT kind FROM task_payloads LIMIT 1"))
-        assertEquals(1, rawInt("SELECT schemaVersion FROM task_payloads LIMIT 1"))
+        assertEquals("profile", rawText("SELECT kind FROM task_part_payloads LIMIT 1"))
+        assertEquals(1, rawInt("SELECT schemaVersion FROM task_part_payloads LIMIT 1"))
         assertEquals("listea.package/1", rawText("SELECT protocol FROM package_checkpoints"))
         // Package-relative, as the protocol's storage note promises: the exact document URI is
         // stored beside it, and the checkpoint says where the Package lives inside the Upstream.
@@ -91,7 +94,7 @@ class PackageImportTest {
         val source = registerSource(ROOT, "dating", ImporterKind.PACKAGE)
         dao.runImport(source.id, "dating", packagePlan(), 2000)
         val taskIds = rawTexts("SELECT id FROM tasks ORDER BY id").toSet()
-        val payloadAt = rawInt("SELECT updatedAt FROM task_payloads LIMIT 1")
+        val payloadAt = rawInt("SELECT updatedAt FROM task_part_payloads LIMIT 1")
         val seenAt = rawInt("SELECT lastSeenAt FROM package_checkpoints")
 
         val result = dao.runImport(source.id, "dating", packagePlan(), 3000)
@@ -100,7 +103,7 @@ class PackageImportTest {
         assertEquals(0, result.packagesWritten)
         assertEquals(3, result.tasksReconciled)
         assertEquals(taskIds, rawTexts("SELECT id FROM tasks ORDER BY id").toSet())
-        assertEquals(payloadAt, rawInt("SELECT updatedAt FROM task_payloads LIMIT 1"))
+        assertEquals(payloadAt, rawInt("SELECT updatedAt FROM task_part_payloads LIMIT 1"))
         assertEquals(seenAt, rawInt("SELECT lastSeenAt FROM package_checkpoints"))
         assertEquals(3, rawInt("SELECT COUNT(*) FROM tasks"))
     }
@@ -109,7 +112,7 @@ class PackageImportTest {
     fun `a different fingerprint at the same revision refuses the Package`() = runTest {
         val source = registerSource(ROOT, "dating", ImporterKind.PACKAGE)
         dao.runImport(source.id, "dating", packagePlan(), 2000)
-        val payloadAt = rawInt("SELECT updatedAt FROM task_payloads LIMIT 1")
+        val payloadAt = rawInt("SELECT updatedAt FROM task_part_payloads LIMIT 1")
 
         val result = dao.runImport(
             source.id,
@@ -121,15 +124,15 @@ class PackageImportTest {
         assertEquals(ImportOutcome.PARTIAL, result.outcome)
         assertEquals(1, result.packagesRejected)
         assertEquals(0, result.packagesWritten)
-        assertEquals(payloadAt, rawInt("SELECT updatedAt FROM task_payloads LIMIT 1"))
-        assertFalse(rawText("SELECT payload FROM task_payloads LIMIT 1").contains("changed"))
+        assertEquals(payloadAt, rawInt("SELECT updatedAt FROM task_part_payloads LIMIT 1"))
+        assertFalse(rawText("SELECT payload FROM task_part_payloads LIMIT 1").contains("changed"))
     }
 
     @Test
     fun `a higher revision updates the payload and keeps the Task id and decision`() = runTest {
         val source = registerSource(ROOT, "dating", ImporterKind.PACKAGE)
         dao.runImport(source.id, "dating", packagePlan(), 2000)
-        val taskId = rawText("SELECT taskId FROM package_prompt_tasks WHERE promptKey = 'alice'")
+        val taskId = rawText("SELECT taskId FROM package_composition_prompts WHERE promptKey = 'alice'")
         dao.setTaskCompleted(taskId, true, 2500)
 
         val result = dao.runImport(
@@ -141,9 +144,9 @@ class PackageImportTest {
 
         assertEquals(ImportOutcome.COMPLETE, result.outcome)
         assertEquals(1, result.packagesWritten)
-        assertEquals(taskId, rawText("SELECT taskId FROM package_prompt_tasks WHERE promptKey = 'alice'"))
-        assertEquals(2, rawInt("SELECT revision FROM task_payloads WHERE taskId = '$taskId'"))
-        assertTrue(rawText("SELECT payload FROM task_payloads WHERE taskId = '$taskId'").contains("changed"))
+        assertEquals(taskId, rawText("SELECT taskId FROM package_composition_prompts WHERE promptKey = 'alice'"))
+        assertEquals(2, rawInt("SELECT revision FROM task_part_payloads WHERE taskId = '$taskId'"))
+        assertTrue(rawText("SELECT payload FROM task_part_payloads WHERE taskId = '$taskId'").contains("changed"))
         assertEquals(1, rawInt("SELECT isCompleted FROM task_state WHERE taskId = '$taskId'"))
         assertEquals(2, rawInt("SELECT revision FROM package_checkpoints"))
     }
@@ -158,14 +161,14 @@ class PackageImportTest {
         assertEquals(ImportOutcome.PARTIAL, result.outcome)
         assertEquals(1, result.packagesRejected)
         assertEquals(3, rawInt("SELECT revision FROM package_checkpoints"))
-        assertEquals(3, rawInt("SELECT revision FROM task_payloads LIMIT 1"))
+        assertEquals(3, rawInt("SELECT revision FROM task_part_payloads LIMIT 1"))
     }
 
     @Test
     fun `a Prompt the revision no longer names is marked absent and keeps its Task`() = runTest {
         val source = registerSource(ROOT, "dating", ImporterKind.PACKAGE)
         dao.runImport(source.id, "dating", packagePlan(), 2000)
-        val carol = rawText("SELECT taskId FROM package_prompt_tasks WHERE promptKey = 'carol'")
+        val carol = rawText("SELECT taskId FROM package_composition_prompts WHERE promptKey = 'carol'")
         dao.setTaskCompleted(carol, true, 2500)
 
         val result = dao.runImport(
@@ -180,9 +183,9 @@ class PackageImportTest {
         )
 
         assertEquals(ImportOutcome.COMPLETE, result.outcome)
-        assertEquals(0, rawInt("SELECT present FROM package_prompt_tasks WHERE promptKey = 'carol'"))
+        assertEquals(0, rawInt("SELECT present FROM package_composition_prompts WHERE promptKey = 'carol'"))
         assertEquals(1, rawInt("SELECT COUNT(*) FROM tasks WHERE id = '$carol'"))
-        assertEquals(1, rawInt("SELECT COUNT(*) FROM task_payloads WHERE taskId = '$carol'"))
+        assertEquals(1, rawInt("SELECT COUNT(*) FROM task_part_payloads WHERE taskId = '$carol'"))
         assertEquals(1, rawInt("SELECT isCompleted FROM task_state WHERE taskId = '$carol'"))
     }
 
@@ -195,11 +198,11 @@ class PackageImportTest {
         dao.runImport(second.id, "dating", packagePlan(), 3000)
 
         assertEquals(6, rawInt("SELECT COUNT(*) FROM tasks"))
-        assertEquals(6, rawInt("SELECT COUNT(*) FROM task_payloads"))
+        assertEquals(6, rawInt("SELECT COUNT(*) FROM task_part_payloads"))
         assertEquals(2, rawInt("SELECT COUNT(*) FROM package_checkpoints"))
         assertNotEquals(
-            rawText("SELECT taskId FROM package_prompt_tasks WHERE sourceId = '${first.id}' LIMIT 1"),
-            rawText("SELECT taskId FROM package_prompt_tasks WHERE sourceId = '${second.id}' LIMIT 1")
+            rawText("SELECT taskId FROM package_composition_prompts WHERE sourceId = '${first.id}' LIMIT 1"),
+            rawText("SELECT taskId FROM package_composition_prompts WHERE sourceId = '${second.id}' LIMIT 1")
         )
     }
 
@@ -217,8 +220,8 @@ class PackageImportTest {
         assertEquals(0, rawInt("SELECT COUNT(*) FROM sources"))
         assertEquals(0, rawInt("SELECT COUNT(*) FROM package_checkpoints"))
         assertEquals(0, rawInt("SELECT COUNT(*) FROM package_resources"))
-        assertEquals(0, rawInt("SELECT COUNT(*) FROM package_prompt_tasks"))
-        assertEquals(0, rawInt("SELECT COUNT(*) FROM task_payloads"))
+        assertEquals(0, rawInt("SELECT COUNT(*) FROM package_composition_prompts"))
+        assertEquals(0, rawInt("SELECT COUNT(*) FROM task_part_payloads"))
         assertEquals(0, rawInt("SELECT COUNT(*) FROM tasks"))
     }
 
@@ -234,10 +237,10 @@ class PackageImportTest {
         )
 
         assertEquals(1, rawInt("SELECT missing FROM package_resources"))
-        assertEquals(0, rawInt("SELECT required FROM task_resources LIMIT 1"))
+        assertEquals(0, rawInt("SELECT required FROM task_part_resources LIMIT 1"))
         // The Task and its payload still exist: a missing optional photo disables an affordance,
         // it does not make the Prompt unanswerable.
-        assertEquals(3, rawInt("SELECT COUNT(*) FROM task_payloads"))
+        assertEquals(3, rawInt("SELECT COUNT(*) FROM task_part_payloads"))
     }
 
     @Test
@@ -288,16 +291,23 @@ class PackageImportTest {
             PlannedTask(
                 groupPath = catalogKey(PACKAGE_KEY, key),
                 displayName = key,
-                assets = emptyList(),
-                prompt = PlannedTaskPrompt(
-                    packageKey = PACKAGE_KEY,
-                    promptKey = key,
-                    kind = "profile",
-                    schema = 1,
-                    payload = """{"bio":"$key$payloadSuffix"}""",
-                    revision = revision,
-                    resources = listOf(PlannedPromptResource("photo", required = resourceRequired))
-                )
+                parts = listOf(
+                    PlannedPart(
+                        partKey = key,
+                        position = 0,
+                        origin = PartOrigin.PACKAGE,
+                        prompt = PlannedTaskPrompt(
+                            packageKey = PACKAGE_KEY,
+                            promptKey = key,
+                            kind = "profile",
+                            schema = 1,
+                            payload = """{"bio":"$key$payloadSuffix"}""",
+                            revision = revision,
+                            resources = listOf(PlannedPromptResource("photo", required = resourceRequired))
+                        )
+                    )
+                ),
+                compositionKey = "prompt:$key"
             )
         }
         return ImportPlan(

@@ -6,6 +6,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.listea.FolderSnapshot
 import com.example.listea.ImporterKind
 import com.example.listea.plan
+import com.example.listea.domain.CompletionPolicy
 import com.example.listea.domain.ReviewContext
 import com.example.listea.domain.ReviewResponse
 import com.example.listea.domain.Templates
@@ -65,11 +66,31 @@ class EligibilityTest {
 
             assertEquals(
                 emptyList<Long>(),
-                dao.submitReview(missingJpg, media(true), Templates.MediaRapidReview.ref, ReviewContext.InFolder(ROOT, ""), 2000)
+                dao.submitReview(
+                    taskId = missingJpg,
+                    partKey = null,
+                    response = media(true),
+                    template = Templates.MediaRapidReview.ref,
+                    context = ReviewContext.InFolder(ROOT, ""),
+                    completion = CompletionPolicy.SinglePart,
+                    completesTask = true,
+                    explicitCompletion = false,
+                    now = 2000
+                )
             )
             assertEquals(
                 emptyList<Long>(),
-                dao.submitReview(unviewableTxt, media(true), Templates.MediaRapidReview.ref, ReviewContext.InFolder(ROOT, ""), 2000)
+                dao.submitReview(
+                    taskId = unviewableTxt,
+                    partKey = null,
+                    response = media(true),
+                    template = Templates.MediaRapidReview.ref,
+                    context = ReviewContext.InFolder(ROOT, ""),
+                    completion = CompletionPolicy.SinglePart,
+                    completesTask = true,
+                    explicitCompletion = false,
+                    now = 2000
+                )
             )
 
             assertEquals(0, rawInt("SELECT isCompleted FROM task_state WHERE taskId = '$missingJpg'"))
@@ -98,7 +119,17 @@ class EligibilityTest {
         assertFalse(row.hasUnviewableAsset)
         assertEquals("alice", row.groupPath)
 
-        dao.submitReview(row.taskId, media(true), Templates.MediaRapidReview.ref, ReviewContext.InFolder(ROOT, ""), 2000)
+        dao.submitReview(
+            taskId = row.taskId,
+            partKey = null,
+            response = media(true),
+            template = Templates.MediaRapidReview.ref,
+            context = ReviewContext.InFolder(ROOT, ""),
+            completion = CompletionPolicy.SinglePart,
+            completesTask = true,
+            explicitCompletion = false,
+            now = 2000
+        )
         assertEquals(1, rawInt("SELECT isCompleted FROM task_state WHERE taskId = '${row.taskId}'"))
         assertEquals(1, rawInt("SELECT COUNT(*) FROM review_events"))
     }
@@ -109,7 +140,17 @@ class EligibilityTest {
         runTest {
             val listId = folderList("a.jpg")
             val taskId = dao.getItems(listId).single().taskId
-            dao.submitReview(taskId, media(true), Templates.MediaRapidReview.ref, ReviewContext.InFolder(ROOT, ""), 2000)
+            dao.submitReview(
+                taskId = taskId,
+                partKey = null,
+                response = media(true),
+                template = Templates.MediaRapidReview.ref,
+                context = ReviewContext.InFolder(ROOT, ""),
+                completion = CompletionPolicy.SinglePart,
+                completesTask = true,
+                explicitCompletion = false,
+                now = 2000
+            )
             assertEquals(1, rawInt("SELECT COUNT(*) FROM review_events"))
 
             dao.markFilesDeleted(ROOT, listOf("a.jpg"))
@@ -122,7 +163,17 @@ class EligibilityTest {
             // A new submission is refused, and the prior judgment is untouched.
             assertEquals(
                 emptyList<Long>(),
-                dao.submitReview(taskId, media(true), Templates.MediaRapidReview.ref, ReviewContext.InFolder(ROOT, ""), 4000)
+                dao.submitReview(
+                    taskId = taskId,
+                    partKey = null,
+                    response = media(true),
+                    template = Templates.MediaRapidReview.ref,
+                    context = ReviewContext.InFolder(ROOT, ""),
+                    completion = CompletionPolicy.SinglePart,
+                    completesTask = true,
+                    explicitCompletion = false,
+                    now = 4000
+                )
             )
             assertEquals(1, rawInt("SELECT COUNT(*) FROM review_events"))
         }
@@ -143,7 +194,17 @@ class EligibilityTest {
 
             assertEquals(
                 emptyList<Long>(),
-                dao.submitReview(item.taskId, media(true), Templates.MediaRapidReview.ref, ReviewContext.InFolder(ROOT, ""), 2000)
+                dao.submitReview(
+                    taskId = item.taskId,
+                    partKey = null,
+                    response = media(true),
+                    template = Templates.MediaRapidReview.ref,
+                    context = ReviewContext.InFolder(ROOT, ""),
+                    completion = CompletionPolicy.SinglePart,
+                    completesTask = true,
+                    explicitCompletion = false,
+                    now = 2000
+                )
             )
             assertEquals(0, rawInt("SELECT COUNT(*) FROM review_events"))
 
@@ -176,8 +237,28 @@ class EligibilityTest {
         assertEquals(1, rawInt("SELECT COUNT(*) FROM task_state WHERE taskId = '${pdf.taskId}'"))
 
         // Both submit and record a judgment.
-        dao.submitReview(image.taskId, media(true), Templates.MediaRapidReview.ref, ReviewContext.InFolder(ROOT, ""), 4000)
-        dao.submitReview(pdf.taskId, media(true), Templates.MediaRapidReview.ref, ReviewContext.InFolder(ROOT, ""), 4000)
+        dao.submitReview(
+            taskId = image.taskId,
+            partKey = null,
+            response = media(true),
+            template = Templates.MediaRapidReview.ref,
+            context = ReviewContext.InFolder(ROOT, ""),
+            completion = CompletionPolicy.SinglePart,
+            completesTask = true,
+            explicitCompletion = false,
+            now = 4000
+        )
+        dao.submitReview(
+            taskId = pdf.taskId,
+            partKey = null,
+            response = media(true),
+            template = Templates.MediaRapidReview.ref,
+            context = ReviewContext.InFolder(ROOT, ""),
+            completion = CompletionPolicy.SinglePart,
+            completesTask = true,
+            explicitCompletion = false,
+            now = 4000
+        )
         assertEquals(2, rawInt("SELECT COUNT(*) FROM review_events"))
         assertEquals(1, rawInt("SELECT isCompleted FROM task_state WHERE taskId = '${image.taskId}'"))
         assertEquals(1, rawInt("SELECT isCompleted FROM task_state WHERE taskId = '${pdf.taskId}'"))

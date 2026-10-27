@@ -81,18 +81,23 @@ class MigrationV31ToV32Test {
 
         assertEquals(CURRENT, version(database))
         val tables = tables()
+        // At the current version the two links this step created have been moved onto parts by
+        // 32 -> 33; the checkpoint, the Resources and the Prompt identity are the same objects.
         for (table in listOf(
-            "task_payloads",
+            "task_part_payloads",
             "package_checkpoints",
-            "package_prompt_tasks",
+            "package_compositions",
+            "package_composition_prompts",
             "package_resources",
-            "task_resources"
+            "task_part_resources"
         )) {
             assertTrue(tables.contains(table))
         }
         assertEquals(
-            listOf("taskId", "kind", "schemaVersion", "payload", "revision", "updatedAt"),
-            columnsOf(database, "task_payloads")
+            listOf(
+                "taskId", "partKey", "kind", "schemaVersion", "payload", "revision", "updatedAt"
+            ),
+            columnsOf(database, "task_part_payloads")
         )
         assertEquals(
             listOf(
@@ -131,7 +136,7 @@ class MigrationV31ToV32Test {
         )
         assertEquals(
             0,
-            count(database, "SELECT COUNT(*) FROM task_payloads")
+            count(database, "SELECT COUNT(*) FROM task_part_payloads")
         )
     }
 
@@ -141,14 +146,18 @@ class MigrationV31ToV32Test {
     fun `a Prompt payload follows its Task`() {
         val database = migrate()
         database.exec(
-            "INSERT INTO task_payloads (taskId, kind, schemaVersion, payload, revision, updatedAt) " +
-                "VALUES ('t-1', 'profile', 1, '{}', 1, 10)"
+            "INSERT INTO task_part_payloads (" +
+                "taskId, partKey, kind, schemaVersion, payload, revision, updatedAt) " +
+                "VALUES ('t-1', 'legacy:t-1', 'profile', 1, '{}', 1, 10)"
         )
-        assertEquals(1, count(database, "SELECT COUNT(*) FROM task_payloads WHERE taskId = 't-1'"))
+        assertEquals(
+            1,
+            count(database, "SELECT COUNT(*) FROM task_part_payloads WHERE taskId = 't-1'")
+        )
 
         database.exec("DELETE FROM tasks WHERE id = 't-1'")
 
-        assertEquals(0, count(database, "SELECT COUNT(*) FROM task_payloads"))
+        assertEquals(0, count(database, "SELECT COUNT(*) FROM task_part_payloads"))
     }
 
     @Test
@@ -161,25 +170,32 @@ class MigrationV31ToV32Test {
                 "'dating/media/alice.jpg', 0, 10)"
         )
         database.exec(
-            "INSERT INTO task_resources (taskId, resourceId, required) VALUES ('t-1', 'r-1', 1)"
+            "INSERT INTO task_part_resources (taskId, partKey, resourceId, required) " +
+                "VALUES ('t-1', 'legacy:t-1', 'r-1', 1)"
         )
-        assertEquals(1, count(database, "SELECT COUNT(*) FROM task_resources"))
+        assertEquals(1, count(database, "SELECT COUNT(*) FROM task_part_resources"))
         assertEquals(
             1,
-            count(database, "SELECT required FROM task_resources WHERE taskId = 't-1'")
+            count(database, "SELECT required FROM task_part_resources WHERE taskId = 't-1'")
         )
 
         database.exec("DELETE FROM tasks WHERE id = 't-1'")
-        assertEquals(0, count(database, "SELECT COUNT(*) FROM task_resources"))
+        assertEquals(0, count(database, "SELECT COUNT(*) FROM task_part_resources"))
 
         database.exec(
             "INSERT INTO tasks (id, createdAt, publicId) VALUES ('t-2', 2, 'task-public-2')"
         )
         database.exec(
-            "INSERT INTO task_resources (taskId, resourceId, required) VALUES ('t-2', 'r-1', 0)"
+            "INSERT INTO task_parts (taskId, partKey, position, origin, promptKey, required, " +
+                "present, availability, updatedAt) " +
+                "VALUES ('t-2', 'legacy:t-2', 0, 'legacy', NULL, 1, 1, NULL, 10)"
+        )
+        database.exec(
+            "INSERT INTO task_part_resources (taskId, partKey, resourceId, required) " +
+                "VALUES ('t-2', 'legacy:t-2', 'r-1', 0)"
         )
         database.exec("DELETE FROM package_resources WHERE id = 'r-1'")
-        assertEquals(0, count(database, "SELECT COUNT(*) FROM task_resources"))
+        assertEquals(0, count(database, "SELECT COUNT(*) FROM task_part_resources"))
     }
 
     @Test
@@ -205,25 +221,26 @@ class MigrationV31ToV32Test {
     }
 
     @Test
-    fun `the Prompt key is unique per Todo and Package`() {
+    fun `the prompt key is unique per Todo and Package`() {
         val database = migrate()
         database.exec(
             "INSERT INTO tasks (id, createdAt, publicId) VALUES ('t-2', 2, 'task-public-2')"
         )
         database.exec(
-            "INSERT INTO package_prompt_tasks (taskId, sourceId, packageKey, promptKey, present) " +
-                "VALUES ('t-1', 'todo-1', 'dating-demo', 'alice', 1)"
+            "INSERT INTO package_compositions (taskId, sourceId, packageKey, compositionKey, " +
+                "present, updatedAt) VALUES ('t-1', 'todo-1', 'dating-demo', 'prompt:alice', 1, 10)"
         )
         try {
             database.exec(
-                "INSERT INTO package_prompt_tasks (taskId, sourceId, packageKey, promptKey, present) " +
-                    "VALUES ('t-2', 'todo-1', 'dating-demo', 'alice', 1)"
+                "INSERT INTO package_compositions (taskId, sourceId, packageKey, compositionKey, " +
+                    "present, updatedAt) " +
+                    "VALUES ('t-2', 'todo-1', 'dating-demo', 'prompt:alice', 1, 10)"
             )
             throw AssertionError("a duplicate Prompt key was accepted")
         } catch (expected: SQLiteConstraintException) {
             // The unique index is the reconciliation identity.
         }
-        assertEquals(1, count(database, "SELECT COUNT(*) FROM package_prompt_tasks"))
+        assertEquals(1, count(database, "SELECT COUNT(*) FROM package_compositions"))
     }
 
     // --- helpers -----------------------------------------------------------------------------------
@@ -238,7 +255,7 @@ class MigrationV31ToV32Test {
 
     private fun migrate(): ListeaDatabase {
         val database = Room.databaseBuilder(context, ListeaDatabase::class.java, V31_DB)
-            .addMigrations(ListeaDatabase.MIGRATION_31_32)
+            .addMigrations(ListeaDatabase.MIGRATION_31_32, ListeaDatabase.MIGRATION_32_33)
             .allowMainThreadQueries()
             .build()
         database.openHelper.writableDatabase
@@ -282,6 +299,6 @@ class MigrationV31ToV32Test {
     private companion object {
         const val V31_DB = "v31-fixture.db"
         const val V31 = 31
-        const val CURRENT = 32
+        const val CURRENT = 33
     }
 }

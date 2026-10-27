@@ -6,6 +6,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.listea.FolderSnapshot
 import com.example.listea.ImporterKind
 import com.example.listea.plan
+import com.example.listea.domain.CompletionPolicy
 import com.example.listea.domain.ListId
 import com.example.listea.domain.ReviewContext
 import com.example.listea.domain.ReviewResponse
@@ -125,11 +126,15 @@ class CreateListFromTasksTest {
             assertEquals(taskA, taskB)
 
             dao.submitReview(
-                taskA,
-                media(true),
-                Templates.MediaRapidReview.ref,
-                ReviewContext.InList(ListId(listA)),
-                2000
+                taskId = taskA,
+                partKey = null,
+                response = media(true),
+                template = Templates.MediaRapidReview.ref,
+                context = ReviewContext.InList(ListId(listA)),
+                completion = CompletionPolicy.SinglePart,
+                completesTask = true,
+                explicitCompletion = false,
+                now = 2000
             )
 
             assertEquals(1, rawInt("SELECT COUNT(*) FROM task_state WHERE taskId = '$taskA'"))
@@ -144,12 +149,23 @@ class CreateListFromTasksTest {
         runTest {
             val listId = dao.createFolderList("Trip", ROOT, "", files("a.jpg"), emptyList(), false,1000)
             val taskId = dao.getItems(listId).single().taskId
-            dao.submitReview(taskId, media(true), Templates.MediaRapidReview.ref, ReviewContext.InFolder(ROOT, ""), 2000)
+            dao.submitReview(
+                taskId = taskId,
+                partKey = null,
+                response = media(true),
+                template = Templates.MediaRapidReview.ref,
+                context = ReviewContext.InFolder(ROOT, ""),
+                completion = CompletionPolicy.SinglePart,
+                completesTask = true,
+                explicitCompletion = false,
+                now = 2000
+            )
 
             dao.deleteList(listId)
 
             assertEquals(0, rawInt("SELECT COUNT(*) FROM list_items WHERE listId = $listId"))
             assertEquals(1, rawInt("SELECT COUNT(*) FROM tasks WHERE id = '$taskId'"))
+            assertEquals(1, rawInt("SELECT COUNT(*) FROM task_parts WHERE taskId = '$taskId'"))
             assertEquals(1, rawInt("SELECT COUNT(*) FROM assets WHERE taskId = '$taskId'"))
             assertEquals(1, rawInt("SELECT COUNT(*) FROM task_state WHERE taskId = '$taskId'"))
             assertEquals(1, rawInt("SELECT COUNT(*) FROM review_events WHERE taskId = '$taskId'"))
