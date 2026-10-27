@@ -83,6 +83,39 @@ class TaskPageStatePartsTest {
     }
 
     @Test
+    fun `the run steps by Asset index only between two Asset pages`() {
+        // [C1, a, b, C2, C3, add-on]. The run is what a swipe moves, so its own step must be
+        // refused exactly where the neighbouring page is not an Asset: stepping by Asset index
+        // there resolves to no page and the swipe would be swallowed. The caller turns those
+        // pages by page index instead.
+        val at = { page: Int -> taskPageState(item(), addOn("Notes"), requestedPage = page) }
+
+        assertTrue(at(1).assetRunSteps(forward = true))    // a → b
+        assertFalse(at(2).assetRunSteps(forward = true))   // b → C2
+        assertFalse(at(4).assetRunSteps(forward = true))   // C3 → add-on
+        assertFalse(at(5).assetRunSteps(forward = true))   // add-on → off the list
+
+        assertTrue(at(2).assetRunSteps(forward = false))   // b → a
+        assertFalse(at(1).assetRunSteps(forward = false))  // a → C1
+        assertFalse(at(5).assetRunSteps(forward = false))  // add-on → C3, not an Asset
+    }
+
+    @Test
+    fun `a media Task's run steps between its files and stops at the end`() {
+        // No Content pages: every neighbour inside the list is an Asset, so a media Task pages
+        // exactly as it did before there were unified pages at all.
+        val item = item(
+            part(key = "local", position = 0, assets = listOf(asset("a.jpg"), asset("b.jpg")))
+        )
+        val at = { page: Int -> taskPageState(item, addOn = null, requestedPage = page) }
+
+        assertTrue(at(0).assetRunSteps(forward = true))
+        assertTrue(at(1).assetRunSteps(forward = false))
+        assertFalse(at(1).assetRunSteps(forward = true))
+        assertFalse(at(0).assetRunSteps(forward = false))
+    }
+
+    @Test
     fun `a request past the last page clamps to the questionnaire`() {
         // A resync can remove a part under a selection; the caller asks with its old page and must
         // land on a page that exists, not on an index into nothing.
