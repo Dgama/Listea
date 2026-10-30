@@ -8,10 +8,19 @@ import com.example.listea.data.FileReviewStateEntity
 import com.example.listea.data.ReviewAsset
 import com.example.listea.data.ReviewItem
 import com.example.listea.data.ReviewPart
+import com.example.listea.data.TaskPartStateEntity
 import com.example.listea.data.TaskStateEntity
 import com.example.listea.data.encodeActionIds
 import com.example.listea.data.taskDecisions
+import com.example.listea.domain.CONDITION_FIELD_CHOICE
+import com.example.listea.domain.FieldAnswer
+import com.example.listea.domain.PartApplicability
+import com.example.listea.domain.PartCondition
+import com.example.listea.domain.PartConditionMatch
+import com.example.listea.domain.ReviewResponse
 import com.example.listea.domain.Templates
+import com.example.listea.domain.ViewerEvent
+import com.example.listea.domain.encode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -250,12 +259,86 @@ class QuickReviewQueueTest {
             listOf(catalogRow("task-a", "a.jpg", "a.jpg", addOn = "addon\t2"))
         )
 
-        val live = withLiveDecisions(queue, listOf(taskState("task-a", completed = true)), emptyList())
+        val live = withLiveDecisions(
+            queue,
+            listOf(taskState("task-a", completed = true)),
+            emptyList(),
+            emptyList()
+        )
 
         assertEquals("addon\t2", live.single().addOn)
     }
 
     // §6.4, §7
+    @Test
+    fun `a live read re-derives a conditional page from the answer that decides it`() {
+        // The v0.8.5 defect a device walk found: the queue resolved applicability once, on entry,
+        // so a round kept showing "waiting for an earlier answer" after the gate had been answered
+        // and never offered the page the answer opened. Applicability is derived from the answer,
+        // not stored, so it has to be re-derived beside the completion tick.
+        val condition = PartCondition(
+            sourcePartKey = "gate",
+            field = CONDITION_FIELD_CHOICE,
+            match = PartConditionMatch.Equals,
+            values = listOf("yes")
+        )
+        val row = catalogRow("task-a", "a.jpg", "a.jpg").copy(
+            parts = listOf(
+                ReviewPart(partKey = "gate", position = 0, payloadKind = "form", payloadSchema = 1),
+                ReviewPart(
+                    partKey = "menu",
+                    position = 1,
+                    payloadKind = "media",
+                    payloadSchema = 1,
+                    condition = condition,
+                    applicability = PartApplicability.Pending
+                )
+            )
+        )
+        val queue = taskReviewQueue(root, listOf(row))
+        assertEquals(PartApplicability.Pending, queue.single().parts[1].applicability)
+
+        fun gate(value: String) = TaskPartStateEntity(
+            taskId = "task-a",
+            partKey = "gate",
+            response = ReviewResponse.StructuredReview(
+                completed = true,
+                fields = listOf(FieldAnswer("choice", "choice.single", value))
+            ).encode(),
+            answeredAt = 1,
+            updatedAt = 1
+        )
+        fun menu(stale: Boolean) = TaskPartStateEntity(
+            taskId = "task-a",
+            partKey = "menu",
+            response = ReviewResponse.PrimaryReview(
+                completed = true,
+                events = listOf(ViewerEvent.Choice("yes", "Yes"))
+            ).encode(),
+            answeredAt = 1,
+            stale = stale,
+            updatedAt = 1
+        )
+
+        val closed = withLiveDecisions(
+            queue,
+            emptyList(),
+            emptyList(),
+            listOf(gate("no"), menu(stale = true))
+        ).single()
+        assertEquals(PartApplicability.Inactive, closed.parts[1].applicability)
+        assertTrue(closed.parts[1].stale)
+
+        val open = withLiveDecisions(
+            queue,
+            emptyList(),
+            emptyList(),
+            listOf(gate("yes"), menu(stale = false))
+        ).single()
+        assertEquals(PartApplicability.Active, open.parts[1].applicability)
+        assertTrue(open.parts[1].stale.not())
+    }
+
     @Test
     fun `a file with no Task is dropped rather than minted`() {
         val files = listOf(file("", "a.jpg"), file("", "b.jpg"))
@@ -359,7 +442,8 @@ class QuickReviewQueueTest {
             states = listOf(taskState("task-a", completed = true)),
             assetStates = listOf(
                 assetState("task-a#0", selections = setOf("a1", Templates.FAVOURITE_BUTTON_ID))
-            )
+            ),
+            partStates = emptyList()
         )
 
         assertTrue(live.single().isCompleted)
@@ -374,8 +458,12 @@ class QuickReviewQueueTest {
         // down as readily as it carried it up.
         assertEquals(
             false,
-            withLiveDecisions(live, listOf(taskState("task-a", completed = false)), emptyList())
-                .single().isCompleted
+            withLiveDecisions(
+                live,
+                listOf(taskState("task-a", completed = false)),
+                emptyList(),
+                emptyList()
+            ).single().isCompleted
         )
     }
 
@@ -410,7 +498,8 @@ class QuickReviewQueueTest {
         val live = withLiveDecisions(
             queue,
             states = emptyList(),
-            assetStates = listOf(assetState("task-a#0", selections = setOf("a1")))
+            assetStates = listOf(assetState("task-a#0", selections = setOf("a1"))),
+            partStates = emptyList()
         ).single()
 
         assertEquals(setOf("a1"), live.assets[0].decisions.selections)
@@ -428,7 +517,12 @@ class QuickReviewQueueTest {
             listOf(catalogRow("task-a", "2026-07-11/a.jpg", "a.jpg", sizeBytes = 10L))
         )
 
-        val live = withLiveDecisions(queue, listOf(taskState("task-a", completed = true)), emptyList())
+        val live = withLiveDecisions(
+            queue,
+            listOf(taskState("task-a", completed = true)),
+            emptyList(),
+            emptyList()
+        )
             .single()
 
         assertEquals(queue.single().title, live.title)
@@ -450,7 +544,12 @@ class QuickReviewQueueTest {
         )
         val queue = taskReviewQueue(root, rows)
 
-        val live = withLiveDecisions(queue, listOf(taskState("task-b", completed = true)), emptyList())
+        val live = withLiveDecisions(
+            queue,
+            listOf(taskState("task-b", completed = true)),
+            emptyList(),
+            emptyList()
+        )
 
         assertEquals(listOf("a.jpg", "b.jpg"), live.map { it.title })
         assertTrue(live[0].isCompleted)
@@ -460,7 +559,12 @@ class QuickReviewQueueTest {
     @Test
     fun `an empty round has nothing to re-read`() {
         assertTrue(
-            withLiveDecisions(emptyList(), listOf(taskState("task-a")), emptyList()).isEmpty()
+            withLiveDecisions(
+                emptyList(),
+                listOf(taskState("task-a")),
+                emptyList(),
+                emptyList()
+            ).isEmpty()
         )
     }
 

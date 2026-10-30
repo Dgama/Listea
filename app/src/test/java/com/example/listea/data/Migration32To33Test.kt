@@ -549,7 +549,10 @@ class Migration32To33Test {
 
     private fun open() {
         database = Room.databaseBuilder(context, ListeaDatabase::class.java, V32_DB)
-            .addMigrations(ListeaDatabase.MIGRATION_32_33)
+            .addMigrations(
+                ListeaDatabase.MIGRATION_32_33,
+                ListeaDatabase.MIGRATION_33_34
+            )
             .allowMainThreadQueries()
             .build()
         database.openHelper.writableDatabase

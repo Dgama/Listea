@@ -128,6 +128,27 @@ class PartRevisabilityTest {
     }
 
     @Test
+    fun `a set-aside answer permits one reconfirmation under a one-answer judgment`() =
+        runTest(dispatcher) {
+            val taskId = importedTwoPartTask()
+            val locked = onceOnly()
+
+            assertTrue(submit(taskId, locked, "q1", like))
+            // One answer for good: there is no second one while the first counts.
+            assertFalse(submit(taskId, locked, "q1", pass))
+
+            // The branch closed and reopened, so the answer was kept but set aside.
+            markStale(taskId, "q1")
+
+            // A set-aside answer is not one the one-shot rule protects: the branch asks again.
+            assertTrue(submit(taskId, locked, "q1", pass))
+            // And once reconfirmed it counts again, so a second one is refused as before.
+            assertFalse(submit(taskId, locked, "q1", like))
+
+            assertEquals(pass, storedChoice(taskId, "q1"))
+        }
+
+    @Test
     fun `the refused answer leaves both the event history and the current state untouched`() =
         runTest(dispatcher) {
             val taskId = importedTwoPartTask()
@@ -244,7 +265,10 @@ class PartRevisabilityTest {
                 promptKey = key,
                 payloadKind = payload.kind,
                 payloadSchema = payload.schemaVersion,
-                payloadRevision = payload.revision
+                payloadRevision = payload.revision,
+                // The queue a surface draws from carries the flag; a harness that left it out
+                // would test every part as though its answer still counted.
+                stale = dao.partStates(taskId).firstOrNull { it.partKey == key }?.stale ?: false
             )
         }
         return ReviewItem(
@@ -290,6 +314,13 @@ class PartRevisabilityTest {
         TemplateStore(database),
         AddOnStore(database)
     )
+
+    /** The flag `setAnsweredPartsAside` writes when a branch closes; the state itself is kept. */
+    private fun markStale(taskId: String, partKey: String) {
+        database.openHelper.writableDatabase.execSQL(
+            "UPDATE task_part_state SET stale = 1 WHERE taskId = '$taskId' AND partKey = '$partKey'"
+        )
+    }
 
     private fun rawInt(sql: String): Int =
         database.openHelper.writableDatabase.query(sql).use { cursor ->

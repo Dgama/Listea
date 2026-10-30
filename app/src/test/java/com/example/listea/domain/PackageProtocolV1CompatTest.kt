@@ -104,10 +104,11 @@ class PackageProtocolV1CompatTest {
     }
 
     @Test
-    fun `the newest protocol this build writes is v2`() {
-        assertEquals("listea.package/2", PackageProtocol.PROTOCOL)
+    fun `the newest protocol this build writes is v3`() {
+        assertEquals("listea.package/3", PackageProtocol.PROTOCOL)
         assertEquals("listea.package/1", PackageProtocol.PROTOCOL_V1)
         assertEquals("listea.package/2", PackageProtocol.PROTOCOL_V2)
+        assertEquals("listea.package/3", PackageProtocol.PROTOCOL_V3)
     }
 
     @Test

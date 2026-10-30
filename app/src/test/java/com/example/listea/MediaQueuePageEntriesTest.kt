@@ -4,6 +4,7 @@ import com.example.listea.data.ReviewAsset
 import com.example.listea.data.ReviewPart
 import com.example.listea.domain.AddOnId
 import com.example.listea.domain.AddOnVersionRef
+import com.example.listea.domain.PartApplicability
 import com.example.listea.domain.StoredAddOnVersion
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -95,11 +96,64 @@ class MediaQueuePageEntriesTest {
         )
     }
 
+    @Test
+    fun `a page waiting on an earlier answer keeps its place and says so beside its part`() {
+        // A masked page is still a page the walk passes: the list is a guide, not a filter. Its
+        // row says why, and the part boundary it already carried stays in front of that.
+        val entries = reviewPageEntries(
+            parts = listOf(
+                part(listOf(asset("photo-1.jpg")), key = "p1", position = 0, payloadKind = "profile"),
+                part(
+                    listOf(asset("photo-2.jpg")),
+                    key = "p2",
+                    position = 1,
+                    payloadKind = "profile",
+                    applicability = PartApplicability.Pending
+                )
+            ),
+            addOn = null
+        )
+
+        assertEquals(
+            listOf("Question 1 of 2", "photo-1.jpg", "Question 2 of 2", "photo-2.jpg"),
+            entries.map { it.label }
+        )
+        assertEquals(
+            listOf(
+                "Part 1 of 2",
+                "Part 1 of 2",
+                "Part 2 of 2 · Waiting for an earlier answer",
+                "Part 2 of 2 · Waiting for an earlier answer"
+            ),
+            entries.map { it.detail }
+        )
+    }
+
+    @Test
+    fun `a page the branch does not need says so and the one-part Task gains no boundary`() {
+        val entries = reviewPageEntries(
+            parts = listOf(
+                part(
+                    listOf(asset("photo-1.jpg")),
+                    key = "menu",
+                    position = 0,
+                    payloadKind = "profile",
+                    applicability = PartApplicability.Inactive
+                )
+            ),
+            addOn = null
+        )
+
+        assertEquals(listOf("Question", "photo-1.jpg"), entries.map { it.label })
+        assertEquals(listOf("Not needed", "Not needed"), entries.map { it.detail })
+    }
+
     private fun part(
         assets: List<ReviewAsset>,
         key: String = "p1",
         position: Int = 0,
-        payloadKind: String? = null
+        payloadKind: String? = null,
+        applicability: PartApplicability = PartApplicability.Active
     ) = ReviewPart(
         partKey = key,
         position = position,
@@ -107,7 +161,8 @@ class MediaQueuePageEntriesTest {
         payloadKind = payloadKind,
         payloadSchema = payloadKind?.let { 1 },
         payloadRevision = payloadKind?.let { 1 },
-        assets = assets
+        assets = assets,
+        applicability = applicability
     )
 
     private fun asset(name: String) = ReviewAsset(

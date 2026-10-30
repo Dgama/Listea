@@ -254,7 +254,8 @@ class MigrationV30ToV31Test {
         val database = Room.databaseBuilder(context, ListeaDatabase::class.java, V30_DB)
             .addMigrations(ListeaDatabase.MIGRATION_30_31,
 ListeaDatabase.MIGRATION_31_32,
-ListeaDatabase.MIGRATION_32_33
+ListeaDatabase.MIGRATION_32_33,
+ListeaDatabase.MIGRATION_33_34
 )
             .allowMainThreadQueries()
             .build()
@@ -305,7 +306,7 @@ ListeaDatabase.MIGRATION_32_33
     private companion object {
         const val V30_DB = "v30-fixture.db"
         const val V30 = 30
-        const val CURRENT = 33
+        const val CURRENT = 34
 
         const val REVIEW_ONE = "r-1"
         const val REVIEW_TWO = "r-2"

@@ -93,6 +93,11 @@ class DissolvedPartsTest {
             assertEquals(listOf("q1", "q2", "q3"), recorded?.map { it.partKey })
             assertEquals(answer.encode(), recorded?.single { it.partKey == "q2" }?.response)
             assertEquals("", recorded?.single { it.partKey == "q1" }?.response)
+            // Unconditional parts still record the version-2 fields, at their era's values: a
+            // snapshot that is a faithful account of *this* composition rather than of v0.8.5's.
+            assertEquals(null, recorded?.single { it.partKey == "q2" }?.condition)
+            assertEquals(null, recorded?.single { it.partKey == "q2" }?.partJudgment)
+            assertEquals(false, recorded?.single { it.partKey == "q2" }?.stale)
 
             val second = dao.registerSource(
                 rootUri = ROOT,

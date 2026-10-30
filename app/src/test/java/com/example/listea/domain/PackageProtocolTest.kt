@@ -165,9 +165,10 @@ class PackageProtocolTest {
 
     @Test
     fun `an unknown protocol rejects the whole package`() {
-        // v2 is a known protocol since 0.8.4; only a version the build cannot read is rejected.
+        // v2 and v3 are known protocols since 0.8.4 and 0.8.5; only a version beyond the build is
+        // rejected.
         val plan = PackageProtocol.plan(
-            snapshot(manifest = manifest().replace("listea.package/1", "listea.package/3"))
+            snapshot(manifest = manifest().replace("listea.package/1", "listea.package/4"))
         )
         assertFalse(plan.accepted)
         assertEquals(listOf("protocol-unknown"), plan.codes(DiagnosticScope.PACKAGE))
