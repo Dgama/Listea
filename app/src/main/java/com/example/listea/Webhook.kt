@@ -17,6 +17,8 @@ import java.net.UnknownHostException
 import com.example.listea.domain.AddOnAnswerValue
 import com.example.listea.domain.ExportChoice
 import com.example.listea.domain.ExportKind
+import com.example.listea.domain.PartCondition
+import com.example.listea.domain.PartConditionMatch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -502,21 +504,26 @@ internal fun buildWebhookPayload(mapping: ExportMapping): String =
     describePayload(mapping).toString()
 
 /**
- * The version this body claims: 6 when any Task has more than one part or a structured part
- * result, else 5 when any Task is a structured Prompt, else 4 when any Task carries answers, else
- * 3 when any Asset carries a mark, else 2.
+ * The version this body claims: 7 when any part carries a condition or its own judgment, else 6
+ * when any Task has more than one part or a structured part result, else 5 when any Task is a
+ * structured Prompt, else 4 when any Task carries answers, else 3 when any Asset carries a mark,
+ * else 2.
  *
  * Each number introduces one key that a receiver can rely on being present; nothing is claimed that
  * the body does not contain. Up to 5 the order is supersets all the way down; 6 is a shape change
  * rather than a superset — a v6 Task carries `parts[]` instead of `content`/`result` — which is why
- * it is decided first and why a v5 body's bytes are never touched to make room for it.
+ * it is decided first and why a v5 body's bytes are never touched to make room for it. 7 stays a
+ * superset of 6's `parts[]`: it adds four keys to each part and changes nothing else, so a v6
+ * receiver that refuses the version line loses nothing it could read anyway.
  */
 internal fun exportVersion(
     carriesMarks: Boolean,
     carriesAddOn: Boolean,
     carriesContent: Boolean = false,
-    carriesParts: Boolean = false
+    carriesParts: Boolean = false,
+    carriesConditional: Boolean = false
 ): Int = when {
+    carriesConditional -> EXPORT_VERSION_CONDITIONAL
     carriesParts -> EXPORT_VERSION_PARTS
     carriesContent -> EXPORT_VERSION_CONTENT
     carriesAddOn -> EXPORT_VERSION_ADD_ON
@@ -544,7 +551,7 @@ private fun describePayload(mapping: ExportMapping): JSONObject = JSONObject()
                 // document, and a receiver branching on it must see one Task grammar throughout.
                 put(
                     if (mapping.version >= EXPORT_VERSION_PARTS) {
-                        taskPartsJson(it)
+                        taskPartsJson(it, mapping.version)
                     } else {
                         taskJson(it)
                     }
@@ -615,34 +622,77 @@ private fun taskJson(task: ExportTaskView): JSONObject {
  * The Add-on is unchanged and stays after `parts`, because it is one optional questionnaire about
  * the whole Task and not one of its decisions.
  */
-private fun taskPartsJson(task: ExportTaskView): JSONObject {
+private fun taskPartsJson(task: ExportTaskView, version: Int): JSONObject {
     val json = JSONObject()
         .put("id", task.publicId)
         .put("title", task.title)
         .put("completed", task.isCompleted)
         .put("templates", templatesJson(task))
-        .put("parts", JSONArray().apply { task.parts.forEach { put(partJson(it)) } })
+        .put("parts", JSONArray().apply { task.parts.forEach { put(partJson(it, version)) } })
     task.addOn?.let { json.put("addOn", addOnJson(it)) }
     return json
 }
 
 /**
- * One TaskPart as a version-6 body sees it.
+ * One TaskPart as the body sees it.
  *
  * Key order is the contract, pinned by the export tests: identity (`partKey`), provenance
  * (`promptKey`, `kind`, `schema`, `revision`), the composition's current claim (`required`), the
  * answer (`result`), and the material (`assets`). The four provenance keys are `null` together for
  * a degenerate part — the one a local file or folder import creates, whose decision is its Assets.
+ *
+ * A version-7 body inserts four keys between `required` and `result`, because they say **whether
+ * the part was asked at all** and that belongs beside what was asked of it: `judgment` (the part's
+ * own answer sheet, or null when the Task's applies), `when` (the branch it sits on, or null), and
+ * `applicability` with `stale` (whether the branch asks for it now, and whether the answer beside it
+ * was set aside). All four are present on every part, `null`/`false` included: the version line
+ * promises them, and a receiver that branches on the version must not have to branch on absence.
  */
-private fun partJson(part: ExportPartView): JSONObject = JSONObject()
-    .put("partKey", part.partKey)
-    .put("promptKey", part.promptKey ?: JSONObject.NULL)
-    .put("kind", part.kind ?: JSONObject.NULL)
-    .put("schema", part.schema ?: JSONObject.NULL)
-    .put("revision", part.revision ?: JSONObject.NULL)
-    .put("required", part.required)
-    .put("result", partResultJson(part.result))
-    .put("assets", assetsJson(part.assets))
+private fun partJson(part: ExportPartView, version: Int): JSONObject {
+    val json = JSONObject()
+        .put("partKey", part.partKey)
+        .put("promptKey", part.promptKey ?: JSONObject.NULL)
+        .put("kind", part.kind ?: JSONObject.NULL)
+        .put("schema", part.schema ?: JSONObject.NULL)
+        .put("revision", part.revision ?: JSONObject.NULL)
+        .put("required", part.required)
+    if (version >= EXPORT_VERSION_CONDITIONAL) {
+        json.put(
+            "judgment",
+            part.judgment?.let { judgment ->
+                JSONObject()
+                    .put("id", judgment.id)
+                    .put("version", judgment.version)
+            } ?: JSONObject.NULL
+        )
+            .put("when", part.condition?.let(::conditionJson) ?: JSONObject.NULL)
+            .put("applicability", part.applicability.wire)
+            .put("stale", part.stale)
+    }
+    return json
+        .put("result", partResultJson(part.result))
+        .put("assets", assetsJson(part.assets))
+}
+
+/**
+ * A part's condition as the receiver sees it.
+ *
+ * The same object the Package and the database store — `prompt`, `field`, then `equals` or `in` —
+ * because a condition that reads one way in a Package and another way in an export would be two
+ * grammars for one fact. [PartCondition] holds exactly one of the two tests by construction.
+ */
+private fun conditionJson(condition: PartCondition): JSONObject = JSONObject()
+    .put("prompt", condition.sourcePartKey)
+    .put("field", condition.field)
+    .apply {
+        when (condition.match) {
+            PartConditionMatch.Equals -> put("equals", condition.values.first())
+            PartConditionMatch.In -> put(
+                "in",
+                JSONArray().apply { condition.values.forEach { put(it) } }
+            )
+        }
+    }
 
 /**
  * A part's answer as the receiver sees it: `null` pending, `""` answered-empty, or an object.

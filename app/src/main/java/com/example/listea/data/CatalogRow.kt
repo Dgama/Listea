@@ -94,7 +94,22 @@ data class TaskAssetControls(
     val promptKey: String? = null,
     val payloadKind: String? = null,
     val payloadSchema: Int? = null,
-    val payloadRevision: Int? = null
+    val payloadRevision: Int? = null,
+
+    /**
+     * The part's branch and judgment, raw as stored, plus the answer the branch is judged against.
+     *
+     * The same columns [ReviewPart] exposes decoded, kept as text here for the same reason
+     * [taskReview] is: this row is read beside the membership it describes, and the builders that
+     * turn it into a `ReviewPart` are the one place that decides what an unreadable text means.
+     * [answeredAt] and [stale] come from the part's state row; a part with no state row yet reads
+     * as unanswered and not stale.
+     */
+    val condition: String? = null,
+    val partJudgment: String? = null,
+    val response: String? = null,
+    val answeredAt: Long? = null,
+    val stale: Boolean = false
 )
 
 /**

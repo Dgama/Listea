@@ -52,6 +52,7 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import com.example.listea.data.ReviewItem
 import com.example.listea.data.ReviewPart
+import com.example.listea.domain.PartApplicability
 import com.example.listea.domain.StoredAddOnVersion
 
 /**
@@ -484,6 +485,11 @@ internal fun reviewQueueEntries(
  * The add-on page follows the parts because it is a page of the Task like any other, but it is not
  * one of the folder's files, and a questionnaire sitting in the list under a file's name would
  * read as something the source holds.
+ *
+ * **A masked page keeps its place, its name and its count.** Its second line says why it is masked
+ * — a branch that is not needed, or one still waiting for an earlier answer — beside the part
+ * boundary when there is one. The list is a guide to where the queue goes, not a filter of it: a
+ * page the person cannot answer yet is still a page they will walk past.
  */
 internal fun reviewPageEntries(
     parts: List<ReviewPart>,
@@ -493,11 +499,10 @@ internal fun reviewPageEntries(
     val contentCount = present.count { it.hasContent }
     var contentIndex = 0
     for ((partIndex, part) in present.withIndex()) {
-        val partBoundary = if (present.size > 1) {
-            "Part ${partIndex + 1} of ${present.size}"
-        } else {
-            null
-        }
+        val detail = listOfNotNull(
+            if (present.size > 1) "Part ${partIndex + 1} of ${present.size}" else null,
+            part.maskNote()
+        ).joinToString(" · ").takeIf { it.isNotEmpty() }
         if (part.hasContent) {
             contentIndex++
             add(
@@ -507,13 +512,20 @@ internal fun reviewPageEntries(
                     } else {
                         "Question"
                     },
-                    detail = partBoundary
+                    detail = detail
                 )
             )
         }
-        part.assets.forEach { add(MediaQueueEntry(it.name, detail = partBoundary)) }
+        part.assets.forEach { add(MediaQueueEntry(it.name, detail = detail)) }
     }
     addOn?.let { add(MediaQueueEntry("add-on ${it.name}")) }
+}
+
+/** Why a page is masked, in the taker's words, or null when it is not masked. */
+private fun ReviewPart.maskNote(): String? = when (applicability) {
+    PartApplicability.Active -> null
+    PartApplicability.Pending -> "Waiting for an earlier answer"
+    PartApplicability.Inactive -> "Not needed"
 }
 
 private val QueuePopupMaxWidth = 280.dp

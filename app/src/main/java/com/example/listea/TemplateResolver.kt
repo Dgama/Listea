@@ -338,7 +338,7 @@ class TemplateResolver(
      * timing. A user's own review gets no such fallback: its definition is only ever the row.
      */
     fun reviewForRef(ref: TemplateVersionRef): StoredTemplateVersion? =
-        (stored(ref) ?: Templates.StoredTaskReviews.firstOrNull { it.ref == ref })
+        (stored(ref) ?: Templates.BuiltinJudgments.firstOrNull { it.ref == ref })
             ?.takeIf { it.kind == TemplateKind.TASK_REVIEW && it.taskReview != null }
 
     companion object {

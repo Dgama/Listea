@@ -1,6 +1,7 @@
 package com.example.listea
 
 import com.example.listea.domain.TaskReviewDefinition
+import com.example.listea.domain.Templates
 import com.example.listea.domain.ViewerEventType
 import com.example.listea.domain.Viewers
 
@@ -36,4 +37,22 @@ internal fun reviewCatchLine(definition: TaskReviewDefinition): String =
             "Headless template · records the form's answer"
         else ->
             "Headless template · records the Task's file decisions"
+    }
+
+/**
+ * The same line for a reference that may name one of the internal judgments.
+ *
+ * `builtin.media.part` and `builtin.structured.mixed` are code-only and never reach the picker, so
+ * they are absent from the seeded rows and from every list a person chooses from. If one is ever
+ * shown — a Package's report naming what a part is judged by, or a screen reading a stored part —
+ * this says what it is rather than describing it as the rapid review, which has the same empty
+ * accept set but a different job.
+ */
+internal fun reviewCatchLine(templateId: String, definition: TaskReviewDefinition): String =
+    when (templateId) {
+        Templates.MixedStructured.ref.templateId.value ->
+            "Headless template · records each part's answer"
+        Templates.MediaPart.ref.templateId.value ->
+            "Headless template · records the files"
+        else -> reviewCatchLine(definition)
     }

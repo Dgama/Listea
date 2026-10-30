@@ -71,7 +71,6 @@ data class FieldAnswer(
 
 private const val MAX_FORM_FIELDS = 20
 private const val MAX_FORM_LABEL = 200
-private const val MAX_CONDITION_VALUES = 50
 
 /** The text a `text` field may hold; the protocol's option-label limit is the nearest bound. */
 const val MAX_FORM_TEXT = 1_000

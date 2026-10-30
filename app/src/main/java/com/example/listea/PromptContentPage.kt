@@ -41,6 +41,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import com.example.listea.data.TaskResourceView
 import com.example.listea.domain.FormField
 import com.example.listea.domain.FormPrompt
+import com.example.listea.domain.MediaPrompt
 import com.example.listea.domain.ProfilePrompt
 import com.example.listea.domain.PromptContent
 import com.example.listea.domain.PromptOption
@@ -127,6 +128,49 @@ internal fun PromptContentPage(
                 onAnswer = onAnswer,
                 notice = notice,
                 modifier = modifier
+            )
+        }
+
+        is MediaPrompt -> MediaPromptPage(
+            prompt = content,
+            notice = notice,
+            modifier = modifier
+        )
+    }
+}
+
+/**
+ * A `media`/`1` Prompt drawn as its stem.
+ *
+ * The part's material is on its Asset pages — a PDF, images, a video — so the Content page is a
+ * heading, not a viewer. It has no options and no control of its own: the part's judgment draws
+ * Done in the frame. Reading it is the whole interaction, which is why there is no `interactive`
+ * parameter to pass.
+ */
+@Composable
+internal fun MediaPromptPage(
+    prompt: MediaPrompt,
+    modifier: Modifier = Modifier,
+    notice: String? = null
+) {
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = ListeaDimens.PagePadding, vertical = ListeaDimens.PagePadding),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text(
+            text = prompt.stem,
+            color = Color.White,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold
+        )
+        if (notice != null) {
+            Text(
+                text = notice,
+                color = Color.White.copy(alpha = 0.7f),
+                style = MaterialTheme.typography.bodyMedium
             )
         }
     }

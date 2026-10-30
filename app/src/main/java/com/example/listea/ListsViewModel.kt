@@ -61,6 +61,7 @@ import com.example.listea.data.ReviewAsset
 import com.example.listea.data.ReviewItem
 import com.example.listea.data.ReviewPart
 import com.example.listea.data.ScannedFile
+import com.example.listea.data.partBranch
 import com.example.listea.data.SharedFileState
 import com.example.listea.data.SourceEntity
 import com.example.listea.data.SourceSummary
@@ -86,15 +87,18 @@ import com.example.listea.domain.AddOnAnswerValue
 import com.example.listea.domain.AddOnQuestion
 import com.example.listea.domain.AddOnVersionRef
 import com.example.listea.domain.addOnAnswerFits
+import com.example.listea.domain.ApplicabilityPart
 import com.example.listea.domain.AssetKind
 import com.example.listea.domain.AssetMark
 import com.example.listea.domain.ExportChoice
 import com.example.listea.domain.MarkKind
+import com.example.listea.domain.PartApplicability
 import com.example.listea.domain.QuoteAnchor
 import com.example.listea.domain.ExportKind
 import com.example.listea.domain.ReviewContext
 import com.example.listea.domain.decodeExportChoice
 import com.example.listea.domain.encodeExportChoice
+import com.example.listea.domain.evaluateApplicability
 import com.example.listea.domain.ReviewResponse
 import com.example.listea.domain.completesTask
 import com.example.listea.domain.parse
@@ -274,7 +278,17 @@ sealed interface ImportFolderRequest {
          * entirely, which is the honest answer for a v1 Package, a folder of files, or a v2 Package
          * whose Sections list is empty.
          */
-        val compositionOffered: Boolean = false
+        val compositionOffered: Boolean = false,
+
+        /**
+         * Whether any Package under this folder declares a v3 condition.
+         *
+         * The composition rule that only changes Tasks when a Package has Sections changes them
+         * *materially* when a question depends on an earlier one: the two must share a Task. This
+         * flag is what lets the dialog say that before the run, and what seeds the default to one
+         * Task per Section. It is not the run's answer — [ImportOptions.composition] is.
+         */
+        val conditionsPresent: Boolean = false
     ) : ImportFolderRequest
 
     /** The run is writing. */
@@ -1066,7 +1080,32 @@ class ListsViewModel @JvmOverloads constructor(
                             asset.toReviewAsset(stateByAsset[asset.id] ?: AssetDecisions())
 
                         val assetsByPart = taskAssets.groupBy { it.partKey }
+                        // The same two steps `ListsDao.resolveParts` takes: decode each part's
+                        // branch once, then derive applicability for the Task in composition order.
+                        val branches = rows.associate { row ->
+                            row.partKey to partBranch(
+                                row.availability,
+                                row.condition,
+                                row.partJudgment
+                            )
+                        }
+                        val applicability = evaluateApplicability(
+                            rows.map { row ->
+                                val branch = branches.getValue(row.partKey)
+                                ApplicabilityPart(
+                                    partKey = row.partKey,
+                                    position = row.position,
+                                    required = row.required,
+                                    present = row.present,
+                                    availability = branch.availability,
+                                    condition = branch.condition,
+                                    kind = row.payloadKind,
+                                    response = row.response
+                                )
+                            }
+                        )
                         val parts = rows.map { row ->
+                            val branch = branches.getValue(row.partKey)
                             ReviewPart(
                                 partKey = row.partKey,
                                 position = row.position,
@@ -1076,8 +1115,13 @@ class ListsViewModel @JvmOverloads constructor(
                                 payloadRevision = row.payloadRevision,
                                 required = row.required,
                                 present = row.present,
-                                availability = row.availability,
-                                assets = assetsByPart[row.partKey].orEmpty().map(::reviewAsset)
+                                availability = branch.availability,
+                                assets = assetsByPart[row.partKey].orEmpty().map(::reviewAsset),
+                                condition = branch.condition,
+                                judgment = branch.judgment,
+                                applicability = applicability[row.partKey]
+                                    ?: PartApplicability.Active,
+                                stale = row.stale
                             )
                         }
                         // See `ListsDao.resolveParts`: an Asset whose part row is gone still
@@ -1254,9 +1298,12 @@ class ListsViewModel @JvmOverloads constructor(
     private fun liveDecisions(queue: List<ReviewItem>): Flow<FolderReview> =
         combine(
             dao.observeTaskStates(queue.map { it.taskId }),
-            dao.observeTaskAssetStates(queue.map { it.taskId })
-        ) { states, assetStates ->
-            FolderReview.Ready(items = withLiveDecisions(queue, states, assetStates))
+            dao.observeTaskAssetStates(queue.map { it.taskId }),
+            dao.observeTaskPartStates(queue.map { it.taskId })
+        ) { states, assetStates, partStates ->
+            FolderReview.Ready(
+                items = withLiveDecisions(queue, states, assetStates, partStates)
+            )
         }
 
     /**
@@ -1771,6 +1818,15 @@ class ListsViewModel @JvmOverloads constructor(
         // viewer event — there is no point or option a card reported — so the answer travels
         // beside [events] and becomes a StructuredReview rather than an invented event list.
         fields: List<FieldAnswer> = emptyList(),
+        /**
+         * The Task-level container: the judgment whose completion policy governs the Task.
+         *
+         * It is [review] unless the page being committed carries its own judgment. A mixed Task's
+         * part answers under that part's sheet while the Task completes under the container's
+         * policy, and keeping the two apart is what lets a page record *what was answered* while
+         * the Task records *whether it is done*. Homogeneous Tasks pass the same version twice.
+         */
+        taskReview: StoredTemplateVersion? = review,
         // True when this call is the completion control itself: a person saying the Task is done,
         // as opposed to answering one of its parts. Completion provenance is written down so a
         // later part answer cannot silently retract the sign-off.
@@ -1788,11 +1844,13 @@ class ListsViewModel @JvmOverloads constructor(
         // revision is the one the review opened, that every required Resource is present, and that
         // a non-revisable template has not already committed. A refusal writes neither an event nor
         // a state change, and [onResult] is how the surface learns not to advance.
-        val definition = review?.taskReview
-        if (!submissionAccepted(item, definition, events, partKey, fields)) {
+        val pageDefinition = review?.taskReview
+        val taskDefinition = taskReview?.taskReview
+        if (!submissionAccepted(item, pageDefinition, taskDefinition, events, partKey, fields)) {
             onResult(false)
             return@launchDb
         }
+        val definition = pageDefinition
         val structured = fields.isNotEmpty() || (
             partKey != null &&
                 item.parts.firstOrNull { it.partKey == partKey }?.payloadKind == Viewers.Form.kind
@@ -1816,13 +1874,22 @@ class ListsViewModel @JvmOverloads constructor(
                     selections = item.taskDecisions.selections
                 )
         }
-        val completion = definition?.completion ?: CompletionPolicy.SinglePart
+        val completion = taskDefinition?.completion ?: CompletionPolicy.SinglePart
         // SinglePart keeps the rule every pre-v0.8.4 definition stated: the *response* answers
-        // whether the Task is complete. A part policy is the template's own flag, and the DAO
-        // computes the rest from the parts it just wrote.
+        // whether the Task is complete. A part that carries its own judgment is the exception —
+        // that judgment's own `completesTask` is what the part answers — and a part policy is the
+        // template's own flag, with the DAO computing the rest from the parts it just wrote.
+        val pageOwnJudgment = partKey != null && review != null && taskReview != null &&
+            review.ref != taskReview.ref
         val completesTask = when (completion) {
-            CompletionPolicy.SinglePart -> response.completesTask
-            else -> definition?.completesTask == true
+            CompletionPolicy.SinglePart ->
+                if (pageOwnJudgment) {
+                    pageDefinition?.completesTask == true
+                } else {
+                    response.completesTask
+                }
+
+            else -> (pageDefinition ?: taskDefinition)?.completesTask == true
         }
         val ref = review?.ref ?: terms.template
         val (transitioned, scopes) = writeOrder.withLock {
@@ -1851,25 +1918,44 @@ class ListsViewModel @JvmOverloads constructor(
      * content is stored data rather than a file: the body can be unreadable, the revision can have
      * moved since the review opened, and the option a viewer reported can be one the Prompt no
      * longer declares.
+     *
+     * Since v0.8.5 the named part must also be live: present, available and on an open branch. A
+     * masked page has no control, so a submission addressing one is a surface drawing a decision
+     * the branch no longer asks for. A freeform media part is the new answer shape — its Done
+     * carries no event and no field, and its judgment must be the media Viewer's own.
      */
     private suspend fun submissionAccepted(
         item: ReviewItem,
-        definition: TaskReviewDefinition?,
+        pageDefinition: TaskReviewDefinition?,
+        taskDefinition: TaskReviewDefinition?,
         events: List<ViewerEvent>,
         partKey: String?,
         fields: List<FieldAnswer>
     ): Boolean {
+        val part = partKey?.let { key -> item.parts.firstOrNull { it.partKey == key } }
+
+        // A masked page has no control, so a submission naming it is a surface that drew one it
+        // should not have. The write boundary refuses it here rather than trusting the drawing: an
+        // answer to a question the branch does not ask is a judgment about nothing.
+        if (part != null) {
+            if (part.availability != null) return false
+            if (part.applicability != PartApplicability.Active) return false
+        }
+
         // No part named: the judgment is the Task's own. A media Task keeps exactly the rule it
         // had; a Prompt Task submitted this way (the completion control, a whole-Task template) has
         // no Prompt facts to check against, and the event rule is the one that applies.
-        val part = partKey?.let { key -> item.parts.firstOrNull { it.partKey == key } }
         if (part == null || part.payloadKind == null) {
-            return !(definition != null && definition.accepts.isNotEmpty() && events.isEmpty())
+            return !(
+                taskDefinition != null &&
+                    taskDefinition.accepts.isNotEmpty() &&
+                    events.isEmpty()
+                )
         }
 
         val payload = dao.partPayload(item.taskId, part.partKey) ?: return false
         val capability = Viewers.forPayload(payload.kind, payload.schemaVersion) ?: return false
-        val review = definition ?: return false
+        val review = pageDefinition ?: return false
 
         // The body moved under an open review: the option list on screen is not this body's.
         if (part.payloadRevision != null && payload.revision != part.payloadRevision) return false
@@ -1881,13 +1967,23 @@ class ListsViewModel @JvmOverloads constructor(
             return false
         }
 
+        if (ResponseContract.FREEFORM in capability.responses) {
+            // A media part's answer is answered-empty: the files, their marks and their actions are
+            // the record, and the Done control invents no event or field on top. The judgment must
+            // still be the one this Viewer is drawn by — a part judgment written for another
+            // Viewer is not a sheet this page can be answered on.
+            if (review.viewer != capability.ref) return false
+            if (events.isNotEmpty() || fields.isNotEmpty()) return false
+            return partIsRevisableOrUnanswered(item.taskId, part.partKey, review, part.stale)
+        }
+
         if (ResponseContract.STRUCTURED in capability.responses) {
             // A structured answer is governed by the Viewer's own template, not by whichever
             // event template happened to be attached: the contract and the renderer are one
             // compatibility statement.
             if (review.viewer != capability.ref) return false
             if (!structuredSubmissionAccepted(payload, capability, fields)) return false
-            return partIsRevisableOrUnanswered(item.taskId, part.partKey, review)
+            return partIsRevisableOrUnanswered(item.taskId, part.partKey, review, part.stale)
         }
 
         if (review.accepts.isEmpty()) return false
@@ -1916,7 +2012,7 @@ class ListsViewModel @JvmOverloads constructor(
         val content = capability.parse(payload.payload) ?: return false
         if (content.options.none { it.id == choice.optionId && it.label == choice.label }) return false
 
-        return partIsRevisableOrUnanswered(item.taskId, part.partKey, review)
+        return partIsRevisableOrUnanswered(item.taskId, part.partKey, review, part.stale)
     }
 
     /**
@@ -1967,9 +2063,14 @@ class ListsViewModel @JvmOverloads constructor(
     private suspend fun partIsRevisableOrUnanswered(
         taskId: String,
         partKey: String,
-        review: TaskReviewDefinition
+        review: TaskReviewDefinition,
+        stale: Boolean = false
     ): Boolean {
-        if (review.revisable) return true
+        // A set-aside answer is not an answer the template's one-shot rule protects: the branch
+        // closed, the answer stopped counting, and reopening it asks the person again. One fresh
+        // commit is allowed, which is exactly what makes a stale part answerable under a
+        // non-revisable judgment.
+        if (review.revisable || stale) return true
         val recorded = dao.partState(taskId, partKey)
             ?.response
             ?.takeIf { it.isNotEmpty() }
@@ -2141,12 +2242,24 @@ class ListsViewModel @JvmOverloads constructor(
             .firstOrNull { it.ref.templateId == Templates.MediaRapidReview.ref.templateId }
             ?.ref
             ?: Templates.MediaRapidReview.ref
+        // A condition needs its source's answer in the same Task, so a folder that declares one
+        // opens on the composition that can keep them together. Choosing one Task per question is
+        // still on offer; this is a default, not a refusal.
+        val conditionsPresent = folderNeedsSectionComposition(
+            context = getApplication(),
+            snapshot = tree
+        )
         val options = ImportOptions(
             importer = ImporterKind.FILE_AS_TASK,
             displayName = label,
             // Seeded from Settings rather than from any Todo, because there is no Todo yet: this is
             // the answer the user usually gives, offered here so they do not have to give it again.
             contentPolicy = settings.value.defaultContentPolicy,
+            composition = if (conditionsPresent) {
+                CompositionChoice.SECTION
+            } else {
+                CompositionChoice.Default
+            },
             templates = listOf(seededAttachment(attachable)),
             // Every Todo has always been judged by something; the built-in is the answer a new one
             // starts on, offered as a choice rather than applied out of sight.
@@ -2182,7 +2295,8 @@ class ListsViewModel @JvmOverloads constructor(
                 context = getApplication(),
                 importRoot = folderPath,
                 snapshot = tree
-            )
+            ),
+            conditionsPresent = conditionsPresent
         )
     }
 
@@ -2276,6 +2390,12 @@ class ListsViewModel @JvmOverloads constructor(
             compositionOffered = folderOffersSectionComposition(
                 context = getApplication(),
                 importRoot = source.relativePath,
+                snapshot = tree
+            ),
+            // Only the sentence the dialog draws; a refresh repeats the stored composition rather
+            // than asking again, even when the new revision added a condition it must honour.
+            conditionsPresent = folderNeedsSectionComposition(
+                context = getApplication(),
                 snapshot = tree
             )
             // Deliberately no histories: a refresh runs over a Todo that is still here, and a
@@ -3678,7 +3798,8 @@ class ListsViewModel @JvmOverloads constructor(
         val (rows, facts) = writeOrder.withLock {
             val fresh = dao.getTaskStates(taskIds)
             val pairs = dao.getTaskAssetStates(taskIds)
-            val rows = withLiveDecisions(items, fresh, pairs)
+            val parts = dao.getTaskPartStates(taskIds)
+            val rows = withLiveDecisions(items, fresh, pairs, parts)
                 .mapIndexed { index, item -> item.toPayloadRow(index) }
             rows to payloadFacts(rows)
         }

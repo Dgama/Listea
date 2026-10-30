@@ -31,6 +31,12 @@ import androidx.room.Index
  * [present] is the Package's current claim, as `package_prompt_tasks.present` was: a part the
  * latest revision no longer names is retained with its history and marked absent. [availability]
  * is a runtime code (for example `unsupported-viewer`) and null when the part can be presented.
+ *
+ * [condition] and [partJudgment] are v0.8.5 and both nullable, so a part written before this
+ * schema reads exactly as it did: no condition and no judgment of its own. A condition names an
+ * earlier part's field and the values that keep this part applicable — [com.example.listea.domain
+ * .encodePartCondition] is its stored shape. A judgment is a stored `TemplateVersionRef` in
+ * `encodeTemplateAttachments` form; a part with none inherits its Task's Task Review.
  */
 @Entity(
     tableName = "task_parts",
@@ -54,6 +60,8 @@ data class TaskPartEntity(
     @ColumnInfo(defaultValue = "1") val required: Boolean = true,
     @ColumnInfo(defaultValue = "1") val present: Boolean = true,
     val availability: String? = null,
+    val condition: String? = null,
+    val partJudgment: String? = null,
     val updatedAt: Long
 )
 
@@ -92,6 +100,11 @@ data class TaskPartPayloadEntity(
  * so a surface can render the last answer without decoding the newest event, and a reset can clear
  * one part without touching another. [revision] is the payload revision the answer was made
  * against, carried so a body that moved under an open review is visible.
+ *
+ * [stale] says the stored answer is no longer one the current branch asks for: the condition that
+ * made this part applicable has since closed, and the answer stays on record rather than being
+ * deleted. A stale answer is not an answer for completion — the part must be answered again if its
+ * branch reopens.
  */
 @Entity(
     tableName = "task_part_state",
@@ -111,6 +124,7 @@ data class TaskPartStateEntity(
     @ColumnInfo(defaultValue = "''") val response: String = "",
     val answeredAt: Long? = null,
     val revision: Int? = null,
+    @ColumnInfo(defaultValue = "0") val stale: Boolean = false,
     val updatedAt: Long
 )
 

@@ -96,7 +96,17 @@ data class ViewerCapability(
     val schema: Int,
     val responses: Set<ResponseContract>,
     val intents: Set<ViewerEventType>,
-    val parse: (String) -> PromptContent?
+    val parse: (String) -> PromptContent?,
+
+    /**
+     * The answer fields a downstream condition may name, for one stored body.
+     *
+     * The Viewer's own answer, so Core never parses a body to learn its shape: a `choice.single`
+     * Viewer exposes [CONDITION_FIELD_CHOICE], a form exposes its field keys, and a freeform
+     * Viewer exposes none. Null means this Viewer cannot read the body — the condition is then
+     * diagnosed rather than guessed at, because an unreadable source cannot promise any field.
+     */
+    val conditionFields: (String) -> Set<String>?
 )
 
 object Viewers {
@@ -108,7 +118,9 @@ object Viewers {
         schema = 1,
         responses = setOf(ResponseContract.SINGLE),
         intents = setOf(ViewerEventType.CHOICE_SELECT),
-        parse = { payload -> parseProfilePrompt(payload) }
+        parse = { payload -> parseProfilePrompt(payload) },
+        // One tap answers the whole card; the chosen option's id is the answer.
+        conditionFields = { setOf(CONDITION_FIELD_CHOICE) }
     )
 
     /** The vocabulary drill: a word card, an optional pronunciation Resource, one choice. */
@@ -118,7 +130,8 @@ object Viewers {
         schema = 1,
         responses = setOf(ResponseContract.SINGLE),
         intents = setOf(ViewerEventType.CHOICE_SELECT),
-        parse = { payload -> parseVocabularyPrompt(payload) }
+        parse = { payload -> parseVocabularyPrompt(payload) },
+        conditionFields = { setOf(CONDITION_FIELD_CHOICE) }
     )
 
     /**
@@ -134,10 +147,32 @@ object Viewers {
         schema = 1,
         responses = setOf(ResponseContract.STRUCTURED),
         intents = emptySet(),
-        parse = { payload -> parseFormPrompt(payload) }
+        parse = { payload -> parseFormPrompt(payload) },
+        // A form's fields are its answer surface; an unreadable body exposes nothing to name.
+        conditionFields = { payload ->
+            parseFormPrompt(payload)?.fields?.mapTo(linkedSetOf()) { it.key }
+        }
     )
 
-    val all: List<ViewerCapability> = listOf(Profile, Vocabulary, Form)
+    /**
+     * The media Prompt: a stem card and the files it brings, answered by pressing Done.
+     *
+     * Freeform because there is no scalar to record: the answer is the fact that the person looked
+     * at the part's files and signed off, and their marks and actions live under the part. The
+     * capability exposes no condition field, so a media part can be a condition **target** but
+     * never a source — a PDF's marks are not a decision field.
+     */
+    val Media = ViewerCapability(
+        ref = TemplateVersionRef(TemplateId("builtin.viewer.media"), 1),
+        kind = "media",
+        schema = 1,
+        responses = setOf(ResponseContract.FREEFORM),
+        intents = emptySet(),
+        parse = { payload -> parseMediaPrompt(payload) },
+        conditionFields = { emptySet() }
+    )
+
+    val all: List<ViewerCapability> = listOf(Profile, Vocabulary, Form, Media)
 
     /** The Viewer that can draw this envelope, or null when none in this build can. */
     fun forPayload(kind: String?, schema: Int?): ViewerCapability? =

@@ -12,14 +12,19 @@ import com.example.listea.data.PayloadPromptRow
 import com.example.listea.data.PayloadTaskRow
 import com.example.listea.data.ReviewItem
 import com.example.listea.data.decodeActionIds
+import com.example.listea.data.partBranch
 import com.example.listea.data.toAddOnAnswer
 import com.example.listea.domain.AddOnAnswerValue
 import com.example.listea.domain.AddOnQuestionType
+import com.example.listea.domain.ApplicabilityPart
 import com.example.listea.domain.ExportChoice
 import com.example.listea.domain.ExportKind
 import com.example.listea.domain.FieldAnswer
 import com.example.listea.domain.MarkKind
+import com.example.listea.domain.PartApplicability
+import com.example.listea.domain.PartCondition
 import com.example.listea.domain.ReviewResponse
+import com.example.listea.domain.evaluateApplicability
 import com.example.listea.domain.StoredAddOnVersion
 import com.example.listea.domain.ViewerEvent
 import com.example.listea.domain.markKind
@@ -121,6 +126,22 @@ const val EXPORT_VERSION_CONTENT = 5
  * v6 puts every Task in it into the v6 shape.
  */
 const val EXPORT_VERSION_PARTS = 6
+
+/**
+ * The version a body carries **only when a Task has a part with a condition or its own judgment**.
+ *
+ * Version 7 keeps v6's `parts[]` shape and adds four keys to each part, after `required` and before
+ * `result`: `judgment`, `when`, `applicability` and `stale`. Together they say why a part was or was
+ * not asked, and whether the answer beside them still counts — facts v6 had no way to express,
+ * because a v6 Task's parts were all asked and all current.
+ *
+ * It is a superset of 6 in the same way 6 was a shape change from 5: a Task with no conditional and
+ * no per-part judgment exports the v6 body byte for byte, and a round containing one v7 Task is a
+ * v7 document throughout. The four keys are written on every such document's parts, including the
+ * ones that are simply `null`/`"active"`/`false`, so a receiver branching on the version line reads
+ * one grammar.
+ */
+const val EXPORT_VERSION_CONDITIONAL = 7
 
 /** One template a Task was imported under: identity only, never its controls. */
 data class ExportTemplateView(
@@ -252,6 +273,37 @@ data class ExportPartView(
     val schema: Int?,
     val revision: Int?,
     val required: Boolean,
+    /**
+     * The part's own answer sheet, or null when the Task's container is what judges it.
+     *
+     * Identity only — id, version and the name this build resolves for it — exactly as `templates`
+     * is: an export records which sheet answered the part, not a copy of its definition. A stored
+     * reference this build cannot read exports as null, and the part's [applicability] is what says
+     * the page could not be presented.
+     */
+    val judgment: ExportTemplateView? = null,
+    /** The branch the part sits on, or null for an unconditional part. */
+    val condition: PartCondition? = null,
+    /** Whether the branch asks for the part now, waits for an earlier answer, or has closed it. */
+    val applicability: PartApplicability = PartApplicability.Active,
+    /**
+     * Whether the answer beside this part was set aside when its branch closed.
+     *
+     * A stale answer is kept and exported: it is a true record of what somebody answered while the
+     * question was open. It is not current, and [ExportTaskView.isCompleted] never counted it.
+     */
+    val stale: Boolean = false,
+    /**
+     * Whether the part declared a branch fact this build cannot read.
+     *
+     * [condition] and [judgment] are null exactly as an unconditional, inheriting part's are, so
+     * without this the version decision — and a reader of the mapping — would have no way to know
+     * the part carried one. It is deliberately **not** written to the body: v7 has no spelling for
+     * *a condition I could not read*, and inventing one is a later version's decision. What it does
+     * is keep the round on version 7, the version that promises a condition is spelled when there
+     * is one, rather than silently demoting the whole body to v6.
+     */
+    val unreadable: Boolean = false,
     val result: ExportPartResult?,
     val assets: List<ExportAssetView>
 )
@@ -335,8 +387,22 @@ fun mapExport(payload: ExportPayload): ExportMapping {
         task.hasMultipleParts ||
             task.parts.any { part -> part.result is ExportPartResult.Fields }
     }
+    // A part with a condition or its own judgment is a v7 fact even when it is one part of one
+    // Task: `when`, `applicability` and `stale` have no v6 spelling, and a v6 receiver would read
+    // the part as unconditionally asked.
+    val carriesConditional = payload.tasks.any { task ->
+        task.parts.any { part ->
+            part.condition != null || part.judgment != null || part.unreadable
+        }
+    }
     return ExportMapping(
-        version = exportVersion(carriesMarks, carriesAddOn, carriesContent, carriesParts),
+        version = exportVersion(
+            carriesMarks,
+            carriesAddOn,
+            carriesContent,
+            carriesParts,
+            carriesConditional
+        ),
         event = payload.event,
         listId = payload.listId,
         listTitle = payload.listTitle,
@@ -399,11 +465,44 @@ fun exportTaskViews(
     }
     val content = exportContentView(promptsByTask[row.taskId])
     val partRows = partsByTask[row.taskId].orEmpty()
+    // The branch facts, decoded fail-closed and evaluated once per Task with the same evaluator the
+    // review surface and the write path use. An unreadable condition or judgment is not permission
+    // to read the part as unconditional: [partBranch] gives it an availability code, which the page
+    // shows and the write path refuses. Applicability is orthogonal and reads only readable
+    // conditions, so an undecodable condition leaves the exported part `active`; the
+    // [ExportPartView.unreadable] flag carries the fact to the version decision, and the body has no
+    // key for it. Detached parts are not in the result, which is why the body below only asks about
+    // parts it exports.
+    val branches = partRows.associate { part ->
+        part.partKey to partBranch(part.availability, part.condition, part.partJudgment)
+    }
+    val applicability = evaluateApplicability(
+        partRows.map { part ->
+            val branch = branches.getValue(part.partKey)
+            ApplicabilityPart(
+                partKey = part.partKey,
+                position = part.position,
+                required = part.required,
+                present = part.present,
+                availability = branch.availability,
+                condition = branch.condition,
+                kind = part.kind,
+                // The same value `result` exports, legacy fallback included: a condition reads the
+                // answer the receiver will see, not a different one.
+                response = partResponse(
+                    part = part,
+                    singlePartTask = partRows.size == 1,
+                    responseByTask = responseByTask[row.taskId]
+                )
+            )
+        }
+    )
     // A legacy Asset row with no part is attached to a single-part Task's only part. Schema 33
     // backfills every row and every write path names the part, so this is a defensive join rather
     // than a second model; with several parts there is no honest place to put such a row.
     val assetRows = assetsByTask[row.taskId].orEmpty()
     val parts = partRows.filter { it.present }.map { part ->
+        val branch = branches.getValue(part.partKey)
         ExportPartView(
             partKey = part.partKey,
             promptKey = part.promptKey,
@@ -411,6 +510,21 @@ fun exportTaskViews(
             schema = part.schemaVersion,
             revision = part.revision,
             required = part.required,
+            judgment = branch.judgment?.let { ref ->
+                ExportTemplateView(
+                    id = ref.templateId.value,
+                    name = resolver.versionOf(ref)?.name,
+                    version = ref.version
+                )
+            },
+            condition = branch.condition,
+            applicability = applicability[part.partKey] ?: PartApplicability.Active,
+            stale = part.stale,
+            // A stored text that decoded to null is not an absent one: the part declared a branch
+            // fact this build cannot read, and the version decision must say so even though the
+            // body has no spelling for it.
+            unreadable = (part.condition != null && branch.condition == null) ||
+                (part.partJudgment != null && branch.judgment == null),
             result = exportPartResult(
                 response = partResponse(
                     part = part,

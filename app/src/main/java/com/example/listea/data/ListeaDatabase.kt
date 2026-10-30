@@ -65,7 +65,7 @@ import java.util.UUID
         PackageCompositionEntity::class,
         PackageCompositionPromptEntity::class
     ],
-    version = 33,
+    version = 34,
     exportSchema = true
 )
 abstract class ListeaDatabase : RoomDatabase() {
@@ -1804,6 +1804,35 @@ abstract class ListeaDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Schema 34: a part may be conditional, may carry its own judgment, and its answer may be
+         * stale.
+         *
+         * Three additive columns and no row rewritten. Every part that exists reads as what it
+         * was: no condition (`NULL` — always applicable), no judgment of its own (`NULL` — the
+         * Task's Task Review applies to it, exactly as in v0.8.4), and a fresh answer (`0` — the
+         * condition that could have closed its branch never existed).
+         *
+         * `condition` and `partJudgment` are nullable with no default because absence is a fact
+         * with meaning, not a placeholder: `''` would be a string every reader would have to
+         * special-case, and a condition has no honest empty form. `stale` is not-null with a
+         * default, the shape `MIGRATION_14_15`'s `keepTree` uses, so the table is never briefly in
+         * a state the entity cannot describe.
+         *
+         * Values are written by a later import or submission, never guessed here: this step has no
+         * Package manifest to read and must not invent a condition or a judgment nobody declared.
+         */
+        internal val MIGRATION_33_34 = object : Migration(33, 34) {
+            override fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE `task_parts` ADD COLUMN `condition` TEXT")
+                connection.execSQL("ALTER TABLE `task_parts` ADD COLUMN `partJudgment` TEXT")
+                connection.execSQL(
+                    "ALTER TABLE `task_part_state` ADD COLUMN `stale` INTEGER NOT NULL DEFAULT 0"
+                )
+                Log.i("ListeaDatabase", "33 -> 34")
+            }
+        }
+
         /** One row of [MIGRATION_30_31]'s backfill, held until every response has been read. */
         private data class BackfilledEvent(
             val reviewEventId: String,
@@ -2740,7 +2769,8 @@ abstract class ListeaDatabase : RoomDatabase() {
                     MIGRATION_29_30,
                     MIGRATION_30_31,
                     MIGRATION_31_32,
-                    MIGRATION_32_33
+                    MIGRATION_32_33,
+                    MIGRATION_33_34
                 )
                     .build()
                     .also { instance = it }

@@ -50,39 +50,58 @@ private const val DISSOLVED_RECORDS_VERSION_FAVOURITE_FLAG = 1
  * [DissolvedTaskStateEntity.recordVersion] describes the file records — so the payload names its
  * version inside itself. A reader that does not know the number returns null rather than reading
  * the lines it happens to see.
+ *
+ * **2 since v0.8.5, and 1 is still readable.** Version 1 recorded the part's key, whether it was
+ * required, and its answer. Version 2 adds the three facts that say whether the answer was ever
+ * current: the branch the part sat on, the answer sheet that judged it, and whether the branch had
+ * since set the answer aside. A version-1 line is read as a part with no branch, no own judgment and
+ * no stale flag — which is exactly what every part of that era was.
  */
-const val DISSOLVED_PARTS_VERSION = 1
+const val DISSOLVED_PARTS_VERSION = 2
+
+/** The version whose lines carried no branch or judgment. Read, never written. */
+private const val DISSOLVED_PARTS_VERSION_RESPONSE_ONLY = 1
 
 /**
  * One TaskPart as a dissolved history keeps it: the key it was known by in that Task, whether the
- * composition required it, and its current canonical answer.
+ * composition required it, its branch and judgment, whether its answer was stale, and its current
+ * canonical answer.
  *
  * The key, not an Asset path, is what a recovery matches on: a part is the decision, and the new
- * import's Task names the same decisions by the same keys (a Prompt key, or `local:0`). [required]
- * is recorded so the snapshot remains a faithful account of the composition it came from; a
- * recovery does **not** write it back, because the Task being recovered into has its own
- * composition and its own claim about what is required.
+ * import's Task names the same decisions by the same keys (a Prompt key, or `local:0`). [required],
+ * [partJudgment], [condition] and [stale] are recorded so the snapshot remains a faithful account
+ * of the composition it came from; a recovery does **not** write the first three back, because the
+ * Task being recovered into has its own composition and its own claim about what is required, which
+ * sheet judges the part, and where its branch sits. [stale] is not restored either — it is
+ * re-derived from the new composition — and the three exist for the record, not as instructions.
  */
 data class DissolvedPartRecord(
     val partKey: String,
     val required: Boolean,
-    val response: String
+    val response: String,
+    /** The stored `partJudgment` text, or null when the Task's own sheet judged the part. */
+    val partJudgment: String? = null,
+    /** The stored `condition` text, or null for an unconditional part. */
+    val condition: String? = null,
+    /** Whether the branch had set this part's answer aside when the snapshot was taken. */
+    val stale: Boolean = false
 )
 
 /**
  * A dissolved Task's parts, as one string.
  *
- * A version line, then one line per present part with three tab-separated fields:
+ * A version line, then one line per present part with six tab-separated fields:
  *
  * ```
- * 1
- * <escaped partKey> \t <1|0> \t <escaped response>
+ * 2
+ * <escaped partKey> \t <1|0> \t <escaped partJudgment> \t <escaped condition> \t <1|0> \t <escaped response>
  * ```
  *
  * The response is escaped rather than embedded: a canonical structured or primary response contains
  * tabs and newlines by construction, and a field that swallowed the line separator would turn one
- * part into two on the way back. `''` is no payload at all — a history written before schema 33 —
- * and is read as *nothing to restore*, never as a Task with no parts.
+ * part into two on the way back. An empty judgment or condition field is *none*, the same way `''`
+ * for the whole payload is no payload at all — a history written before schema 33 — and is read as
+ * *nothing to restore*, never as a Task with no parts.
  */
 fun encodeDissolvedParts(records: List<DissolvedPartRecord>): String =
     if (records.isEmpty()) {
@@ -94,6 +113,9 @@ fun encodeDissolvedParts(records: List<DissolvedPartRecord>): String =
                 if (index > 0) append('\n')
                 append(escapeField(record.partKey))
                 append('\t').append(if (record.required) "1" else "0")
+                append('\t').append(escapeField(record.partJudgment.orEmpty()))
+                append('\t').append(escapeField(record.condition.orEmpty()))
+                append('\t').append(if (record.stale) "1" else "0")
                 append('\t').append(escapeField(record.response))
             }
         }
@@ -103,19 +125,24 @@ fun encodeDissolvedParts(records: List<DissolvedPartRecord>): String =
  * The parts a dissolved payload holds, or `null` when this build cannot read it.
  *
  * `''` is an empty list: the snapshot recorded no part answers, which is what every history written
- * before schema 33 holds. Anything else that does not have this version's shape is a payload from a
- * later build — or a damaged one — and the caller restores the Task's completion and no part answers
- * rather than guessing which line belonged to which decision.
+ * before schema 33 holds. A version-1 payload is read with the three fields it wrote and a part that
+ * has no branch, no own judgment and is not stale. Anything else that does not have this version's
+ * shape is a payload from a later build — or a damaged one — and the caller restores the Task's
+ * completion and no part answers rather than guessing which line belonged to which decision.
  */
 fun decodeDissolvedParts(encoded: String): List<DissolvedPartRecord>? {
     if (encoded.isEmpty()) return emptyList()
     val lines = encoded.split("\n")
-    if (lines.firstOrNull() != DISSOLVED_PARTS_VERSION.toString()) return null
+    val fieldsPerLine = when (lines.firstOrNull()) {
+        DISSOLVED_PARTS_VERSION.toString() -> 6
+        DISSOLVED_PARTS_VERSION_RESPONSE_ONLY.toString() -> 3
+        else -> return null
+    }
 
     val seen = mutableSetOf<String>()
     return lines.drop(1).map { line ->
         val fields = line.split("\t")
-        if (fields.size != 3) return null
+        if (fields.size != fieldsPerLine) return null
         val partKey = unescapeField(fields[0])
         if (partKey.isEmpty() || !seen.add(partKey)) return null
         val required = when (fields[1]) {
@@ -123,10 +150,25 @@ fun decodeDissolvedParts(encoded: String): List<DissolvedPartRecord>? {
             "0" -> false
             else -> return null
         }
+        if (fieldsPerLine == 3) {
+            return@map DissolvedPartRecord(
+                partKey = partKey,
+                required = required,
+                response = unescapeField(fields[2])
+            )
+        }
+        val stale = when (fields[4]) {
+            "1" -> true
+            "0" -> false
+            else -> return null
+        }
         DissolvedPartRecord(
             partKey = partKey,
             required = required,
-            response = unescapeField(fields[2])
+            response = unescapeField(fields[5]),
+            partJudgment = unescapeField(fields[2]).takeIf { it.isNotEmpty() },
+            condition = unescapeField(fields[3]).takeIf { it.isNotEmpty() },
+            stale = stale
         )
     }
 }

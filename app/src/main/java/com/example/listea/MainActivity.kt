@@ -1880,6 +1880,21 @@ private fun ImportConfirmDialogBody(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
+                    // A refresh cannot change the grouping, so a conditioned Package opened under
+                    // one Task per question is a run that will import its dependent questions
+                    // unavailable. Saying so here is the warning before the report repeats it.
+                    if (request.conditionsPresent && importer == ImporterKind.PACKAGE &&
+                        composition == CompositionChoice.PROMPT
+                    ) {
+                        Spacer(Modifier.height(ListeaDimens.RowGap))
+                        Text(
+                            "Some questions depend on an earlier answer, and this grouping puts " +
+                                "them in different Tasks. They import unavailable; the report " +
+                                "names which.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 } else {
                     OutlinedTextField(
                         value = name,
@@ -1931,6 +1946,7 @@ private fun ImportConfirmDialogBody(
                                 if (importer == ImporterKind.PACKAGE && request.compositionOffered) {
                                     ImportCompositionChoice(
                                         selected = composition,
+                                        conditionsPresent = request.conditionsPresent,
                                         onSelect = { compositionWord = it.key }
                                     )
                                 }
@@ -2722,7 +2738,7 @@ private fun ImportReviewRow(
         Column(Modifier.weight(1f)) {
             Text(choice.name, style = MaterialTheme.typography.bodyMedium)
             Text(
-                choice.taskReview?.let { reviewCatchLine(it) }
+                choice.taskReview?.let { reviewCatchLine(choice.ref.templateId.value, it) }
                     ?: "Headless template · unreadable",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -2837,7 +2853,8 @@ private fun ImportImporterChoice(
 @Composable
 private fun ImportCompositionChoice(
     selected: CompositionChoice,
-    onSelect: (CompositionChoice) -> Unit
+    onSelect: (CompositionChoice) -> Unit,
+    conditionsPresent: Boolean = false
 ) {
     Column(Modifier.padding(start = 48.dp)) {
         ImportImporterRow(
@@ -2853,6 +2870,21 @@ private fun ImportCompositionChoice(
             selected = selected == CompositionChoice.SECTION,
             onSelect = { onSelect(CompositionChoice.SECTION) }
         )
+        // A dependent question can only read the answer it names when both live in one Task. The
+        // sentence is drawn only where the choice exists, and it names the consequence rather than
+        // the mechanism: a part imported without its source is a page that explains why it is
+        // closed, and the report names it.
+        if (conditionsPresent) {
+            Text(
+                "Some questions here depend on an earlier answer. They need both answers in the " +
+                    "same Task, so choose One Task per Section. One Task per question still " +
+                    "imports; the dependent questions are then unavailable, and the report says " +
+                    "which.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp, end = 16.dp)
+            )
+        }
     }
 }
 

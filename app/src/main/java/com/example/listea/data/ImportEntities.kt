@@ -519,13 +519,18 @@ data class RecoveredTaskState(
  *
  * Detached parts are absent from the snapshot: a part the composition no longer asked is not one of
  * the decisions being kept. [response] is `''` for a part nobody answered, which the restore keeps
- * as pending rather than inventing an answer.
+ * as pending rather than inventing an answer. [partJudgment] and [condition] are the stored texts
+ * exactly as the part row holds them — the snapshot records the composition, not a decoding of it,
+ * because a text a later build cannot read is still the truth about what was asked.
  */
 data class DissolvedPartRow(
     val taskId: String,
     val partKey: String,
     val required: Boolean,
-    val response: String
+    val response: String,
+    val partJudgment: String? = null,
+    val condition: String? = null,
+    val stale: Boolean = false
 )
 
 /**

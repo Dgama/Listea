@@ -6,10 +6,13 @@ import com.example.listea.data.DecisionTarget
 import com.example.listea.data.FileReviewStateEntity
 import com.example.listea.data.ReviewDecisions
 import com.example.listea.data.ReviewItem
+import com.example.listea.data.TaskPartStateEntity
 import com.example.listea.data.TaskStateEntity
 import com.example.listea.data.decodeActionIds
 import com.example.listea.data.decisions
 import com.example.listea.data.rootRelativePathOf
+import com.example.listea.domain.ApplicabilityPart
+import com.example.listea.domain.evaluateApplicability
 
 /**
  * Why a scope has no Task to start a round on, in the words §7 asks for.
@@ -253,25 +256,53 @@ private fun reviewable(row: CatalogRow): Boolean =
  * that re-read one and not the other would show a tick that follows the write and a chip that does
  * not. A Task the read does not name, or a pair it does not carry, keeps what the queue gave it —
  * the same treatment a Task that has gone already gets.
+ *
+ * The answers in [partStates] are the third half, and the one this round adds: applicability is
+ * derived from a conditional part's source answer and never stored, so a round that kept the
+ * branch facts it resolved on entry would keep showing *waiting* after the gate was answered, and
+ * keep offering a page after the branch closed. The condition, the judgment and the envelope are
+ * material and stay frozen; only the answer-dependent half — applicability and the stale flag — is
+ * re-derived from the rows read now, by the same evaluator the write path and the export call.
  */
 fun withLiveDecisions(
     queue: List<ReviewItem>,
     states: List<TaskStateEntity>,
-    assetStates: List<AssetStateEntity>
+    assetStates: List<AssetStateEntity>,
+    partStates: List<TaskPartStateEntity>
 ): List<ReviewItem> {
     if (queue.isEmpty()) return queue
     val byTask = states.associateBy { it.taskId }
     val byAsset = assetStates.associateBy { it.assetId }
+    val byPart = partStates.associateBy { it.taskId to it.partKey }
     return queue.map { item ->
         val live = byTask[item.taskId]?.isCompleted
         // The pair records live on the Assets, and the Assets live on the parts, so the re-read
         // walks the parts and leaves every other part field — its key, its envelope, its
         // availability — exactly as the queue resolved it.
+        val answered = item.parts.associate { part ->
+            part.partKey to (byPart[item.taskId to part.partKey]?.response.orEmpty())
+        }
+        val applicability = evaluateApplicability(
+            item.parts.map { part ->
+                ApplicabilityPart(
+                    partKey = part.partKey,
+                    position = part.position,
+                    required = part.required,
+                    present = part.present,
+                    availability = part.availability,
+                    condition = part.condition,
+                    kind = part.payloadKind,
+                    response = answered[part.partKey]
+                )
+            }
+        )
         val parts = item.parts.map { part ->
             part.copy(
                 assets = part.assets.map {
                     it.copy(decisions = byAsset[it.assetId]?.decisions ?: it.decisions)
-                }
+                },
+                applicability = applicability[part.partKey] ?: part.applicability,
+                stale = byPart[item.taskId to part.partKey]?.stale ?: part.stale
             )
         }
         if (live == null && parts == item.parts) {

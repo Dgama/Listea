@@ -198,14 +198,19 @@ data class TaskStateEntity(
     val customActions: String = "",
 
     /**
-     * How the current completion was reached: [COMPLETION_AUTOMATIC], [COMPLETION_EXPLICIT], or
-     * `""` for every row written before v0.8.4.
+     * How the current completion was reached: [COMPLETION_AUTOMATIC], [COMPLETION_EXPLICIT],
+     * [COMPLETION_REOPENED], or `""` for every row written before v0.8.4.
      *
      * The distinction is what keeps a sign-off a sign-off. Once a person has explicitly completed
      * a Task, a later part answer may recompute *automatic* completion but must not un-complete
      * it: the judgment was made, and a policy changing its mind afterwards would retract an
      * answer nobody retracted. Conversely an automatic completion is recomputed freely, because it
      * is a conclusion from the parts rather than an act of its own.
+     *
+     * [COMPLETION_REOPENED] is the exception, and it is not a retraction: a branch that closes and
+     * later reopens can bring required work back, and a completion — explicit or not — was about
+     * the Task as it then stood. The source says so, so a cleared completion reads as the Task
+     * changing rather than a person taking an answer back.
      */
     val completionSource: String = "",
 
@@ -217,6 +222,9 @@ const val COMPLETION_AUTOMATIC = "automatic"
 
 /** A completion a person made with the completion control. */
 const val COMPLETION_EXPLICIT = "explicit"
+
+/** A completion taken away because a required part's branch reopened. */
+const val COMPLETION_REOPENED = "reopened"
 
 /**
  * What is true about one **Task–Asset pair** now: the instance of the asset control that governs

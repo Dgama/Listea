@@ -425,6 +425,81 @@ object Templates {
         )
     )
 
+    /** The id of the media part's Done control; see [MediaPart]. */
+    const val MEDIA_PART_DONE_ID = "done"
+
+    /**
+     * The judgment over one media part inside a multi-part Task.
+     *
+     * A media part's answer is **answered-empty**: the files, their marks and their actions are the
+     * record, and there is no invented choice or point on top. Pressing Done commits the part; the
+     * Task-level policy decides whether that was the last answer. Its `singlePart` completion is
+     * the definition a template has always carried, and is honoured only when the Task's own
+     * definition is `singlePart` — a multi-part Task reads the container's policy instead.
+     *
+     * Code-only, like the mixed container: it is a judgment a Package's composition resolves, not
+     * a pen offered in the template picker. [BuiltinJudgments] is what makes it resolvable without
+     * a seeded row.
+     */
+    val MediaPart: StoredTemplateVersion = StoredTemplateVersion(
+        ref = TemplateVersionRef(TemplateId("builtin.media.part"), 1),
+        name = "Media Part",
+        scope = TemplateScope(emptyList()),
+        buttons = listOf(
+            TemplateButton(
+                id = MEDIA_PART_DONE_ID,
+                name = "Done",
+                type = ButtonType.ACTION,
+                recordValue = ""
+            )
+        ),
+        kind = TemplateKind.TASK_REVIEW,
+        taskReview = TaskReviewDefinition(
+            // The *payload* capability, not the asset viewer beside it: a part's judgment names
+            // the Viewer its page is answered under, and the write boundary holds a freeform
+            // submission to exactly this reference. Naming `MediaViewer.ref` here — the viewer of
+            // the files rather than of the Prompt — drew the Done and then refused the commit,
+            // because the page and the answer were checked against two different definitions.
+            viewer = Viewers.Media.ref,
+            accepts = emptySet(),
+            commit = CommitPolicy.ConfirmControl(MEDIA_PART_DONE_ID),
+            revisable = true,
+            completesTask = true,
+            advanceAfterCommit = true
+        )
+    )
+
+    /**
+     * The Task-level container of a mixed Task: one completion policy over parts that each carry
+     * their own judgment.
+     *
+     * Not a renderer. Its viewer reference is a label for the container and is never used for a
+     * page whose part has a judgment; its only control is the completion checkbox, and its
+     * `allRequiredParts` policy is what makes a Task of a form, a PDF, a card and another form
+     * complete only when every active required part has been answered. Parts supply their own
+     * `viewer`, `accepts`, `commit`, `revisable` and `advanceAfterCommit`; completion stays one
+     * Task fact.
+     *
+     * Code-only, and never in the picker: a user choosing a pen here would be choosing a
+     * completion rule without the parts it was written for.
+     */
+    val MixedStructured: StoredTemplateVersion = StoredTemplateVersion(
+        ref = TemplateVersionRef(TemplateId("builtin.structured.mixed"), 1),
+        name = "Mixed Task",
+        scope = TemplateScope(emptyList()),
+        buttons = emptyList(),
+        kind = TemplateKind.TASK_REVIEW,
+        taskReview = TaskReviewDefinition(
+            viewer = TemplateVersionRef(TemplateId("builtin.viewer.mixed"), 1),
+            accepts = emptySet(),
+            commit = CommitPolicy.ConfirmControl(TASK_REVIEW_COMPLETE_CONTROL),
+            revisable = true,
+            completesTask = true,
+            advanceAfterCommit = true,
+            completion = CompletionPolicy.AllRequiredParts
+        )
+    )
+
     /** The Task Reviews every install starts with, in picker order. */
     val StoredTaskReviews: List<StoredTemplateVersion> = listOf(
         MediaRapidReviewStored,
@@ -433,6 +508,16 @@ object Templates {
         StructuredMultiPart,
         StructuredForm
     )
+
+    /**
+     * Every built-in judgment a stored reference may name, picker reviews included.
+     *
+     * The fallback table [TemplateResolver.reviewForRef] reads when no seeded row answers. The two
+     * internal judgments at the end are here and **not** in [StoredTaskReviews]: a Package's
+     * composition names them, a person never does, and the seed callback iterates the picker list.
+     */
+    val BuiltinJudgments: List<StoredTemplateVersion> =
+        StoredTaskReviews + listOf(MediaPart, MixedStructured)
 
     /**
      * The names the built-in Task Reviews shipped under before the vocabulary said *headless*.

@@ -52,11 +52,13 @@ import coil3.ImageLoader
 import com.example.listea.data.AssetDecisions
 import com.example.listea.data.ReviewAsset
 import com.example.listea.data.ReviewItem
+import com.example.listea.data.ReviewPart
 import com.example.listea.data.taskDecisions
 import com.example.listea.domain.AssetKind
 import com.example.listea.domain.AssetMark
 import com.example.listea.domain.ListId
 import com.example.listea.domain.MarkKind
+import com.example.listea.domain.PartApplicability
 import com.example.listea.domain.QuoteAnchor
 import com.example.listea.domain.ReviewContext
 import com.example.listea.domain.ReviewResponse
@@ -65,6 +67,7 @@ import com.example.listea.domain.parse
 import com.example.listea.domain.parseEventValue
 import com.example.listea.domain.FormFieldType
 import com.example.listea.domain.FormPrompt
+import com.example.listea.domain.MediaPrompt
 import com.example.listea.domain.PromptContent
 import com.example.listea.domain.answeredFields
 import com.example.listea.domain.decodePrompt
@@ -72,6 +75,7 @@ import com.example.listea.domain.isComplete
 import com.example.listea.domain.StoredTemplateVersion
 import com.example.listea.domain.TASK_REVIEW_COMPLETE_CONTROL
 import com.example.listea.domain.TaskAction
+import com.example.listea.domain.TaskReviewDefinition
 import com.example.listea.domain.TemplateButton
 import com.example.listea.domain.TemplateId
 import com.example.listea.domain.TemplateVersionRef
@@ -465,6 +469,26 @@ internal fun taskNavigation(items: List<ReviewItem>, index: Int): TaskNavigation
 }
 
 /**
+ * Whether a judgment answers with nothing on record: the media part's Done.
+ *
+ * A part's judgment names the **payload capability** its page is answered under —
+ * `builtin.viewer.media` for a media part, exactly as a form part names `builtin.viewer.form`.
+ * The write boundary holds a freeform submission to the same reference
+ * ([ListsViewModel.submissionAccepted]), so a page and the answer it commits are checked against
+ * one definition. The asset viewer beside it
+ * (`builtin.media.viewer`, which the headless Task-level reviews name) is a different thing: it
+ * presents files, not a Prompt, and a part judgment naming it is not a sheet this page could be
+ * answered on.
+ *
+ * [definition] is null when the part names a judgment this build cannot resolve; that is not a
+ * freeform page, it is a page with nothing to draw.
+ */
+internal fun isFreeformJudgment(definition: TaskReviewDefinition?): Boolean =
+    definition != null &&
+        definition.viewer == Viewers.Media.ref &&
+        definition.accepts.isEmpty()
+
+/**
  * Wraps leaving a review so the on-exit webhook fires at most once, whichever way the user goes:
  * the top bar arrow, the system back gesture, or Exit on the completion screen.
  *
@@ -619,53 +643,59 @@ fun ReviewSession(
     // one round may walk Tasks from several Todos. The fallback chain is the Task's stamp, then
     // the List's legacy column (passed in as [ReviewTerms.template]), then the built-in — which is
     // what every Task was in fact judged by before this round existed.
-    val review: StoredTemplateVersion = remember(
+    //
+    // This is the **container**. It owns completion and the explicit sign-off; for a homogeneous
+    // Task it is also the page's own judgment. A mixed Task's parts name theirs, resolved per page
+    // below, and the container is never drawn on one of their pages.
+    val taskReview: StoredTemplateVersion = remember(
         item.taskId, item.taskReview, terms.template, resolver
     ) {
         resolver.reviewFor(item.taskReview)
             ?: resolver.reviewForRef(terms.template)
             ?: Templates.MediaRapidReviewStored
     }
-    val reviewDefinition = review.taskReview
-    val definitionAcceptsEvents = !reviewDefinition?.accepts.isNullOrEmpty()
-    // The control that commits, when the template commits from one. Null for both intent forms:
-    // an Immediate template commits from the viewer's own tap, and a ConfirmIntent template from
-    // another viewer intent, so neither has a button to draw.
-    val commitControlId: String? = when (val commit = reviewDefinition?.commit) {
+    val taskDefinition = taskReview.taskReview
+    // The control that commits the Task, when the container commits from one. Null for both intent
+    // forms: an Immediate template commits from the viewer's own tap, and a ConfirmIntent template
+    // from another viewer intent, so neither has a button to draw.
+    val taskCommitControlId: String? = when (val commit = taskDefinition?.commit) {
         is CommitPolicy.ConfirmControl -> commit.controlId
         is CommitPolicy.Immediate, is CommitPolicy.ConfirmIntent -> null
         null -> TASK_REVIEW_COMPLETE_CONTROL
     }
-    // A template that does not commit from the completion checkbox draws its own control and the
+    // A container that does not commit from the completion checkbox draws its own control and the
     // checkbox goes away: two controls that both complete the Task would be two answers to what
     // the template already said. A definition-less Task keeps the checkbox, as it always has.
-    val commitIsCompletion = reviewDefinition == null ||
-        (reviewDefinition.commit is CommitPolicy.ConfirmControl &&
-            commitControlId == TASK_REVIEW_COMPLETE_CONTROL)
-    val commitLabel = commitControlId
-        ?.let { id -> review.buttons.firstOrNull { it.id == id }?.name }
-        ?: "Submit"
-    val acceptsPoint = reviewDefinition?.accepts?.contains(ViewerEventType.IMAGE_POINT) == true
-    val acceptsChoice = reviewDefinition?.accepts?.contains(ViewerEventType.CHOICE_SELECT) == true
-    // The tap itself commits: this is the dating card's Like, and the vocabulary round's one-tap
-    // final answer. A ConfirmControl or ConfirmIntent template waits for its own route instead.
-    val commitsChoiceImmediately =
-        (reviewDefinition?.commit as? CommitPolicy.Immediate)?.intent ==
-            ViewerEventType.CHOICE_SELECT
+    //
+    // A SinglePart Task whose parts carry their own judgments is the v0.8.5 case: those parts are
+    // the way it is answered, and a checkbox beside them would be a second way to say the same
+    // thing. The completion a part commits still travels through the same write path.
+    val anyPartJudgment = item.parts.any { it.present && it.judgment != null }
+    val taskCommitIsCompletion = taskDefinition == null ||
+        (taskDefinition.commit is CommitPolicy.ConfirmControl &&
+            taskCommitControlId == TASK_REVIEW_COMPLETE_CONTROL)
+    val taskBarIsCompletion = taskCommitIsCompletion &&
+        !(anyPartJudgment && taskDefinition?.completion == CompletionPolicy.SinglePart)
 
     // How many of this Task's required parts are unanswered, when its template completes from
     // them. Zero for every other template — a SinglePart media Task has no questions to count —
     // and the bar then draws exactly as it did before v0.8.4. Read live, because answering a part
     // on one page must clear the count the completion control shows on another.
-    val completionPolicy = reviewDefinition?.completion ?: CompletionPolicy.SinglePart
+    val completionPolicy = taskDefinition?.completion ?: CompletionPolicy.SinglePart
     val countsParts = completionPolicy == CompletionPolicy.AllRequiredParts ||
         completionPolicy == CompletionPolicy.AnyPart
     val answeredParts by remember(item.taskId, countsParts) {
         if (countsParts) viewModel.observeAnsweredParts(item.taskId)
         else flowOf(emptySet<String>())
     }.collectAsStateWithLifecycle(initialValue = emptySet())
+    // Only the parts the branch asks for now: a masked part is not work owed, and a stale answer
+    // never appears in [answeredParts], so it is counted as owed again the moment its branch opens.
     val pendingRequiredParts = if (countsParts) {
-        item.parts.count { it.present && it.required && it.partKey !in answeredParts }
+        item.parts.count {
+            it.present && it.required &&
+                it.applicability == PartApplicability.Active &&
+                it.partKey !in answeredParts
+        }
     } else {
         0
     }
@@ -723,10 +753,12 @@ fun ReviewSession(
     }
     // The same submission's events as rows of their own. Read from `review_event_answers` rather
     // than filtered out of the response above: that table is where a caught event is addressed as
-    // an event, and it is what the Info sheet's Recorded section lists. A template that catches no
-    // events keeps its flow empty and its sheet exactly as it was.
-    val recordedEvents by remember(item.taskId, definitionAcceptsEvents) {
-        if (definitionAcceptsEvents) viewModel.observeLatestEventAnswers(item.taskId)
+    // an event, and it is what the Info sheet's Recorded section lists. A Task that catches no
+    // events keeps its flow empty and its sheet exactly as it was — unless a part carries its own
+    // judgment, because that judgment is what caught the event and the container catches nothing.
+    val recordsEvents = !taskDefinition?.accepts.isNullOrEmpty() || anyPartJudgment
+    val recordedEvents by remember(item.taskId, recordsEvents) {
+        if (recordsEvents) viewModel.observeLatestEventAnswers(item.taskId)
         else flowOf(emptyList())
     }.collectAsStateWithLifecycle(initialValue = emptyList())
     // Which file each recorded point came from, so a Task of several pictures says so instead of
@@ -797,6 +829,81 @@ fun ReviewSession(
         pagePayloadRow?.let { decodePrompt(it.kind, it.schemaVersion, it.payload) }
     }
 
+    // **The part whose page is on screen**, and its own judgment when the Package gave it one.
+    // A page is a part's Content page or one of the part's files; the add-on page belongs to the
+    // Task and has no part. A homogeneous Task names no part judgment, so the container resolves
+    // the page exactly as it did before v0.8.5.
+    val currentPart: ReviewPart? = when (val model = currentModel) {
+        is ReviewPage.Content -> item.parts.firstOrNull { it.partKey == model.partKey }
+        is ReviewPage.Asset -> item.parts.firstOrNull { it.partKey == model.partKey }
+        ReviewPage.AddOn, null -> null
+    }
+    val pageJudgmentRef = currentPart?.judgment
+    // Resolved per page rather than once per Task, because two parts of one Task may be judged
+    // differently. A part judgment this build cannot resolve draws no sheet and does **not** fall
+    // back to the container: the part was stamped with its own, and answering under another would
+    // record an answer the Package did not ask for.
+    val pageReview: StoredTemplateVersion? = remember(pageJudgmentRef, taskReview, resolver) {
+        if (pageJudgmentRef == null) taskReview else resolver.reviewForRef(pageJudgmentRef)
+    }
+    val pageDefinition = pageReview?.taskReview
+    val pageJudgmentMissing = pageJudgmentRef != null && pageReview == null
+    // Whether the page is answered under its own part's sheet rather than the Task's. It is what
+    // separates "the swipe at the end of the Task is the Task's judgment" from "this part is
+    // answered on its own page", and a part-scoped form or choice is the second case.
+    val pageOwnsJudgment = currentPart?.judgment != null && pageReview != null
+    val pageCommitControlId: String? = when (val commit = pageDefinition?.commit) {
+        is CommitPolicy.ConfirmControl -> commit.controlId
+        is CommitPolicy.Immediate, is CommitPolicy.ConfirmIntent -> null
+        null -> TASK_REVIEW_COMPLETE_CONTROL
+    }
+    // Whether this page's judgment commits the Task itself. A part's own control is drawn only when
+    // it is not the Task's completion control — that one is the bottom bar's checkbox.
+    val pageCommitIsCompletion = pageDefinition == null ||
+        (pageDefinition.commit is CommitPolicy.ConfirmControl &&
+            pageCommitControlId == TASK_REVIEW_COMPLETE_CONTROL)
+    val pageCommitLabel = pageCommitControlId
+        ?.let { id -> pageReview?.buttons?.firstOrNull { it.id == id }?.name }
+        ?: "Submit"
+    val pageAcceptsPoint = pageDefinition?.accepts?.contains(ViewerEventType.IMAGE_POINT) == true
+    val pageAcceptsChoice = pageDefinition?.accepts?.contains(ViewerEventType.CHOICE_SELECT) == true
+    // The tap itself commits: this is the dating card's Like, and the vocabulary round's one-tap
+    // final answer. A ConfirmControl or ConfirmIntent template waits for its own route instead.
+    val pageCommitsChoiceImmediately =
+        (pageDefinition?.commit as? CommitPolicy.Immediate)?.intent == ViewerEventType.CHOICE_SELECT
+    // A freeform judgment — the media part's — is answered-empty: the files, their marks and their
+    // actions are the record, so its Done is the part's whole answer and carries no event.
+    // [isFreeformJudgment] is the one place that reads which judgments those are.
+    val pageIsFreeform = isFreeformJudgment(pageDefinition)
+
+    // **Why this page cannot be answered right now**, if it cannot. The page stays where it is in
+    // the count, the guide and the arrows; its viewer or file is replaced by this explanation and
+    // no control is drawn on it. The three states read differently because they call for different
+    // things: waiting, closed, and present but unreadable.
+    val pageAvailability = currentPart?.availability
+    val maskNote: String? = when {
+        currentPart == null -> null
+        pageAvailability != null -> availabilityNote(pageAvailability)
+        currentPart.applicability == PartApplicability.Pending -> "Waiting for an earlier answer."
+        currentPart.applicability == PartApplicability.Inactive ->
+            "Not needed — an earlier answer closed this branch."
+        else -> null
+    }
+    // A reopened branch keeps the old answer on record but sets it aside. The page is interactive
+    // again, and this says why it looks answered and still asks.
+    val staleNote = if (maskNote == null && currentPart?.stale == true) {
+        "Your earlier answer was set aside when this branch closed. Answer again to make it current."
+    } else {
+        null
+    }
+    // The judgment itself is the fourth way a page can have nothing to offer: the part names a
+    // sheet this build does not carry. Nothing can be drawn for it, and no fallback is honest.
+    val pageMaskNote = maskNote ?: if (pageJudgmentMissing) {
+        "This page's answer sheet is not available in this build."
+    } else {
+        null
+    }
+
     // The Content page's answer is the **part's own** current state: a Task may present several
     // Prompts, and the Task's latest response is whichever part was answered most recently. A row
     // written before v0.8.4 kept no part state, so a Task with a single Content part falls back to
@@ -855,10 +962,24 @@ fun ReviewSession(
     // Whether *the Task* has a Content page, not whether one is on screen: the forward edge is
     // resolved on the add-on page too, and asking the current page would have said "no Prompt"
     // exactly where the gate is applied.
+    //
+    // The judgment this note speaks for is the **first Prompt part's own**, because that is the
+    // page it is about. A mixed Task's container draws nothing, and asking it whether it catches a
+    // form would say no for every Task the Package composed.
+    val payloadJudgmentRef = item.payloadPart?.judgment
+    val payloadReview: StoredTemplateVersion? = remember(
+        payloadJudgmentRef, taskReview, resolver
+    ) {
+        if (payloadJudgmentRef == null) taskReview
+        else resolver.reviewForRef(payloadJudgmentRef)
+    }
+    val payloadDefinition = payloadReview?.taskReview
     // A form's legal answer is a structured record governed by the form Viewer's own template; a
     // choice template attached to it catches nothing this card can emit.
     val acceptsStructured = content is FormPrompt &&
-        reviewDefinition?.viewer == Viewers.Form.ref
+        payloadDefinition?.viewer == Viewers.Form.ref
+    val payloadAcceptsChoice =
+        payloadDefinition?.accepts?.contains(ViewerEventType.CHOICE_SELECT) == true
     val contentNotice = if (item.hasContentPage()) {
         when {
             payloadRow == null -> "This question's body could not be read."
@@ -868,9 +989,12 @@ fun ReviewSession(
 
             missingRequired != null ->
                 "The file this question requires is missing from the source, so it cannot be answered."
+            content is MediaPrompt && !(payloadDefinition != null &&
+                payloadDefinition.viewer == Viewers.Media.ref) ->
+                "No Task Review in force catches these files."
             content is FormPrompt && !acceptsStructured ->
                 "No Task Review in force catches this form."
-            content !is FormPrompt && !acceptsChoice ->
+            content !is FormPrompt && content !is MediaPrompt && !payloadAcceptsChoice ->
                 "No Task Review in force catches a choice."
             else -> null
         }
@@ -880,22 +1004,26 @@ fun ReviewSession(
 
     // The same question for the page on screen rather than for the Task's first Prompt. A Task may
     // present several Prompts and only one of them may be unreadable; the page that cannot be
-    // answered is the one that says so.
+    // answered is the one that says so. Everything here is read off the page's own judgment.
+    val pageAcceptanceStructured = pageContent is FormPrompt &&
+        pageDefinition?.viewer == Viewers.Form.ref
     val pageNotice = if (contentPage == null) {
         null
     } else {
-        val pagePart = item.parts.firstOrNull { it.partKey == contentPage.partKey }
         when {
             pagePayloadRow == null -> "This question's body could not be read."
             pageContent == null -> "This build cannot read this question."
-            pagePart?.payloadRevision != null && pagePayloadRow?.revision != pagePart.payloadRevision ->
+            currentPart?.payloadRevision != null &&
+                pagePayloadRow?.revision != currentPart.payloadRevision ->
                 "This question was updated after the review opened. Reopen it to judge the new text."
 
             pageResources.any { it.required && it.missing } ->
                 "The file this question requires is missing from the source, so it cannot be answered."
-            pageContent is FormPrompt && !acceptsStructured ->
+            pageContent is MediaPrompt && !pageIsFreeform ->
+                "No Task Review in force catches these files."
+            pageContent is FormPrompt && !pageAcceptanceStructured ->
                 "No Task Review in force catches this form."
-            pageContent !is FormPrompt && !acceptsChoice ->
+            pageContent !is FormPrompt && pageContent !is MediaPrompt && !pageAcceptsChoice ->
                 "No Task Review in force catches a choice."
             else -> null
         }
@@ -911,14 +1039,16 @@ fun ReviewSession(
     val navigation = taskNavigation(items, index)
 
     // Forward off this Task's last page is the queue move the next arrow makes, rather than a
-    // commit, when the Task has no judgment a commit could record: its source is blocked, or its
-    // Prompt cannot be answered and the template in force is waiting for an event. Without this
-    // the forward edge would be inert on exactly the Tasks that can never be judged, which is
-    // the one place the documented swipe contract would stop working. A template that needs no
-    // event still commits normally — a legacy rapid-review Prompt completes from the frame.
+    // commit, when the Task has no judgment a commit could record: its source is blocked, its page
+    // is masked, or its Prompt cannot be answered and the template in force is waiting for an
+    // event. Without this the forward edge would be inert on exactly the Tasks that can never be
+    // judged, which is the one place the documented swipe contract would stop working. A template
+    // that needs no event still commits normally — a legacy rapid-review Prompt completes from the
+    // frame — and so does a freeform media part, whose Done is its whole answer.
     val forwardIsNavigation = navigation.canGoNext && (
         item.reviewBlocked != null ||
-            (contentNotice != null && definitionAcceptsEvents)
+            pageMaskNote != null ||
+            (contentNotice != null && pageDefinition?.accepts?.isNotEmpty() == true)
         )
 
     // The semantic-action boundary, and it sits a level above the Task on purpose: a swipe and an
@@ -950,15 +1080,17 @@ fun ReviewSession(
 
     // The part this judgment is about: the one whose page is on screen. A Task-level page — the
     // add-on, or a media Task's file (whose part is degenerate and carries no body) — answers the
-    // Task as a whole, and the write boundary reads that as the older rule.
+    // Task as a whole, and the write boundary reads that as the older rule. A part that carries its
+    // own judgment is always part-scoped, even when it has no body of its own: the judgment is what
+    // makes it a decision unit rather than part of the Task's one answer.
     val commitPartKey = when (val model = currentModel) {
         is ReviewPage.Content -> model.partKey
         // A file presented by a Prompt part is that part's answer; a media Task's file belongs to
         // a degenerate part with no body, and that Task's judgment stays Task-level exactly as it
-        // always was — one state, no part event.
+        // always was — one state, no part event — unless the part was given its own judgment.
         is ReviewPage.Asset -> item.parts
             .firstOrNull { it.partKey == model.partKey }
-            ?.takeIf { it.payloadKind != null }
+            ?.takeIf { it.payloadKind != null || it.judgment != null }
             ?.partKey
 
         ReviewPage.AddOn, null -> null
@@ -974,10 +1106,11 @@ fun ReviewSession(
         viewModel.submitItemReview(
             item,
             terms,
-            review,
+            pageReview,
             events,
             partKey = commitPartKey,
-            fields = fields
+            fields = fields,
+            taskReview = taskReview
         ) { accepted ->
             // A refused commit wrote nothing, so there is nowhere to move: advancing would show the
             // next Prompt while this one stayed unanswered, and the round would have walked past a
@@ -985,7 +1118,7 @@ fun ReviewSession(
             if (!accepted) return@submitItemReview
             when (
                 val arrival = commitArrival(
-                    advanceAfterCommit = reviewDefinition?.advanceAfterCommit != false,
+                    advanceAfterCommit = pageDefinition?.advanceAfterCommit != false,
                     pages = pages,
                     currentPage = currentPage
                 )
@@ -1005,16 +1138,36 @@ fun ReviewSession(
         }
     }
 
+    // Forward off this page when there is no judgment in it: the next page of the Task, or the
+    // next Task. The arrows make the same move; a swipe must not be a way to commit a question the
+    // page could not have asked.
+    fun advancePageOrQueue() {
+        val next = pageStep(pageCount, currentPage, forward = true)
+        if (next != null) pageIndex = next else navigation.next?.let { goTo(it) }
+    }
+
     fun dispatch(action: TaskAction) {
         when (action) {
-            TaskAction.CompleteTask -> {
-                // A presentation that accepts viewer events is committed with one, or not at all.
-                // Swiping forward without the point would leave the card uncompleted while the
-                // round moved past it; refusing the move is the honest answer, and the template's
-                // own button is the control that says what is missing.
-                if (definitionAcceptsEvents) {
-                    sample?.let { commit(listOf(it)) }
-                } else {
+            TaskAction.CompleteTask -> when {
+                // A masked page has no judgment to make, so forward turns the page or leaves the
+                // Task exactly as the arrows do. Committing would be refused by the write boundary
+                // after the card had already moved.
+                pageMaskNote != null -> advancePageOrQueue()
+
+                // A freeform part's answer is its files. The swipe is its Done.
+                pageIsFreeform -> commit(emptyList())
+
+                // A presentation that accepts viewer events is committed with one, or not at
+                // all. Swiping forward without the point would leave the card uncompleted while
+                // the round moved past it; refusing the move is the honest answer, and the
+                // template's own button is the control that says what is missing.
+                pageDefinition?.accepts?.isNotEmpty() == true -> sample?.let { commit(listOf(it)) }
+
+                // A part-scoped form or choice is answered on its own Content page. Its files are
+                // material, and swiping past one is a page turn rather than an answer nobody gave.
+                pageOwnsJudgment -> advancePageOrQueue()
+
+                else -> {
                     // A submission, because a review surface's completion is a judgment. Everything
                     // downstream of the write — the completion transition, the round bookkeeping,
                     // the webhook — is the same path a checkbox takes, so a list that becomes
@@ -1085,32 +1238,44 @@ fun ReviewSession(
     // The add-on page has no file and no pair, so its band is the frame's other half alone: the
     // Info icon, opening the Task's sheet. It is the static frame every template carries, applied
     // to a page that carries no template of its own.
+    // Whether a part's own control is drawn on this page at all. A masked page draws nothing — it
+    // has no judgment to make — and a part-scoped form or choice is answered on its Content page,
+    // so its files carry no button that could not record anything.
+    val drawsPageControl = pageCommitControlId != null &&
+        !pageCommitIsCompletion &&
+        pageMaskNote == null &&
+        !pageJudgmentMissing &&
+        (contentPage != null || pageIsFreeform || !pageOwnsJudgment)
     val assetBand: (@Composable () -> Unit)? = when {
+        pageMaskNote != null -> null
+
         contentPage != null -> {
             {
                 Column {
                     // Only a control-committed template draws a button here. An Immediate template
                     // has none: the options on the card are the controls, and the tap is the commit.
-                    if (commitControlId != null && !commitIsCompletion) {
+                    if (drawsPageControl) {
                         val formReady = pageForm?.isComplete(formAnswers) == true
                         ReviewTemplateControl(
-                            label = commitLabel,
-                            enabled = if (pageForm != null) {
-                                formReady && pageNotice == null
-                            } else {
-                                choice != null && !sampling
+                            label = pageCommitLabel,
+                            enabled = when {
+                                pageForm != null -> formReady && pageNotice == null
+                                pageIsFreeform -> pageNotice == null
+                                else -> choice != null && !sampling
                             },
                             status = when {
                                 pageForm != null && pageNotice != null -> pageNotice
                                 pageForm != null && !formReady -> "Answer every required field."
                                 pageForm != null -> "Ready to submit."
+                                pageIsFreeform && pageNotice != null -> pageNotice
+                                pageIsFreeform -> "Done when you have looked at the files."
                                 choice != null -> "Selected: ${choice.label}"
                                 recordedChoice != null -> "Recorded: ${recordedChoice.label}"
-                                acceptsChoice -> "Choose an option."
+                                pageAcceptsChoice -> "Choose an option."
                                 else -> null
                             },
                             onClick = {
-                                if (pageForm != null) commit(emptyList())
+                                if (pageForm != null || pageIsFreeform) commit(emptyList())
                                 else choice?.let { commit(listOf(it)) }
                             }
                         )
@@ -1129,7 +1294,26 @@ fun ReviewSession(
         else -> {
             val current = page
             if (kind == AssetKind.PDF) {
-                { MediaInfoBar(contentDescription = "PDF info") { infoOpen = true } }
+                // A PDF's tools live in its selection menu, so its band is normally the Info entry
+                // alone. A freeform part's Done is the exception: the file is the answer, and the
+                // button belongs above the entry that describes it.
+                if (drawsPageControl && pageIsFreeform) {
+                    {
+                        Column {
+                            ReviewTemplateControl(
+                                label = pageCommitLabel,
+                                enabled = true,
+                                // A file page has no strip above the question to say an earlier
+                                // answer was set aside, so the line under the control says it.
+                                status = staleNote ?: "Done when you have looked at the files.",
+                                onClick = { commit(emptyList()) }
+                            )
+                            MediaInfoBar(contentDescription = "PDF info") { infoOpen = true }
+                        }
+                    }
+                } else {
+                    { MediaInfoBar(contentDescription = "PDF info") { infoOpen = true } }
+                }
             } else {
                 {
                     Column {
@@ -1137,11 +1321,13 @@ fun ReviewSession(
                         // would be. It is the button the template names, and pressing it is the
                         // only thing that records the sample — which is the compatibility case
                         // this round exists to prove: a template, not the viewer, owns submission.
-                        if (commitControlId != null && !commitIsCompletion) {
+                        if (drawsPageControl) {
                             ReviewTemplateControl(
-                                label = commitLabel,
-                                enabled = sample != null && !sampling,
+                                label = pageCommitLabel,
+                                enabled = if (pageIsFreeform) true else sample != null && !sampling,
                                 status = when {
+                                    pageIsFreeform -> staleNote
+                                        ?: "Done when you have looked at the files."
                                     sampling -> "Reading the picture…"
                                     sample != null -> "Point ready: ${pointSummary(sample)}"
                                     recordedPoint != null ->
@@ -1151,7 +1337,7 @@ fun ReviewSession(
                                     // a value the reader refused to guess at.
                                     recordedText != null && recorded == null ->
                                         "Recorded: this build cannot read the answer."
-                                    acceptsPoint -> "Long-press the picture to choose a point."
+                                    pageAcceptsPoint -> "Long-press the picture to choose a point."
                                     else -> null
                                 },
                                 swatchColor = when {
@@ -1159,7 +1345,10 @@ fun ReviewSession(
                                     recordedPoint != null -> recordedPoint.color
                                     else -> null
                                 },
-                                onClick = { sample?.let { commit(listOf(it)) } }
+                                onClick = {
+                                    if (pageIsFreeform) commit(emptyList())
+                                    else sample?.let { commit(listOf(it)) }
+                                }
                             )
                         }
                         ReviewAssetControls(
@@ -1238,7 +1427,7 @@ fun ReviewSession(
                     viewModel.submitItemReview(
                         item,
                         terms,
-                        review,
+                        taskReview,
                         explicitCompletion = true
                     )
                 }) { Text("Complete") }
@@ -1334,7 +1523,11 @@ fun ReviewSession(
         // template is waiting for, but an empty band leaves a headless Prompt with no task-level
         // display at all. Read-only, and beside the file's band rather than inside it, so a tap
         // that puts the file's controls away cannot put this away too.
-        taskBar = if (commitIsCompletion) {
+        //
+        // A SinglePart Task whose parts carry their own judgments is the v0.8.5 exception: those
+        // controls are the way it is answered, and a checkbox beside them would be a second way to
+        // say the same thing.
+        taskBar = if (taskBarIsCompletion) {
             {
                 TaskCompletionBar(
                     item = item,
@@ -1356,7 +1549,7 @@ fun ReviewSession(
                                 viewModel.submitItemReview(
                                     item,
                                     terms,
-                                    review,
+                                    taskReview,
                                     explicitCompletion = true
                                 )
                             }
@@ -1376,9 +1569,10 @@ fun ReviewSession(
             // that could leave it would be a way to pass the question unknowingly. A page this
             // build cannot answer has no judgment to make, so it joins the ordinary run — swipe
             // turns the page, and at the run's ends crosses Tasks as navigation, not as a commit.
+            // A masked page is the same rule, with its reason drawn in place of the question.
             // Both cases get the tap that reveals and hides the asset band.
             //
-            val interactive = pageNotice == null
+            val interactive = pageNotice == null && pageMaskNote == null
             ContentPageSwipe(
                 canSwipeForward = !interactive && (pageForward != null || navigation.next != null),
                 canSwipeBack = !interactive && (pageBack != null || navigation.previous != null),
@@ -1393,36 +1587,46 @@ fun ReviewSession(
                 onTap = { chromeVisible = !chromeVisible },
                 modifier = Modifier.fillMaxSize()
             ) {
-                if (pageContent != null) {
-                    PromptContentPage(
-                        content = pageContent,
-                        resources = pageResources,
-                        selectedOptionId = (choice ?: recordedChoice)?.optionId,
-                        interactive = interactive,
-                        // A drill reveals its meaning only once the answer is on record. A page
-                        // this build cannot answer is read-only and shows everything it has.
-                        reveal = !interactive || recordedChoice != null,
-                        notice = pageNotice,
-                        player = player,
-                        onSelect = { option ->
-                            val event = ViewerEvent.Choice(option.id, option.label)
-                            if (commitsChoiceImmediately) {
-                                // The tap is the judgment. A refusal inside the write boundary
-                                // leaves this page on screen, which is the honest answer to a
-                                // refused commit.
-                                commit(listOf(event))
-                            } else {
-                                // A template with its own commit route holds the choice until
-                                // that route fires; nothing is written here.
-                                pendingChoice = event.encodeValue()
-                            }
-                        },
-                        answers = formAnswers,
-                        onAnswer = { field, value -> formAnswers = formAnswers + (field.key to value) },
-                        modifier = Modifier.fillMaxSize()
-                    )
-                } else {
-                    PromptNoticePage(pageNotice ?: "This question cannot be shown.")
+                when {
+                    pageMaskNote != null -> MaskedPageCard(pageMaskNote)
+                    pageContent != null -> Column(Modifier.fillMaxSize()) {
+                        // The branch closed and reopened under an answer that is still on record.
+                        // The page is answerable again, and the strip says why it looks answered.
+                        if (staleNote != null) StaleAnswerNote(staleNote)
+                        Box(Modifier.weight(1f)) {
+                            PromptContentPage(
+                                content = pageContent,
+                                resources = pageResources,
+                                selectedOptionId = (choice ?: recordedChoice)?.optionId,
+                                interactive = interactive,
+                                // A drill reveals its meaning only once the answer is on record.
+                                // A page this build cannot answer is read-only and shows
+                                // everything it has.
+                                reveal = !interactive || recordedChoice != null,
+                                notice = pageNotice,
+                                player = player,
+                                onSelect = { option ->
+                                    val event = ViewerEvent.Choice(option.id, option.label)
+                                    if (pageCommitsChoiceImmediately) {
+                                        // The tap is the judgment. A refusal inside the write
+                                        // boundary leaves this page on screen, which is the honest
+                                        // answer to a refused commit.
+                                        commit(listOf(event))
+                                    } else {
+                                        // A template with its own commit route holds the choice
+                                        // until that route fires; nothing is written here.
+                                        pendingChoice = event.encodeValue()
+                                    }
+                                },
+                                answers = formAnswers,
+                                onAnswer = { field, value ->
+                                    formAnswers = formAnswers + (field.key to value)
+                                },
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                    }
+                    else -> PromptNoticePage(pageNotice ?: "This question cannot be shown.")
                 }
             }
         } else {
@@ -1444,6 +1648,9 @@ fun ReviewSession(
             player = player,
             imageLoader = imageLoader,
             settings = settings,
+            // A page the branch does not ask for right now: the file on screen is kept private and
+            // an explanation takes its place. Null is an ordinary page.
+            maskNote = pageMaskNote,
             // A blocked Task cannot be swiped forward into a judgment; the end of the queue is
             // already this exact state, so it is the same inert forward edge, not a special one.
             // Its untouchable content is still browsable, which is why this gates only the end of
@@ -1458,8 +1665,10 @@ fun ReviewSession(
                 forwardIsNavigation ||
                 canLeaveTaskForward(
                     reviewBlocked = item.reviewBlocked != null,
-                    acceptsEvents = definitionAcceptsEvents,
-                    hasPendingEvent = sample != null
+                    acceptsEvents = pageDefinition?.accepts?.isNotEmpty() == true,
+                    // A freeform part's Done carries no event, so its forward edge is not waiting
+                    // for one; every other accepting page is.
+                    hasPendingEvent = sample != null || pageIsFreeform
                 ),
             // Back off the first file of a part returns to that part's Content page, and back off
             // the first Content page steps the queue — both are page turns, not judgments.
@@ -1495,11 +1704,13 @@ fun ReviewSession(
             },
             onSelectAsset = { pageIndex = pageState.pageOfAssetIndex(it) },
             onTap = { chromeVisible = !chromeVisible },
-            // The viewer's third gesture, offered only when the template in force accepts it and
-            // the page on screen is a picture. The point is resolved through the card's own zoom
-            // and letterbox geometry, then the picture itself is read — nothing here invents an
-            // answer the image does not carry.
-            onLongPress = if (acceptsPoint && page != null && kind == AssetKind.IMAGE) {
+            // The viewer's third gesture, offered only when the page's judgment accepts it, the
+            // page on screen is a picture and the branch is asking. The point is resolved through
+            // the card's own zoom and letterbox geometry, then the picture itself is read —
+            // nothing here invents an answer the image does not carry.
+            onLongPress = if (pageAcceptsPoint && pageMaskNote == null &&
+                page != null && kind == AssetKind.IMAGE
+            ) {
                 { zoom, position ->
                     val point = zoom.imagePointAt(position.x, position.y)
                     val uri = page.sourceUri
@@ -1568,9 +1779,9 @@ fun ReviewSession(
             // The questionnaire's answers, read only on its own page. Its current version no
             // longer asks some of them; those are kept and shown as no longer asked.
             addOnInfo = addOnInfoOf(storedAddOn, answers, addOnResolver),
-            // What the latest submission's template caught. Null for a template that accepts no
-            // events, so its sheet does not gain a section that could only ever say "None".
-            recordedEvents = recordedEvents.takeIf { definitionAcceptsEvents },
+            // What the latest submission's template caught. Null for a Task whose judgments accept
+            // no events, so its sheet does not gain a section that could only ever say "None".
+            recordedEvents = recordedEvents.takeIf { recordsEvents },
             recordedSourceNames = recordedSourceNames,
             // The answer the question on screen currently holds, read through the same part state
             // the card draws. The body is handed in as well so a form's rows say the label the
@@ -1616,6 +1827,16 @@ fun AssetRun(
     player: ExoPlayer,
     imageLoader: ImageLoader,
     settings: AppSettings,
+    /**
+     * Why the page on screen cannot be shown right now, or null for an ordinary page.
+     *
+     * A masked page is still a page: the counter, the guide and both gestures keep their places,
+     * and the swipe turns to the next page or leaves the Task exactly as it would on any other.
+     * What changes is that the file itself is not on screen and no control addresses it — the
+     * branch said this page is not being asked, and drawing the material under a question nobody
+     * asks would say the opposite.
+     */
+    maskNote: String? = null,
     canLeaveForward: Boolean,
     canLeaveBack: Boolean,
     onLeaveForward: () -> Unit,
@@ -1702,6 +1923,10 @@ fun AssetRun(
             // aspect and the page is laid out by its own scroll.
             LaunchedEffect(zoom) { zoom.contentAspect = null }
             addOnPage?.invoke()
+        } else if (maskNote != null) {
+            // Nothing to fit and nothing to mark: the explanation is centred on its own.
+            LaunchedEffect(zoom) { zoom.contentAspect = null }
+            MaskedPageCard(maskNote)
         } else {
             ItemPreview(
                 asset = asset!!,
@@ -2243,6 +2468,72 @@ private fun ReviewTemplateControl(
             }
         }
     }
+}
+
+/**
+ * The explanation a page shows instead of its question or its file.
+ *
+ * A masked page is not a missing page. The branch the part sits on is waiting, or closed, or this
+ * build cannot read something the part depends on — three facts that each call for a different
+ * sentence. The page keeps its place in the count, the guide and both gestures; what it does not do
+ * is ask a question or show material the branch is not asking about.
+ */
+@Composable
+private fun MaskedPageCard(message: String) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(ListeaDimens.PagePadding),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = message,
+            color = Color.White.copy(alpha = 0.85f),
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier
+                .clip(RoundedCornerShape(ListeaDimens.CardCorner))
+                .background(Color.White.copy(alpha = 0.08f))
+                .padding(ListeaDimens.PagePadding)
+        )
+    }
+}
+
+/**
+ * The line above a page whose earlier answer the branch set aside and is asking for again.
+ *
+ * The answer is still on record — the export says so — but it is not current, so the page looks
+ * answered and still asks. Saying why is the difference between a confusing screen and a reopened
+ * question.
+ */
+@Composable
+private fun StaleAnswerNote(message: String) {
+    Text(
+        text = message,
+        color = Color.White.copy(alpha = 0.75f),
+        style = MaterialTheme.typography.bodySmall,
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.White.copy(alpha = 0.08f))
+            .padding(horizontal = ListeaDimens.PagePadding, vertical = ListeaDimens.CompactGap)
+    )
+}
+
+/**
+ * What an availability code means to the person looking at the page.
+ *
+ * The codes are the import's and the reader's vocabulary, not a person's: each one names a fact
+ * about the Package or about this build, and the page says the fact rather than the code. An
+ * unknown code is still an answer — the part cannot be presented — and says only that.
+ */
+private fun availabilityNote(code: String): String = when (code) {
+    "unsupported-viewer" -> "This build cannot show this part's question."
+    "unsupported-judgment" -> "This page's answer sheet is not available in this build."
+    "condition-invalid" -> "This part's condition cannot be read, so this build does not ask it."
+    "condition-source-detached" -> "The question this part depends on is no longer in this Task."
+    "condition-source-outside-task" -> "The question this part depends on belongs to another Task."
+    "condition-source-unknown", "condition-source-not-earlier" ->
+        "This part's condition names a question this build cannot use."
+    else -> "This part cannot be shown in this build."
 }
 
 /**

@@ -20,7 +20,7 @@ android {
         // installs over 0.8.2, and the 0.8.4 preview (804) still installs over 0.8.3 (803). The
         // hyphen suffix says the sub-version is not frozen yet; the numeric prefix is what the
         // installer and the About page measure.
-        val version = "0.8.4-preview"
+        val version = "0.8.5-preview"
         versionName = version
         versionCode = version.takeWhile { it.isDigit() || it == '.' }
             .split(".")

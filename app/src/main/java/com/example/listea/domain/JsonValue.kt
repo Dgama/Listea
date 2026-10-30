@@ -371,6 +371,15 @@ private fun compareCodePoints(a: String, b: String): Int {
     return (a.length - i).compareTo(b.length - j)
 }
 
+/**
+ * One string as a JSON literal, escaped exactly as [canonical] escapes it.
+ *
+ * For the few canonical writers whose key order is fixed by their own document rather than sorted
+ * — a condition's `prompt`, `field`, `equals`/`in`. Building those through [JsonValue.Obj] would
+ * sort them, and re-escaping by hand is how two writers come to disagree about a tab.
+ */
+internal fun jsonString(value: String): String = buildString { appendJsonString(this, value) }
+
 private fun appendJsonString(out: StringBuilder, value: String) {
     out.append('"')
     var i = 0

@@ -57,6 +57,10 @@ data class PayloadPromptRow(
  * [response] is the part's current canonical answer, or null/empty while pending. It is read as
  * text for the same reason [PayloadReviewRow.response] is: only `ReviewResponse.parse` may decide
  * whether this build can read it.
+ *
+ * [condition], [partJudgment], [availability], [answeredAt] and [stale] are what a v7 body needs to
+ * say why a part was or was not asked, and which of its answers still counts. A v6 writer ignores
+ * them; they are read here so the export's one part query serves both versions.
  */
 data class PayloadPartRow(
     val taskId: String,
@@ -68,7 +72,12 @@ data class PayloadPartRow(
     val kind: String?,
     val schemaVersion: Int?,
     val revision: Int?,
-    val response: String? = null
+    val response: String? = null,
+    val availability: String? = null,
+    val condition: String? = null,
+    val partJudgment: String? = null,
+    val answeredAt: Long? = null,
+    val stale: Boolean = false
 )
 
 /**

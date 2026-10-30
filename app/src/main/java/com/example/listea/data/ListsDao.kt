@@ -18,22 +18,29 @@ import com.example.listea.allAssets
 import com.example.listea.assetViewerAvailable
 import com.example.listea.childRelativePath
 import com.example.listea.decideContentDecision
+import com.example.listea.encodeTemplateAttachments
 import com.example.listea.hasSourceChanges
 import com.example.listea.isAncestorOrSame
 import com.example.listea.normalizeKeepTree
 import com.example.listea.taskChanges
+import com.example.listea.domain.ApplicabilityPart
 import com.example.listea.domain.AssetKind
 import com.example.listea.domain.EXPORT_CHOICE_NONE
 import com.example.listea.domain.FieldAnswer
+import com.example.listea.domain.PartApplicability
 import com.example.listea.domain.ReviewContext
 import com.example.listea.domain.ReviewEventId
 import com.example.listea.domain.ReviewEventKind
 import com.example.listea.domain.ReviewResponse
 import com.example.listea.domain.TemplateVersionRef
+import com.example.listea.domain.Templates
 import com.example.listea.domain.ViewerEvent
 import com.example.listea.domain.assetUri
 import com.example.listea.domain.completesTask
+import com.example.listea.domain.decodePartCondition
 import com.example.listea.domain.encode
+import com.example.listea.domain.encodePartCondition
+import com.example.listea.domain.evaluateApplicability
 import com.example.listea.domain.structuredFields
 import com.example.listea.domain.viewerEvents
 import java.util.UUID
@@ -48,6 +55,15 @@ import kotlinx.coroutines.flow.Flow
  * leaves room for the bound parameters any such statement carries besides the list itself.
  */
 private const val PathBindChunk = 500
+
+/**
+ * The availability code a part carries when the source its condition names is no longer declared.
+ *
+ * Distinct from `condition-source-outside-task`: that one says the composition split two parts of
+ * one revision, and reopening under one Task per Section repairs it. This one says the Package
+ * itself no longer declares the source, so no composition can repair it and the producer must.
+ */
+private const val CONDITION_SOURCE_DETACHED = "condition-source-detached"
 
 @Dao
 abstract class ListsDao {
@@ -202,8 +218,11 @@ abstract class ListsDao {
                COALESCE(p.required, 1) AS required,
                COALESCE(p.present, 1) AS present,
                p.availability AS availability,
+               p.condition AS condition, p.partJudgment AS partJudgment,
                pp.kind AS payloadKind, pp.schemaVersion AS payloadSchema,
-               pp.revision AS payloadRevision
+               pp.revision AS payloadRevision,
+               ps.response AS response, ps.answeredAt AS answeredAt,
+               COALESCE(ps.stale, 0) AS stale
         FROM task_imports ti
         JOIN list_items i ON i.taskId = ti.taskId
         LEFT JOIN package_compositions cmp ON cmp.taskId = ti.taskId
@@ -214,6 +233,7 @@ abstract class ListsDao {
                ON pc.sourceId = ti.sourceId AND pc.packageKey = cmp.packageKey
         LEFT JOIN task_parts p ON p.taskId = ti.taskId
         LEFT JOIN task_part_payloads pp ON pp.taskId = p.taskId AND pp.partKey = p.partKey
+        LEFT JOIN task_part_state ps ON ps.taskId = p.taskId AND ps.partKey = p.partKey
         WHERE i.listId = :listId
         ORDER BY ti.taskId, p.position
         """
@@ -281,8 +301,11 @@ abstract class ListsDao {
                COALESCE(p.required, 1) AS required,
                COALESCE(p.present, 1) AS present,
                p.availability AS availability,
+               p.condition AS condition, p.partJudgment AS partJudgment,
                pp.kind AS payloadKind, pp.schemaVersion AS payloadSchema,
-               pp.revision AS payloadRevision
+               pp.revision AS payloadRevision,
+               ps.response AS response, ps.answeredAt AS answeredAt,
+               COALESCE(ps.stale, 0) AS stale
         FROM task_imports ti
         JOIN list_items i ON i.taskId = ti.taskId
         LEFT JOIN package_compositions cmp ON cmp.taskId = ti.taskId
@@ -293,6 +316,7 @@ abstract class ListsDao {
                ON pc.sourceId = ti.sourceId AND pc.packageKey = cmp.packageKey
         LEFT JOIN task_parts p ON p.taskId = ti.taskId
         LEFT JOIN task_part_payloads pp ON pp.taskId = p.taskId AND pp.partKey = p.partKey
+        LEFT JOIN task_part_state ps ON ps.taskId = p.taskId AND ps.partKey = p.partKey
         WHERE i.listId = :listId
         ORDER BY ti.taskId, p.position
         """
@@ -393,8 +417,11 @@ abstract class ListsDao {
         """
         SELECT p.taskId AS taskId, p.partKey AS partKey, p.position AS position,
                p.promptKey AS promptKey, p.required AS required, p.present AS present,
+               p.availability AS availability, p.condition AS condition,
+               p.partJudgment AS partJudgment,
                pp.kind AS kind, pp.schemaVersion AS schemaVersion, pp.revision AS revision,
-               ps.response AS response
+               ps.response AS response, ps.answeredAt AS answeredAt,
+               COALESCE(ps.stale, 0) AS stale
         FROM task_parts p
         LEFT JOIN task_part_payloads pp ON pp.taskId = p.taskId AND pp.partKey = p.partKey
         LEFT JOIN task_part_state ps ON ps.taskId = p.taskId AND ps.partKey = p.partKey
@@ -602,35 +629,63 @@ abstract class ListsDao {
         // control in the UI is a courtesy; this is the guarantee.
         if (!contentPresentable(taskId)) return emptyList()
 
-        // A part this build cannot present, or one the Package detached, is not an answerable
-        // decision: writing an answer to it would be recording a judgment on a page nobody could
-        // have been shown.
+        // The Task's rows are read once, before the write, because applicability is derived from
+        // them: which branches are open right now is the premise every check and every transition
+        // below starts from.
+        val rows = partRows(taskId)
+        val branches = partBranches(rows)
+        val applicability = applicabilityOf(rows, branches)
+
+        // A part this build cannot present, one the Package detached, or one whose branch is not
+        // open now is not an answerable decision: writing an answer to it would be recording a
+        // judgment on a page nobody could have been shown or asked for.
         if (partKey != null) {
-            val part = partRow(taskId, partKey) ?: return emptyList()
-            if (!part.present || part.availability != null) return emptyList()
+            val part = rows.firstOrNull { it.partKey == partKey } ?: return emptyList()
+            if (!part.present || branches.getValue(partKey).availability != null) return emptyList()
+            if (applicability[partKey] != PartApplicability.Active) return emptyList()
         }
 
         val affected = listsContainingTask(taskId)
         val wasComplete = affected.filter { isComplete(it) == true }.toSet()
+        val wasTaskComplete = getTaskState(taskId)?.isCompleted == true
 
         // The part's current answer, written before completion is recomputed: completion reads the
-        // parts, so a policy must see this answer rather than the one it replaced.
+        // parts, so a policy must see this answer rather than the one it replaced. The upsert
+        // replaces the whole row, which is also what clears a stale flag: a fresh commit is the one
+        // thing that makes an answer current again.
+        val encoded = response.encode()
         if (partKey != null) {
             upsertTaskPartState(
                 TaskPartStateEntity(
                     taskId = taskId,
                     partKey = partKey,
-                    response = response.encode(),
+                    response = encoded,
                     answeredAt = now,
                     revision = partPayload(taskId, partKey)?.revision,
                     updatedAt = now
                 )
             )
         }
+
+        // Which branches the answer moved, evaluated with the response that was just written: a
+        // source's own answer is what can open or close the parts after it. A branch that closed
+        // does not delete its answer — it sets it aside — and a required part that reopened after
+        // being closed is what reopens a completed Task.
+        val after = applicabilityOf(
+            rows,
+            branches,
+            responseOverride = partKey?.let { it to encoded }
+        )
+        setAnsweredPartsAside(taskId, rows, after, now)
+        val reopened = wasTaskComplete && rows.any { row ->
+            row.present && row.required &&
+                applicability[row.partKey] == PartApplicability.Inactive &&
+                after[row.partKey] == PartApplicability.Active
+        }
         val partsComplete = partKey != null && partsCompletionSatisfied(taskId, completion)
 
         val source = if (explicitCompletion) COMPLETION_EXPLICIT else COMPLETION_AUTOMATIC
-        val written = writeTaskState(taskId, now, source = source) { existing ->
+        val written = writeTaskState(taskId, now, source = source, reopen = reopened) { existing ->
             when (completion) {
                 CompletionPolicy.SinglePart ->
                     // The completion control is a person saying the Task is done; a part's own
@@ -686,25 +741,132 @@ abstract class ListsDao {
     /**
      * Whether the parts the policy counts are answered, as of the rows written just now.
      *
-     * Only required, present parts are counted. A part the Package detached is no longer part of
-     * the judgment and must not hold it open; a required part this build cannot present is still
-     * required, so it stays unanswered and blocks — the same refusal an unviewable file makes.
+     * Only **active** required, present parts are counted, and only **available** ones can be
+     * answered: a part a condition masks is not work anybody owes, and a part this build cannot
+     * present is still required, so it stays unanswered and blocks — the same refusal an unviewable
+     * file makes. A stale answer is on record but is not an answer for completion; the part must be
+     * committed again after its branch reopens.
+     *
+     * `AllRequiredParts` is vacuously satisfied when no required part is active — a Task whose whole
+     * visible work is closed has no work left — and `AnyPart` never is. `SinglePart` and
+     * `ExplicitOnly` are statements about the Task or its one part, not about these rows.
      */
     protected suspend fun partsCompletionSatisfied(
         taskId: String,
         policy: CompletionPolicy
     ): Boolean {
-        val required = partsForTask(taskId).filter { it.present && it.required }
-        if (required.isEmpty()) return false
-        val answered = partStates(taskId)
-            .filter { it.answeredAt != null || it.response.isNotEmpty() }
-            .map { it.partKey }
-            .toSet()
+        if (policy != CompletionPolicy.AllRequiredParts && policy != CompletionPolicy.AnyPart) {
+            return false
+        }
+        val rows = partRows(taskId)
+        val branches = partBranches(rows)
+        val applicability = applicabilityOf(rows, branches)
+        val activeRequired = rows.filter { row ->
+            row.present && row.required && applicability[row.partKey] == PartApplicability.Active
+        }
+        val answered = rows.filter { row ->
+            (row.answeredAt != null || !row.response.isNullOrEmpty()) && !row.stale
+        }.map { it.partKey }.toSet()
+        val available = activeRequired.filter { branches.getValue(it.partKey).availability == null }
         return when (policy) {
-            CompletionPolicy.AllRequiredParts -> required.all { it.partKey in answered }
-            CompletionPolicy.AnyPart -> required.any { it.partKey in answered }
+            CompletionPolicy.AllRequiredParts ->
+                available.size == activeRequired.size && activeRequired.all { it.partKey in answered }
+
+            CompletionPolicy.AnyPart -> available.any { it.partKey in answered }
+
             CompletionPolicy.SinglePart,
             CompletionPolicy.ExplicitOnly -> false
+        }
+    }
+
+    /**
+     * Every row's decoded branch, keyed by part: one decode shared by applicability, completion and
+     * the stale transition.
+     *
+     * A stored condition or judgment this build cannot read is represented by its availability code
+     * rather than being silently dropped — the branch is [PartBranch.condition] null and
+     * [PartBranch.availability] set, so the evaluator reads the part as unconditional but every
+     * write path refuses it. That is the fail-closed direction: an unreadable condition costs the
+     * part its answerability, never grants it.
+     */
+    private fun partBranches(rows: List<TaskPartRow>): Map<String, PartBranch> =
+        rows.associate { row ->
+            row.partKey to partBranch(row.availability, row.condition, row.partJudgment)
+        }
+
+    /**
+     * Applicability derived from a Task's rows, with one part's answer optionally replaced.
+     *
+     * [responseOverride] is the answer a submission is about to write: the write path asks what the
+     * branches would say *after* it, from the rows it already read, rather than re-reading a table
+     * whose other parts this transaction has not touched.
+     */
+    /**
+     * The completion rule a planned Task is judged by.
+     *
+     * A Task that names its own container — a mixed Package Task — completes under that container's
+     * policy even when the Todo's chosen review states something else: the container is a fact
+     * about the Task's parts, and the run's review is a fact about the Todo. Every other Task uses
+     * the run's policy, exactly as before.
+     */
+    private fun completionFor(
+        task: PlannedTask,
+        runPolicy: CompletionPolicy
+    ): CompletionPolicy = task.taskReview
+        ?.let { ref ->
+            Templates.BuiltinJudgments.firstOrNull { it.ref == ref }?.taskReview?.completion
+        }
+        ?: runPolicy
+
+    /** [applicabilityOf] for one Task, reading its rows. */
+    private suspend fun applicabilityOf(taskId: String): Map<String, PartApplicability> {
+        val rows = partRows(taskId)
+        return applicabilityOf(rows, partBranches(rows))
+    }
+
+    private fun applicabilityOf(
+        rows: List<TaskPartRow>,
+        branches: Map<String, PartBranch>,
+        responseOverride: Pair<String, String>? = null
+    ): Map<String, PartApplicability> = evaluateApplicability(
+        rows.map { row ->
+            val branch = branches.getValue(row.partKey)
+            ApplicabilityPart(
+                partKey = row.partKey,
+                position = row.position,
+                required = row.required,
+                present = row.present,
+                availability = branch.availability,
+                condition = branch.condition,
+                kind = row.payloadKind,
+                response = if (responseOverride?.first == row.partKey) {
+                    responseOverride.second
+                } else {
+                    row.response
+                }
+            )
+        }
+    )
+
+    /**
+     * Sets aside every answered part whose branch is closed now.
+     *
+     * Called after any write that can move an answer. Idempotent by construction — a part already
+     * stale is skipped, and a branch that stays closed is not a second transition — and one-way:
+     * only the part's own next commit, which replaces its state row, clears the flag. The answer
+     * text is kept, because the export still says what was answered before the branch closed.
+     */
+    private suspend fun setAnsweredPartsAside(
+        taskId: String,
+        rows: List<TaskPartRow>,
+        applicability: Map<String, PartApplicability>,
+        now: Long
+    ) {
+        for (row in rows) {
+            if (row.stale) continue
+            if (row.answeredAt == null && row.response.isNullOrEmpty()) continue
+            if (applicability[row.partKey] != PartApplicability.Inactive) continue
+            markTaskPartStateStale(taskId, row.partKey, now)
         }
     }
 
@@ -2055,14 +2217,30 @@ abstract class ListsDao {
      * explicit completion: the person signed off, and a part answer arriving afterwards is not a
      * retraction of that sign-off. The value is written either way, so an explicit completion that
      * is later cleared by the control carries [COMPLETION_EXPLICIT] again.
+     *
+     * [reopen] is the one transition that is not a change of mind. A completed Task whose required
+     * work came back — a branch a later answer reopened — is no longer done, and that is true of a
+     * sign-off too: the sign-off was about the Task as it stood. It therefore writes `false` under
+     * [COMPLETION_REOPENED] and bypasses the explicit-preservation rule for this one write, so the
+     * provenance says why the completion went away rather than looking like a retraction.
      */
     protected open suspend fun writeTaskState(
         taskId: String,
         now: Long,
         source: String = COMPLETION_EXPLICIT,
+        reopen: Boolean = false,
         change: (Boolean) -> Boolean
     ): Boolean? {
         val existing = getTaskState(taskId) ?: return null
+        if (reopen && existing.isCompleted) {
+            updateTaskState(
+                taskId = taskId,
+                isCompleted = false,
+                completionSource = COMPLETION_REOPENED,
+                updatedAt = now
+            )
+            return false
+        }
         val computed = change(existing.isCompleted)
         // An automatic write cannot take a sign-off away, and it cannot take its *provenance*
         // away either: writing `true` under `automatic` would let the next recompute — a part
@@ -2070,11 +2248,21 @@ abstract class ListsDao {
         // moves only when a person moves it.
         val keepExplicit = source == COMPLETION_AUTOMATIC &&
             existing.completionSource == COMPLETION_EXPLICIT
+        // A reopened Task keeps the reason it was cleared until something completes it again: a
+        // later part answer that still leaves required work open is not a second transition, and
+        // rewriting the source to `automatic` would lose the one fact that says why the Task is
+        // open. The marker moves only when a completion is reached again.
+        val keepReopened = source == COMPLETION_AUTOMATIC && !computed &&
+            existing.completionSource == COMPLETION_REOPENED
         val next = if (keepExplicit && !computed) existing.isCompleted else computed
         updateTaskState(
             taskId = taskId,
             isCompleted = next,
-            completionSource = if (keepExplicit) COMPLETION_EXPLICIT else source,
+            completionSource = when {
+                keepExplicit -> COMPLETION_EXPLICIT
+                keepReopened -> COMPLETION_REOPENED
+                else -> source
+            },
             updatedAt = now
         )
         return next
@@ -2389,16 +2577,23 @@ abstract class ListsDao {
     protected abstract suspend fun dissolvedSnapshotRows(sourceId: String): List<DissolvedSnapshotRow>
 
     /**
-     * The same Todo's present parts, with their current answers, in composition order.
+     * The same Todo's present parts, with their branch facts and current answers, in composition
+     * order.
      *
      * A second read rather than more columns on the file rows: [dissolvedSnapshotRows] is one row
      * per Asset, and repeating each part on every file row would multiply the payload by the file
      * count and leave the snapshot deciding which repetition to believe. Present parts only — a
      * detached part is not one of the decisions being kept.
+     *
+     * `condition` and `partJudgment` come across as the stored texts, and `stale` through
+     * `COALESCE` so a part with no state row yet reads as current — the same value a fresh state
+     * row holds.
      */
     @Query(
         """
         SELECT p.taskId AS taskId, p.partKey AS partKey, p.required AS required,
+               p.partJudgment AS partJudgment, p.condition AS condition,
+               COALESCE(ps.stale, 0) AS stale,
                COALESCE(ps.response, '') AS response
         FROM task_parts p
         JOIN task_imports ti ON ti.taskId = p.taskId
@@ -2467,7 +2662,10 @@ abstract class ListsDao {
                                 DissolvedPartRecord(
                                     partKey = part.partKey,
                                     required = part.required,
-                                    response = part.response
+                                    response = part.response,
+                                    partJudgment = part.partJudgment,
+                                    condition = part.condition,
+                                    stale = part.stale
                                 )
                             }
                         ),
@@ -2708,6 +2906,21 @@ abstract class ListsDao {
                         )
                     )
                 }
+                // Applicability belongs to the composition being recovered **into**, so it is
+                // re-derived from the new parts' conditions and the answers just restored — never
+                // copied from the snapshot. A recovered answer whose branch is closed now is set
+                // aside exactly as a commit that closed the branch would have left it: on record,
+                // not current. The snapshot's own `stale` flag is a fact about the old
+                // composition, and writing it back would let a dissolved branch outvote the new
+                // one.
+                val restoredKeys = parts.mapTo(mutableSetOf()) { it.partKey }
+                val currentRows = partRows(row.taskId)
+                setAnsweredPartsAside(
+                    taskId = row.taskId,
+                    rows = currentRows.filter { it.partKey in restoredKeys },
+                    applicability = applicabilityOf(currentRows, partBranches(currentRows)),
+                    now = now
+                )
             }
             // An unknown version, or a payload this build did not write, ends the file restore here:
             // completion and any part answers are restored and nothing is guessed at. That is also
@@ -3278,7 +3491,11 @@ abstract class ListsDao {
         var dropped = 0
         // Tasks this run re-examined whose completion may be a fact about a part set that just
         // changed. A created Task needs no entry: it starts incomplete and has no answer yet.
+        // [touchedPolicy] is the completion rule each one is judged by — a mixed Package Task
+        // names its own container, and that container's policy is a fact about its parts rather
+        // than about the review this Todo chose.
         val touched = mutableSetOf<String>()
+        val touchedPolicy = mutableMapOf<String, CompletionPolicy>()
         var assetsCreated = 0
         var assetsUpdated = 0
         var assetsMissing = 0
@@ -3317,19 +3534,36 @@ abstract class ListsDao {
             dropped++
         }
 
+        // Applicability as it stood before this run touched anything, for every Task the run may
+        // reconcile or reset. A revision can add, detach or re-point a condition, so the stale
+        // transition and the reopen rule are statements about the change — neither can be read
+        // from the state afterwards alone.
+        val beforeApplicability = buildMap {
+            for (taskId in owned.values.map { it.taskId } + decisions.map { it.first.taskId }) {
+                put(taskId, applicabilityOf(taskId))
+            }
+        }
+
         for (task in plan.tasks) {
+            // A mixed Package Task names its own container, because its completion rule is a fact
+            // about the parts and not about the review the Todo chose. Every other Task is stamped
+            // with the run's review, exactly as v0.8.4 did.
+            val stampedReview = task.taskReview
+                ?.let { encodeTemplateAttachments(listOf(it)) }
+                ?: taskReview
             val existing = owned[task.groupPath]
             if (existing != null) {
                 reconciled++
                 touched += existing.taskId
+                touchedPolicy[existing.taskId] = completionFor(task, completion)
                 val delta = reconcileTask(
-                    source, existing.taskId, task, now, assetControls, addOn, taskReview
+                    source, existing.taskId, task, now, assetControls, addOn, stampedReview
                 )
                 assetsCreated += delta.created
                 assetsUpdated += delta.updated
             } else {
                 val delta = resolveNewTask(
-                    source, importer, task, now, assetControls, addOn, taskReview
+                    source, importer, task, now, assetControls, addOn, stampedReview
                 )
                 if (delta.conflict != null) {
                     conflicts += delta.conflict
@@ -3352,6 +3586,7 @@ abstract class ListsDao {
             // moved; the recompute below is what makes the cleared checkbox true again when every
             // remaining required part was answered by the run that follows.
             touched += change.taskId
+            touchedPolicy[change.taskId] = completion
             reset++
         }
 
@@ -3363,11 +3598,34 @@ abstract class ListsDao {
         // Completion is derived from the parts under the part policies, and a re-import is the one
         // path that can change the part set without a submission. Recompute after [applyPackages]
         // so a Prompt the Package added or detached is already visible in `task_parts`; an explicit
-        // completion survives, because [writeTaskState] only lets a person take one away.
-        if (completion != CompletionPolicy.SinglePart) {
-            for (taskId in touched) {
-                val satisfied = partsCompletionSatisfied(taskId, completion)
-                writeTaskState(taskId, now, source = COMPLETION_AUTOMATIC) { satisfied }
+        // completion survives, because [writeTaskState] only lets a person take one away — unless a
+        // required branch reopened, which is the Task changing rather than an answer retracted.
+        for (taskId in touched) {
+            val before = beforeApplicability[taskId].orEmpty()
+            val rows = partRows(taskId)
+            val branches = partBranches(rows)
+            val after = applicabilityOf(rows, branches)
+            // A re-import never invents an answer: this only sets aside answers whose branch the
+            // revision closed, exactly as a submission would. It never clears a stale flag.
+            setAnsweredPartsAside(taskId, rows, after, now)
+            val reopened = getTaskState(taskId)?.isCompleted == true && rows.any { row ->
+                row.present && row.required &&
+                    before[row.partKey] == PartApplicability.Inactive &&
+                    after[row.partKey] == PartApplicability.Active
+            }
+            val policy = touchedPolicy[taskId] ?: completion
+            when {
+                reopened -> writeTaskState(
+                    taskId,
+                    now,
+                    source = COMPLETION_AUTOMATIC,
+                    reopen = true
+                ) { false }
+
+                policy != CompletionPolicy.SinglePart -> {
+                    val satisfied = partsCompletionSatisfied(taskId, policy)
+                    writeTaskState(taskId, now, source = COMPLETION_AUTOMATIC) { satisfied }
+                }
             }
         }
 
@@ -3685,10 +3943,15 @@ abstract class ListsDao {
         """
         SELECT p.taskId AS taskId, p.partKey AS partKey, p.position AS position,
                p.promptKey AS promptKey, p.required AS required, p.present AS present,
-               p.availability AS availability, pp.kind AS payloadKind,
-               pp.schemaVersion AS payloadSchema, pp.revision AS payloadRevision
+               p.availability AS availability, p.condition AS condition,
+               p.partJudgment AS partJudgment,
+               pp.kind AS payloadKind,
+               pp.schemaVersion AS payloadSchema, pp.revision AS payloadRevision,
+               ps.response AS response, ps.answeredAt AS answeredAt,
+               COALESCE(ps.stale, 0) AS stale
         FROM task_parts p
         LEFT JOIN task_part_payloads pp ON pp.taskId = p.taskId AND pp.partKey = p.partKey
+        LEFT JOIN task_part_state ps ON ps.taskId = p.taskId AND ps.partKey = p.partKey
         WHERE p.taskId = :taskId
         ORDER BY p.position, p.partKey
         """
@@ -3700,10 +3963,15 @@ abstract class ListsDao {
         """
         SELECT p.taskId AS taskId, p.partKey AS partKey, p.position AS position,
                p.promptKey AS promptKey, p.required AS required, p.present AS present,
-               p.availability AS availability, pp.kind AS payloadKind,
-               pp.schemaVersion AS payloadSchema, pp.revision AS payloadRevision
+               p.availability AS availability, p.condition AS condition,
+               p.partJudgment AS partJudgment,
+               pp.kind AS payloadKind,
+               pp.schemaVersion AS payloadSchema, pp.revision AS payloadRevision,
+               ps.response AS response, ps.answeredAt AS answeredAt,
+               COALESCE(ps.stale, 0) AS stale
         FROM task_parts p
         LEFT JOIN task_part_payloads pp ON pp.taskId = p.taskId AND pp.partKey = p.partKey
+        LEFT JOIN task_part_state ps ON ps.taskId = p.taskId AND ps.partKey = p.partKey
         WHERE p.taskId IN (:taskIds)
         ORDER BY p.taskId, p.position, p.partKey
         """
@@ -3728,9 +3996,17 @@ abstract class ListsDao {
         fun reviewAsset(asset: AssetEntity) =
             asset.toReviewAsset(pairs[asset.id]?.decisions ?: AssetDecisions())
 
+        // Applicability is derived once per Task, in composition order, from the decoded
+        // conditions and the stored answers — never stored, so it cannot disagree with them. The
+        // same two helpers answer the write path, so the page a reviewer is shown and the rule
+        // completion is computed from cannot drift.
+        val branches = partBranches(rows)
+        val applicability = applicabilityOf(rows, branches)
+
         val byPart = assets.groupBy { it.partKey }.toMutableMap()
         val unassigned = byPart.remove(null).orEmpty()
         val parts = rows.map { row ->
+            val branch = branches.getValue(row.partKey)
             ReviewPart(
                 partKey = row.partKey,
                 position = row.position,
@@ -3740,8 +4016,12 @@ abstract class ListsDao {
                 payloadRevision = row.payloadRevision,
                 required = row.required,
                 present = row.present,
-                availability = row.availability,
-                assets = byPart[row.partKey].orEmpty().map(::reviewAsset)
+                availability = branch.availability,
+                assets = byPart[row.partKey].orEmpty().map(::reviewAsset),
+                condition = branch.condition,
+                judgment = branch.judgment,
+                applicability = applicability[row.partKey] ?: PartApplicability.Active,
+                stale = row.stale
             )
         }
         val fallback = unassigned.map(::reviewAsset)
@@ -3893,6 +4173,12 @@ abstract class ListsDao {
      * stale and same-revision checks live. Writing the body from the ordinary Task loop — which
      * runs first and knows nothing about a checkpoint — would let a lower revision overwrite a
      * higher revision's payload while the checkpoint correctly refused the round.
+     *
+     * **The branch facts are written from the plan, not merged with the row.** A condition the new
+     * revision removed is cleared, a judgment a homogeneous Task no longer needs is cleared, and an
+     * availability the new composition repaired is cleared — the same way the payload follows the
+     * revision. What this must never clear is the part's answer, which is why the state row is left
+     * alone when it exists.
      */
     private suspend fun writePart(taskId: String, part: PlannedPart, now: Long) {
         upsertTaskPart(
@@ -3904,7 +4190,9 @@ abstract class ListsDao {
                 promptKey = part.prompt?.promptKey,
                 required = part.required,
                 present = true,
-                availability = null,
+                availability = part.availability,
+                condition = part.condition?.let(::encodePartCondition),
+                partJudgment = part.judgment?.let { encodeTemplateAttachments(listOf(it)) },
                 updatedAt = now
             )
         )
@@ -4145,6 +4433,24 @@ abstract class ListsDao {
         now: Long
     )
 
+    /**
+     * Rewrites why one part cannot be answered, leaving its branch and its answer alone.
+     *
+     * Used by reconciliation, where the reason changes without the declaration changing: a
+     * condition whose source a revision removed detaches from it, and the part keeps the `when` it
+     * was written with — the app does not guess that an orphaned condition means "unconditional".
+     */
+    @Query(
+        "UPDATE task_parts SET availability = :availability, updatedAt = :now " +
+            "WHERE taskId = :taskId AND partKey = :partKey"
+    )
+    protected abstract suspend fun setTaskPartAvailability(
+        taskId: String,
+        partKey: String,
+        availability: String,
+        now: Long
+    )
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     protected abstract suspend fun upsertTaskPartPayload(payload: TaskPartPayloadEntity)
 
@@ -4183,14 +4489,46 @@ abstract class ListsDao {
     abstract suspend fun partStates(taskId: String): List<TaskPartStateEntity>
 
     /**
+     * The current answers of several Tasks' parts, for a payload built right now and for the live
+     * read a review round draws its branches from.
+     *
+     * Applicability is derived from these answers and never stored, so a surface that froze them on
+     * entry would keep showing the branch the gate had when the round opened — a conditional page
+     * stuck on *waiting* after the answer that decides it was committed, or a closed one still
+     * inviting an answer. The same re-read [getTaskStates] gives completion, for the same reason:
+     * the round freezes which Tasks it walks, not what has been decided about them.
+     */
+    @Query("SELECT * FROM task_part_state WHERE taskId IN (:taskIds)")
+    abstract suspend fun getTaskPartStates(taskIds: List<String>): List<TaskPartStateEntity>
+
+    /** [getTaskPartStates] as a live read, watched by an open round. */
+    @Query("SELECT * FROM task_part_state WHERE taskId IN (:taskIds)")
+    abstract fun observeTaskPartStates(taskIds: List<String>): Flow<List<TaskPartStateEntity>>
+
+    /**
+     * Sets a stored answer aside because the branch it belongs to is closed.
+     *
+     * One-way and idempotent: only a fresh commit, which replaces the state row, clears the flag.
+     * `updatedAt` moves because the record changed, and the answer text is deliberately untouched —
+     * the export still reports what was answered while the branch was open.
+     */
+    @Query(
+        "UPDATE task_part_state SET stale = 1, updatedAt = :now " +
+            "WHERE taskId = :taskId AND partKey = :partKey"
+    )
+    protected abstract suspend fun markTaskPartStateStale(taskId: String, partKey: String, now: Long)
+
+    /**
      * Which parts of a Task hold a current answer, live: the completion bar's pending count.
      *
-     * The same two conditions [partsCompletionSatisfied] counts, expressed as one query so the
-     * number the reviewer is shown and the number completion is computed from cannot drift.
+     * The same conditions [partsCompletionSatisfied] counts, expressed as one query so the number
+     * the reviewer is shown and the number completion is computed from cannot drift. A stale answer
+     * is not an answer for completion: the branch it belongs to is closed, and the number beside the
+     * completion control must not count it as work still owed.
      */
     @Query(
         "SELECT partKey FROM task_part_state WHERE taskId = :taskId " +
-            "AND (answeredAt IS NOT NULL OR response != '')"
+            "AND (answeredAt IS NOT NULL OR response != '') AND stale = 0"
     )
     abstract fun observeAnsweredPartKeys(taskId: String): Flow<List<String>>
 
@@ -4464,6 +4802,23 @@ abstract class ListsDao {
                         )
                     }
                     advanced = true
+                }
+
+                // A stored condition whose source the Package no longer declares is detached from
+                // it. The part keeps the `when` it was written with, so a later revision that
+                // brings the source back repairs the dependency instead of restating it.
+                for (row in partsForTask(taskId)) {
+                    if (!row.present) continue
+                    val condition = row.condition?.let(::decodePartCondition) ?: continue
+                    if (condition.sourcePartKey !in plannedKeys) {
+                        setTaskPartAvailability(
+                            taskId,
+                            row.partKey,
+                            CONDITION_SOURCE_DETACHED,
+                            now
+                        )
+                        advanced = true
+                    }
                 }
             }
 

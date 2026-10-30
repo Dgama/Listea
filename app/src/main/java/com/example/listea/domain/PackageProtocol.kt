@@ -3,7 +3,7 @@ package com.example.listea.domain
 import java.security.MessageDigest
 
 /**
- * `listea.package/1` and `listea.package/2`, read and planned without touching Android.
+ * `listea.package/1`, `/2` and `/3`, read and planned without touching Android.
  *
  * A Package is a directory whose manifest names Prompts. This file turns the bytes a host has
  * already located into a [PackagePlan]: what would be written, what is merely diagnosed, and the
@@ -13,9 +13,11 @@ import java.security.MessageDigest
  * Package from being written.
  *
  * v2 adds a declared Section tag, renames a Prompt's `assets` to `files`, and accepts a
- * `structured` response whose body is Viewer-owned. v1 remains readable and means exactly what it
- * meant before: no Sections, `assets`, and `prompt:` composition. The protocol never declares a
- * Task or a composition — those are the taker's grouping rules, not the setter's.
+ * `structured` response whose body is Viewer-owned. v3 adds a Prompt-level `when` condition, a
+ * `media` kind answered `freeform`, and matches a response against the Viewer's full contract set
+ * rather than "single or structured". v1 remains readable and means exactly what it meant before:
+ * no Sections, `assets`, and `prompt:` composition. The protocol never declares a Task or a
+ * composition — those are the taker's grouping rules, not the setter's.
  *
  * The division of strictness is deliberate and follows the protocol:
  *
@@ -24,6 +26,10 @@ import java.security.MessageDigest
  * - A bad **Prompt** or **Resource** is diagnosed and kept out of the plan while the valid rest is
  *   planned. A Prompt whose description parsed but whose kind has no Viewer is still planned with
  *   its payload, marked unavailable: a later build can make it reviewable without a re-import.
+ * - A v3 condition is resolved in a **second pass**, after every Prompt is planned, because it
+ *   names an earlier Prompt and asks that Prompt's Viewer which fields it exposes. A condition the
+ *   pass cannot resolve makes its target unavailable with the first code; it never makes it
+ *   unconditional.
  *
  * The fingerprint is a SHA-256 over the canonical manifest and the canonical description of every
  * Prompt entry, in sorted Prompt-key order. It covers no Asset or Resource bytes; a photo changing
@@ -32,9 +38,10 @@ import java.security.MessageDigest
 object PackageProtocol {
     const val PROTOCOL_V1 = "listea.package/1"
     const val PROTOCOL_V2 = "listea.package/2"
+    const val PROTOCOL_V3 = "listea.package/3"
 
-    /** The newest protocol this build writes; v1 remains readable. */
-    const val PROTOCOL = PROTOCOL_V2
+    /** The newest protocol this build writes; v1 and v2 remain readable. */
+    const val PROTOCOL = PROTOCOL_V3
 
     const val MAX_MANIFEST_BYTES = 256 * 1024
     const val MAX_DESCRIPTION_BYTES = 64 * 1024
@@ -63,10 +70,29 @@ object PackageProtocol {
         "promptKey", "kind", "schema", "response", "title", "description", "files", "section",
         "resources"
     )
+    private val PROMPT_FIELDS_V3 = PROMPT_FIELDS_V2 + "when"
     private val ASSET_FIELDS = setOf("member", "name")
     private val SECTION_FIELDS = setOf("sectionKey", "title", "order")
     private val RESOURCE_USE_FIELDS = setOf("resourceKey", "required")
     private val RESOURCE_FIELDS = setOf("resourceKey", "kind", "member")
+
+    /**
+     * Whether a manifest declares a v3 `when`, asked of the manifest alone.
+     *
+     * The import dialog asks before a run exists, only to decide which composition the run should
+     * open on. A full plan cannot answer it without every description body, and the protocol drops
+     * a Prompt whose body it cannot read — so the declaration is read where it is written. A
+     * manifest this build cannot parse declares nothing: its Package is refused by the ordinary
+     * plan, with a diagnostic that says why.
+     */
+    fun declaresConditions(manifestBytes: ByteArray?): Boolean {
+        if (manifestBytes == null) return false
+        val root = runCatching { Json.parse(manifestBytes) }.getOrNull() as? JsonValue.Obj
+            ?: return false
+        if (root["protocol"]?.asStringOrNull() != PROTOCOL_V3) return false
+        val prompts = root["prompts"] as? JsonValue.Arr ?: return false
+        return prompts.items.any { it is JsonValue.Obj && it["when"] != null }
+    }
 
     /**
      * The description members the host must read. It should read only these: a Package's photos
@@ -145,18 +171,22 @@ object PackageProtocol {
 
         val protocol = topString("protocol")
         val isV2 = protocol == PROTOCOL_V2
-        if (protocol != null && protocol != PROTOCOL_V1 && protocol != PROTOCOL_V2) {
+        val isV3 = protocol == PROTOCOL_V3
+        // v2 and v3 share the top level; only v1 lacks Sections.
+        val hasSections = isV2 || isV3
+        if (protocol != null && protocol != PROTOCOL_V1 && !hasSections) {
             packageProblem(
                 "protocol-unknown",
-                "The Package declares \"$protocol\"; this build reads $PROTOCOL_V1 and $PROTOCOL_V2."
+                "The Package declares \"$protocol\"; this build reads $PROTOCOL_V1, " +
+                    "$PROTOCOL_V2 and $PROTOCOL_V3."
             )
         }
 
-        val topFields = if (isV2) TOP_FIELDS_V2 else TOP_FIELDS_V1
+        val topFields = if (hasSections) TOP_FIELDS_V2 else TOP_FIELDS_V1
         for (key in manifest.keys - topFields) {
             // A v2-only field in a v1 manifest is an older-version disagreement, not a typo: the
             // producer is speaking a language this Package's declared protocol does not have.
-            val code = if (!isV2 && key == "sections") "section-in-v1" else "unknown-field"
+            val code = if (!hasSections && key == "sections") "section-in-v1" else "unknown-field"
             packageProblem(code, "The manifest has an unknown field \"$key\".")
         }
 
@@ -203,10 +233,10 @@ object PackageProtocol {
             )
         }
 
-        val sectionValues = if (isV2) manifest["sections"] else null
+        val sectionValues = if (hasSections) manifest["sections"] else null
         val plannedSections = mutableListOf<PlannedSection>()
         val sectionByKey = mutableMapOf<String, PlannedSection>()
-        if (isV2 && sectionValues != null) {
+        if (hasSections && sectionValues != null) {
             if (sectionValues !is JsonValue.Arr) {
                 packageProblem("invalid-field", "\"sections\" must be an array when present.")
             } else if (sectionValues.items.size > MAX_SECTIONS) {
@@ -341,6 +371,13 @@ object PackageProtocol {
         val descriptionCanonical = mutableMapOf<String, String>()
         val seenPromptKeys = mutableSetOf<String>()
 
+        /**
+         * Every key the manifest declares, and where. A condition's "is it earlier?" question is
+         * asked of the author's order, not of the planned list: a source that failed planning is
+         * still declared, and answering "unknown" for it would name the wrong problem.
+         */
+        val declaredIndex = mutableMapOf<String, Int>()
+
         (promptValues as JsonValue.Arr).items.forEachIndexed { index, value ->
             val entry = value as? JsonValue.Obj
             if (entry == null) {
@@ -362,6 +399,7 @@ object PackageProtocol {
                 packageProblem("duplicate-key", "\"$promptKey\" names more than one Prompt.")
                 return@forEachIndexed
             }
+            declaredIndex[promptKey] = index
 
             val promptDiagnostics = mutableListOf<PackageDiagnostic>()
             var unavailable: String? = null
@@ -372,12 +410,18 @@ object PackageProtocol {
                 if (unavailable == null) unavailable = code
             }
 
-            val promptFields = if (isV2) PROMPT_FIELDS_V2 else PROMPT_FIELDS_V1
+            val promptFields = when {
+                isV3 -> PROMPT_FIELDS_V3
+                isV2 -> PROMPT_FIELDS_V2
+                else -> PROMPT_FIELDS_V1
+            }
             val unknownFields = entry.keys - promptFields
             if (unknownFields.isNotEmpty()) {
                 val code = when {
-                    !isV2 && "files" in unknownFields -> "files-in-v1"
-                    !isV2 && "section" in unknownFields -> "section-in-v1"
+                    !hasSections && "files" in unknownFields -> "files-in-v1"
+                    !hasSections && "section" in unknownFields -> "section-in-v1"
+                    !isV3 && "when" in unknownFields -> "when-in-v2"
+                    isV3 && "assets" in unknownFields -> "assets-in-v3"
                     isV2 && "assets" in unknownFields -> "assets-in-v2"
                     else -> "unknown-field"
                 }
@@ -390,6 +434,13 @@ object PackageProtocol {
             val kind = entry["kind"]?.asStringOrNull()
             if (kind == null || !isKey(kind)) {
                 promptProblem("invalid-field", "Prompt \"$promptKey\" has an invalid kind.")
+            } else if (kind == Viewers.Media.kind && !isV3) {
+                // A pre-v3 reader has no media Viewer, and the word did not exist in its grammar.
+                promptProblem(
+                    "media-in-v2",
+                    "Prompt \"$promptKey\" declares kind \"media\", which this Package's protocol " +
+                        "does not define."
+                )
             }
             val schemaValue = entry["schema"]
             val schema = schemaValue?.asIntOrNull()
@@ -428,7 +479,7 @@ object PackageProtocol {
             }
 
             var sectionKey: String? = null
-            if (isV2) {
+            if (hasSections) {
                 val sectionValue = entry["section"]
                 if (sectionValue != null) {
                     val tag = sectionValue.asStringOrNull()
@@ -448,12 +499,27 @@ object PackageProtocol {
                 }
             }
 
+            var condition: PartCondition? = null
+            if (isV3) {
+                val conditionValue = entry["when"]
+                if (conditionValue != null) {
+                    condition = decodePartCondition(conditionValue.canonical())
+                    if (condition == null) {
+                        promptProblem(
+                            "condition-invalid",
+                            "Prompt \"$promptKey\" has a condition this build cannot read."
+                        )
+                    }
+                }
+            }
+
+            val fileField = if (hasSections) "files" else "assets"
             val assets = mutableListOf<PlannedPromptAsset>()
-            val assetValues = entry[if (isV2) "files" else "assets"]
+            val assetValues = entry[fileField]
             if (assetValues != null && assetValues !is JsonValue.Arr) {
                 promptProblem(
                     "invalid-field",
-                    "Prompt \"$promptKey\"'s ${if (isV2) "files" else "assets"} must be an array."
+                    "Prompt \"$promptKey\"'s $fileField must be an array."
                 )
             } else if (assetValues is JsonValue.Arr) {
                 if (assetValues.items.size > MAX_ASSET_USES) {
@@ -505,6 +571,15 @@ object PackageProtocol {
                         assets += PlannedPromptAsset(member, name, present)
                     }
                 }
+            }
+
+            if (isV3 && kind == Viewers.Media.kind && assets.isEmpty()) {
+                // A media part with no file is a stem beside nothing: its Done control would sign
+                // off on an empty page.
+                promptProblem(
+                    "media-file-missing",
+                    "Prompt \"$promptKey\" is media and declares no files."
+                )
             }
 
             val resourceUses = mutableListOf<PlannedPromptResource>()
@@ -694,6 +769,17 @@ object PackageProtocol {
                             "Prompt \"$promptKey\" declares options but is freeform."
                         )
                     }
+                    // The media Viewer's body is a stem and nothing else. Its grammar is the
+                    // Viewer's, but the stem is required by the protocol because the part's only
+                    // Content page is that text.
+                    if (isV3 && kind == Viewers.Media.kind &&
+                        (stem == null || stem.isEmpty() || stem.length > MAX_TITLE)
+                    ) {
+                        promptProblem(
+                            "option-invalid",
+                            "Prompt \"$promptKey\" needs a stem of 1–$MAX_TITLE characters."
+                        )
+                    }
                 }
                 // The body of a structured Prompt belongs to the Viewer that declared its
                 // kind/schema; the protocol only guarantees that it is a JSON object within the
@@ -702,7 +788,27 @@ object PackageProtocol {
                 ResponseContract.STRUCTURED -> Unit
             }
 
-            if (response != ResponseContract.SINGLE && response != ResponseContract.STRUCTURED) {
+            if (isV3) {
+                // v3 asks the Viewer's own contract set: a media Prompt is freeform, and the other
+                // Viewers keep the contracts they declared. A kind/schema no Viewer knows is still
+                // an unsupported viewer, not a response problem.
+                if (!viewerSupports(kind, schema)) {
+                    promptProblem(
+                        "unsupported-viewer",
+                        "No Viewer in this build draws kind \"$kind\" schema $schema."
+                    )
+                } else if (Viewers.forPrompt(kind, schema, response) == null) {
+                    promptProblem(
+                        "response-unsupported",
+                        "Prompt \"$promptKey\" asks for ${response.wire}, which kind \"$kind\" " +
+                            "cannot submit."
+                    )
+                }
+            } else if (response != ResponseContract.SINGLE &&
+                response != ResponseContract.STRUCTURED
+            ) {
+                // v1 and v2 keep their hard-coded rule, so a previously accepted body stays
+                // accepted and a previously rejected one stays rejected.
                 promptProblem(
                     "response-unsupported",
                     "Prompt \"$promptKey\" asks for ${response.wire}, which this build cannot submit."
@@ -728,6 +834,7 @@ object PackageProtocol {
                 assets = assets,
                 resources = resourceUses,
                 section = sectionKey,
+                condition = condition,
                 availability = unavailable?.let(PromptAvailability::Unavailable)
                     ?: PromptAvailability.Available
             )
@@ -735,8 +842,11 @@ object PackageProtocol {
 
         if (diagnostics.any { it.scope == DiagnosticScope.PACKAGE }) return rejected()
 
+        if (isV3) resolveConditions(prompts, declaredIndex, diagnostics)
+
         val canonicalManifest = manifest.canonical()
-        val fingerprint = fingerprint(fingerprintManifest(manifest, isV2).canonical(), descriptionCanonical)
+        val fingerprint =
+            fingerprint(fingerprintManifest(manifest, hasSections).canonical(), descriptionCanonical)
 
         return PackagePlan(
             rootRelativePath = snapshot.rootRelativePath,
@@ -753,6 +863,74 @@ object PackageProtocol {
             sections = plannedSections,
             diagnostics = diagnostics
         )
+    }
+
+    /**
+     * The second v3 pass: resolve every Prompt-level condition against the Prompts before it.
+     *
+     * The target's **availability** is what a condition problem changes; its stored condition is
+     * kept, because an unavailable part is still described and a later build — or a report — should
+     * be able to say what it asked for. A target that already failed for another reason keeps its
+     * first code, so the plan names one cause rather than a cascade.
+     *
+     * The source must be declared earlier (in the manifest's order, not the planned list's), must
+     * have been planned, and must expose the named field through its Viewer's
+     * [ViewerCapability.conditionFields]. There is no optional-Prompt rule to check because the
+     * protocol declares every Prompt required; a future `required: false` adds
+     * `condition-source-optional` here, before this comment goes stale.
+     *
+     * A source *inactive at runtime* is not this pass's question — applicability is derived from
+     * answers, and the import only validates the declaration.
+     */
+    private fun resolveConditions(
+        prompts: MutableList<PlannedPrompt>,
+        declaredIndex: Map<String, Int>,
+        diagnostics: MutableList<PackageDiagnostic>
+    ) {
+        for ((index, target) in prompts.withIndex()) {
+            val condition = target.condition ?: continue
+            val targetIndex = declaredIndex[target.promptKey] ?: continue
+            val sourceIndex = declaredIndex[condition.sourcePartKey]
+
+            val code: String
+            val message: String
+            when {
+                sourceIndex == null -> {
+                    code = "condition-source-unknown"
+                    message = "Prompt \"${target.promptKey}\" depends on " +
+                        "\"${condition.sourcePartKey}\", which the manifest does not declare."
+                }
+
+                sourceIndex >= targetIndex -> {
+                    code = "condition-source-not-earlier"
+                    message = "Prompt \"${target.promptKey}\" depends on " +
+                        "\"${condition.sourcePartKey}\", which is not earlier in the manifest."
+                }
+
+                else -> {
+                    val source = prompts.firstOrNull {
+                        it.promptKey == condition.sourcePartKey
+                    }
+                    val fields = source?.let {
+                        Viewers.forPayload(it.kind, it.schema)?.conditionFields(it.payload)
+                    }
+                    if (fields != null && condition.field in fields) continue
+                    code = "condition-field-unknown"
+                    message = "Prompt \"${target.promptKey}\" depends on field " +
+                        "\"${condition.field}\", which \"${condition.sourcePartKey}\" does not " +
+                        "expose."
+                }
+            }
+
+            diagnostics += PackageDiagnostic(
+                DiagnosticScope.PROMPT, target.promptKey, code, message
+            )
+            if (target.availability is PromptAvailability.Available) {
+                prompts[index] = target.copy(
+                    availability = PromptAvailability.Unavailable(code)
+                )
+            }
+        }
     }
 
     /** The built-in Viewer set as of v0.8.2, asked of the one capability table. */
@@ -774,13 +952,14 @@ object PackageProtocol {
     /**
      * The manifest as the fingerprint reads it.
      *
-     * v1 is hashed whole. v2 hashes the Section registry by membership only — keys, sorted, without
-     * titles or display order — so renaming or reordering a Section is not a content change to its
-     * Prompts. The Prompt tags themselves stay in the manifest, so moving a Prompt between Sections
-     * is still a content change.
+     * v1 is hashed whole. v2 and later hash the Section registry by membership only — keys,
+     * sorted, without titles or display order — so renaming or reordering a Section is not a
+     * content change to its Prompts. The Prompt tags themselves stay in the manifest, so moving a
+     * Prompt between Sections is still a content change, and a v3 `when` is hashed with its
+     * Prompt, so editing a condition is a content change.
      */
-    private fun fingerprintManifest(manifest: JsonValue.Obj, isV2: Boolean): JsonValue.Obj {
-        if (!isV2) return manifest
+    private fun fingerprintManifest(manifest: JsonValue.Obj, hasSections: Boolean): JsonValue.Obj {
+        if (!hasSections) return manifest
         val sections = manifest["sections"] as? JsonValue.Arr ?: return manifest
         val keys = sections.items
             .mapNotNull { (it as? JsonValue.Obj)?.get("sectionKey")?.asStringOrNull() }
@@ -865,6 +1044,15 @@ data class PlannedPrompt(
      * protocol.
      */
     val section: String? = null,
+
+    /**
+     * The v3 `when` this Prompt declares, or null for an unconditional Prompt.
+     *
+     * Kept even when the condition made the Prompt unavailable: the declaration is what the import
+     * reports and what the target's stored row carries. Whether the condition can be honoured at
+     * run time is the composition's question (source in the same Task, earlier, required).
+     */
+    val condition: PartCondition? = null,
     val availability: PromptAvailability
 )
 
@@ -916,6 +1104,9 @@ data class PackagePlan(
     val diagnostics: List<PackageDiagnostic>
 ) {
     val accepted: Boolean get() = manifest != null
+
+    /** Whether any planned Prompt declares a v3 condition. */
+    val hasConditions: Boolean get() = prompts.any { it.condition != null }
 }
 
 data class PackageDiagnostic(

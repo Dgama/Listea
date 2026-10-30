@@ -6,6 +6,7 @@ import com.example.listea.domain.ExportChoice
 import com.example.listea.domain.ExportKind
 import com.example.listea.domain.DiagnosticScope
 import com.example.listea.domain.PackageDiagnostic
+import com.example.listea.domain.PartCondition
 import com.example.listea.domain.PlannedPackageResource
 import com.example.listea.domain.PlannedPromptResource
 import com.example.listea.domain.TemplateVersionRef
@@ -276,12 +277,18 @@ enum class PartOrigin(val key: String) {
  * [compositionKey] is the taker's grouping rule that produced this Task — `prompt:<key>` or
  * `section:<key>` — or null for a local Task, which has no composition concept. It is provenance,
  * not a Task id: the same rule over two Todos still produces two independent Tasks.
+ *
+ * [taskReview] overrides the run's chosen Task Review for this Task alone. Only a **mixed** Package
+ * Task sets it — the `builtin.structured.mixed` container, whose completion rule aggregates the
+ * parts each part's own judgment answers. A homogeneous Task leaves it null and is stamped with the
+ * run's review exactly as v0.8.4 did.
  */
 data class PlannedTask(
     val groupPath: String,
     val displayName: String,
     val parts: List<PlannedPart>,
-    val compositionKey: String? = null
+    val compositionKey: String? = null,
+    val taskReview: TemplateVersionRef? = null
 ) {
     init {
         require(parts.isNotEmpty()) { "A planned Task must hold at least one part." }
@@ -320,7 +327,34 @@ data class PlannedPart(
     val prompt: PlannedTaskPrompt? = null,
     val assets: List<PlannedAsset> = emptyList(),
     val resources: List<PlannedPromptResource> = emptyList(),
-    val required: Boolean = true
+    val required: Boolean = true,
+
+    /**
+     * The v3 `when` this part declares, or null for an unconditional part.
+     *
+     * Carried on the **target** part, exactly as the database and the export hold it. The planner
+     * has already validated it against the source's Viewer; whether the source shares the part's
+     * Task is the composition's question, and the answer is [availability] below.
+     */
+    val condition: PartCondition? = null,
+
+    /**
+     * The judgment that answers this part, or null to inherit its Task's Task Review.
+     *
+     * Set only inside a mixed Task, where one Task holds parts of unlike kinds and each part needs
+     * its own answer sheet. A homogeneous Task leaves every part null and keeps v0.8.4's shape.
+     */
+    val judgment: TemplateVersionRef? = null,
+
+    /**
+     * Why this part cannot be answered, or null when it can.
+     *
+     * The runtime code written to `task_parts.availability`: a Prompt the protocol found
+     * unreadable, a condition whose source the chosen composition put in another Task, or a part no
+     * judgment in this build can answer. A part with a code still imports and keeps its pages; it
+     * is unavailable rather than absent, and a required one blocks its Task.
+     */
+    val availability: String? = null
 ) {
     init {
         require(prompt != null || assets.isNotEmpty()) {
