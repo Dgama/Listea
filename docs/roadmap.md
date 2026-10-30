@@ -3,8 +3,8 @@
 > **Nothing on this page is implemented.** It describes where Listea is going and why. For what
 > Listea does today, see [the documentation](README.md). For the nearer v0.8.x framework round, see
 > [Architecture → Framework evolution](ARCHITECTURE.md#framework-evolution--v08x), the
-> [v0.8 draft](iterations/v0.8.md) and [v0.8.4](iterations/v0.8.4.md) (delivered as
-> `0.8.4-preview`); this page
+> [v0.8 draft](iterations/v0.8.md), [v0.8.4](iterations/v0.8.4.md) (delivered as
+> `0.8.4-preview`) and [v0.8.5](iterations/v0.8.5.md) (delivered as `0.8.5-preview`); this page
 > keeps the longer product direction.
 
 - [The current system](#the-current-system)
@@ -90,6 +90,13 @@ yet reaches the three things listed above: task-level **Presentation**, **Contro
 `builtin.media.rapid-review@1`. What §1 asks for is a template that decides how the *page*
 behaves, and the releases so far deliberately do not touch it.
 
+**Part judgments (v0.8.5) are the first page-level split.** Since `0.8.5-preview` a TaskPart may
+carry a judgment of its own, so one Task can hold a form, an option card and a media part, each
+answered under its own sheet while completion stays one Task fact. It is narrower than §1 — the
+sheet is still a built-in resolved by the composition, not a template a person picks per page — but
+it establishes the seam the general template work would widen. See
+[v0.8.5](iterations/v0.8.5.md).
+
 ### 2. Cross-platform-ready structure
 
 **Prepare the project structure for a future iOS implementation.**
@@ -147,6 +154,10 @@ builders and the export payload, and it is the one that makes the other two wort
   the taker's **Composition** decides the grouping. The protocol gains `files`, Sections and
   `structured`; schema 33 and export v6 ship in the preview. See
   [v0.8.4](iterations/v0.8.4.md).
+- **v0.8.5 (`0.8.5-preview`, 2026-10-29)** lets one part depend on an earlier part's answer: a
+  conditional part carries `when`, its applicability is derived rather than stored, a closed branch
+  keeps its answer as stale, and a masked page keeps the page count stable. Protocol v3 declares
+  `when`; schema 34 and export v7 ship in the preview. See [v0.8.5](iterations/v0.8.5.md).
 - What is still missing after that is the product layer: vocabulary and primary-questionnaire
   experiences, which are v0.9.x. `AssetKind.OTHER` remains the member for content no viewer claims;
   it is not a structured payload kind.

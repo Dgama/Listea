@@ -290,8 +290,8 @@ completion policy:
 | Policy | The Task completes when… | Used by |
 |---|---|---|
 | **single part** | the template's commit says the response completed the Task | every pre-v0.8.4 version, including both media reviews and the single-choice version 1 |
-| **all required parts** | every required part is answered and none is unavailable | *Headless Template for Several Choices* — version 2 of the single-choice lineage |
-| **any part** | at least one required part is answered | none of the built-ins; a template a later round may offer |
+| **all required parts** | every required **active** part is answered and not stale, and no active required part is unavailable; with none active it is vacuously satisfied | *Headless Template for Several Choices* — version 2 of the single-choice lineage — and the mixed container |
+| **any part** | the first required **active** part is answered and not stale | none of the built-ins; a template a later round may offer |
 | **explicit only** | a person checks the box; answers never complete it | none of the built-ins; a checklist-style template |
 
 The two built-ins a Section import can use are the single-choice version 1 and version 2. Version 1
@@ -300,6 +300,44 @@ the last required question, which is what a Section Task wants. They are version
 rather than two templates because the judgment is the same — one choice per Prompt — and only the
 aggregation differs. Choosing version 2 for a one-part Task is harmless: its single required part
 completes it exactly as version 1 would.
+
+### Part judgments, and the mixed container
+
+Since `0.8.5-preview` a TaskPart may carry a **judgment of its own** — a template version that
+governs that part's buttons, its commit control, its revisability and the sheet it is answered on.
+The Task's review still governs the one Task-level fact, completion; the part's judgment governs
+how its own page is answered. A part with no judgment inherits its Task's review, which is what
+every Task did before this round.
+
+**A Task whose parts do not share one sheet is a mixed Task.** When a composition holds a form
+beside option-tap cards, or a media part beside either, the import resolves each part to a built-in
+judgment and stamps the Task with the **mixed container**, `builtin.structured.mixed@1`. The
+container draws nothing: its viewer reference is a label, its only control is the completion
+checkbox, and its policy is *all required parts*. The parts supply everything else.
+
+| Part's kind | Judgment | Its commit |
+|---|---|---|
+| form | `builtin.structured.form@1` | its own **Submit**, refused while a visible required field is blank |
+| profile, vocabulary | `builtin.structured.single-choice@1` | the option tap itself, revisable |
+| media, or a file-only part | `builtin.media.part@1` | its **Done**; the answer is answered-empty and the files are the record |
+| anything else | none fits | the part imports **unavailable** as `unsupported-judgment`; a required one blocks its Task |
+
+**Both internal judgments are code-only.** `builtin.media.part` and `builtin.structured.mixed` are
+never seeded and never reach the template picker — a person choosing the container would be choosing
+a completion rule without the parts it was written for. They are resolvable references all the same,
+so a stored part or an export can name one without a row behind it.
+
+**A homogeneous Task keeps v0.8.4's shape.** Several option-tap Prompts share one sheet and one
+review; a single form, or a single media part, is answered by the review that already fits it. The
+import writes no part judgment there, and the export stays v5/v6. Only a Task that genuinely needs
+two sheets is mixed — and a Task cannot hold two forms or two media parts as separate parts, because
+neither kind has a "several in one sheet" shape and the composition splits instead.
+
+**`builtin.media.part` names the payload's media capability, not the asset viewer.** A part's
+judgment names the Viewer its page is answered under: `builtin.viewer.media` — the freeform media
+Prompt — rather than `builtin.media.viewer`, the file viewer beside it. Naming the file viewer
+would draw the Done and then refuse the commit, because the page and the answer would be checked
+against two different definitions.
 
 Every install starts with these five Task Reviews:
 

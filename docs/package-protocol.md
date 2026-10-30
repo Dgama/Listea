@@ -1,14 +1,16 @@
-# The Listea Package protocol — v1 and v2
+# The Listea Package protocol — v1, v2 and v3
 
-> **Status:** **v1 implemented for v0.8.2 (2026-10-24); v2 implemented for `0.8.4-preview`
-> (versionCode 804, 2026-10-27).** Both are unreleased. The reader accepts both identifiers and
-> reads each under its own grammar; [v2](#v2-implemented-for-v084) adds `files`, `sections` and
-> `structured`, and v1 remains the compatibility contract for every Package written before it. A
-> breaking change bumps the identifier; additive, backward-compatible changes are made only when
-> the reader can be extended without guessing.
+> **Status:** **v1 implemented for v0.8.2 (2026-10-24); v2 for `0.8.4-preview` (804); v3 for
+> `0.8.5-preview` (805, 2026-10-28).** All are unreleased. The reader accepts all three identifiers
+> and reads each under its own grammar; [v2](#v2-implemented-for-v084) adds `files`, `sections` and
+> `structured`; [v3](#v3-implemented-for-v085) adds the part-level `when` condition and the media
+> Prompt. v1 remains the compatibility contract for every Package written before v2. A breaking
+> change bumps the identifier; additive, backward-compatible changes are made only when the reader
+> can be extended without guessing.
 > **Audience:** the person preparing a Package, and the coding agent implementing the reader.
 > **Related:** [ARCHITECTURE → Framework evolution](ARCHITECTURE.md#framework-evolution--v08x),
-> [v0.8.2 plan](iterations/v0.8.2-plan.md), [v0.8.4 design](iterations/v0.8.4.md).
+> [v0.8.2 plan](iterations/v0.8.2-plan.md), [v0.8.4 design](iterations/v0.8.4.md),
+> [v0.8.5 design](iterations/v0.8.5.md).
 
 ## Why a protocol
 
@@ -549,8 +551,9 @@ the same envelope without changing what a Task is.
 
 ## v2 implemented for v0.8.4
 
-> **Status: implemented in `0.8.4-preview` (versionCode 804, 2026-10-27), unreleased.** The reader
-> accepts `listea.package/2` under the grammar below and keeps reading v1 under its own. The design
+> **Status: implemented in `0.8.4-preview` (versionCode 804, 2026-10-27), accepted 2026-10-28 and
+> pushed; no release published.** The reader accepts `listea.package/2` under the grammar below and
+> keeps reading v1 under its own. The design
 > is [v0.8.4](iterations/v0.8.4.md); the implementation plan is
 > [v0.8.4-plan.md](iterations/v0.8.4-plan.md); the device acceptance is in
 > [the design check](iterations/v0.8.4-design-check.md#gate-7--implementation-acceptance).
@@ -668,9 +671,9 @@ the Viewer's own contract, not a protocol rule:
 }
 ```
 
-- Conditions live **inside the Prompt body only**. There are no manifest-level conditions and no
-  cross-Prompt conditions in v0.8.4. A later Prompt depending on an earlier answer is a follow-up
-  Task from the producer.
+- Conditions live **inside the Prompt body only** in v2. There are no manifest-level conditions and
+  no cross-Prompt conditions in v0.8.4. A later Prompt depending on an earlier answer is a follow-up
+  Task from the producer, or a v3 Package's `when` (see [v3](#v3-implemented-for-v085)).
 - A structured response is one TaskPart. Its fields are internal answers, not parts, Sections or
   Tasks.
 - A body this build's Viewer cannot validate is a Prompt this build cannot draw. It is imported
@@ -719,6 +722,133 @@ structured Prompt with no compatible Viewer is `structured-unsupported`, not a m
   rejections still apply.
 - It does not change Asset or Resource meaning. `files` are Assets; `resources` are still
   dependencies and not pages.
+
+## v3 implemented for v0.8.5
+
+> **Status: implemented in `0.8.5-preview` (versionCode 805, 2026-10-28), unreleased.** The reader
+> accepts `listea.package/3` under the grammar below and keeps reading v1 and v2 under their own.
+> The design is [v0.8.5](iterations/v0.8.5.md); the implementation plan is
+> [v0.8.5-plan.md](iterations/v0.8.5-plan.md).
+
+`listea.package/3` is the same envelope as v2 with two additions: a Prompt may declare **when it
+applies**, as a condition on an earlier Prompt, and a Prompt may be a **media** Prompt whose answer
+is the files themselves. It still declares Prompts, not Tasks, and it still has no composition
+field.
+
+| v2 | v3 | Why |
+|---|---|---|
+| `protocol: "listea.package/2"` | `protocol: "listea.package/3"` | a breaking grammar change |
+| — | `prompts[].when` | a later Prompt's applicability may depend on an earlier Prompt's answer |
+| — | `kind: "media"` with `response: "freeform"` | a decision whose record is the files, marks and actions |
+
+### Manifest
+
+```json
+{
+  "protocol": "listea.package/3",
+  "packageKey": "meal-1",
+  "revision": 1,
+  "title": "Lunch",
+  "sections": [
+    { "sectionKey": "session", "title": "Lunch", "order": 1 }
+  ],
+  "prompts": [
+    {
+      "promptKey": "gate",
+      "kind": "form",
+      "schema": 1,
+      "response": "structured",
+      "title": "Did you eat?",
+      "description": "prompts/gate.json",
+      "section": "session"
+    },
+    {
+      "promptKey": "menu",
+      "kind": "media",
+      "schema": 1,
+      "response": "freeform",
+      "title": "The menu",
+      "description": "prompts/menu.json",
+      "files": [{ "name": "menu.pdf" }],
+      "section": "session",
+      "when": { "prompt": "gate", "field": "choice", "equals": "yes" }
+    }
+  ]
+}
+```
+
+`prompts/menu.json` is `{"stem": "Read the menu, then press Done."}`.
+
+### The condition
+
+`when` is one object:
+
+| Field | Required | Meaning |
+|---|---|---|
+| `prompt` | yes | An **earlier** Prompt's `promptKey`, in the same Task. |
+| `field` | yes | A named answer the source exposes. |
+| `equals` | one of | A single string value. |
+| `in` | one of | 1–50 string values. |
+
+- Exactly one of `equals`/`in`. Values are strings within the existing key/string limits. A value
+  that names no option is not an error; it simply never matches.
+- The source must be **earlier** in `prompts[]` (acyclic by construction) and **required** in the
+  chosen composition.
+- The named field is checked through the source Viewer's **answer-field capability**, not by Core
+  parsing a body: a `form` Prompt exposes its field keys, a `choice.single` Prompt exposes `choice`,
+  and a `media` Prompt exposes none.
+- The condition is the setter's declaration of **applicability**. It does not name a Task, a
+  composition or a requiredness; the taker still decides those. A condition whose source lands in
+  another Task makes the target unavailable (`condition-source-outside-task`), and one whose source a
+  revision removed detaches the target (`condition-source-detached`).
+- The manifest **fingerprint includes `when`**, so changing a condition is a content change and a
+  re-import notices it.
+
+### The media Prompt
+
+- `kind: "media"`, schema 1, `response: "freeform"`, one body `{"stem": "…"}`, at least one file,
+  and no options. The stem is required and bounded; the Viewer owns its body shape, the protocol
+  owns the envelope.
+- Its answer is **answered-empty**: pressing the part judgment's Done commits the part with no typed
+  result. The files, their marks and their actions are the record.
+- It is a condition **target**, never a source.
+- `freeform` is accepted only for media; any other freeform kind remains `response-unsupported`.
+
+### Compatibility
+
+- v1 and v2 remain readable under their own grammars. A v3-only word in a v2 manifest is an error:
+  `when` is `when-in-v2`, `kind: "media"` is `media-in-v2`; a freeform body under a pre-v3
+  protocol is the existing `response-unsupported`. A v3 manifest that uses `assets` is
+  `assets-in-v3`. The v0.8.4 reader rejects a v3 manifest whole as an unknown protocol; the v3
+  reader still accepts v1 and v2.
+- A v3 manifest still declares no `tasks`, `composition` or `task`; such a field is unknown and
+  rejects the Package.
+
+### Limits and diagnostics
+
+The v1/v2 limits apply, with the media body counted as a description of the same size and depth,
+and `in` bounded at 50 values.
+
+| Code | Scope | Effect |
+|---|---|---|
+| `condition-invalid` | Prompt | reject (not an object; unknown keys; both or neither `equals`/`in`; empty or >50 values; bad key) |
+| `condition-source-unknown` | Prompt | reject (`prompt` names no Prompt) |
+| `condition-source-not-earlier` | Prompt | reject (same or later index) |
+| `condition-source-optional` | Prompt | reject when the source is not required in the composition |
+| `condition-field-unknown` | Prompt | reject (the source Viewer does not expose the field, or its body is unreadable) |
+| `condition-source-outside-task` | Task/part | import the target unavailable; the report names it |
+| `condition-source-detached` | Task/part | import the target unavailable when a revision removed its source |
+| `when-in-v2` / `media-in-v2` / `assets-in-v3` | Protocol | reject as an unknown field |
+| `media-file-missing` | Prompt | reject (a media Prompt declares no files) |
+| `media-body-invalid` | Prompt | import unavailable (the Viewer cannot validate the stem) |
+
+### What v3 does not do
+
+- It does not declare Tasks, compositions or requiredness.
+- It does not add cross-Task conditions, compound conditions over several sources, or a condition
+  on a media answer.
+- It does not turn the media Prompt into a new file type; its files are Assets like any other.
+- It does not add archives, embedded blobs or remote members.
 
 ## Relationship to the current app
 
@@ -819,9 +949,11 @@ own Viewer, and both are answerable through the single-choice template.
 
 ## Versioning
 
-- A breaking grammar change updates `protocol` to `listea.package/2`; the app supports the versions
-  it ships readers for and rejects the rest whole. `0.8.4-preview` took exactly that step — `files`,
-  `sections` and `structured` — and still reads v1 under its own grammar.
+- A breaking grammar change updates `protocol` to the next identifier; the app supports the versions
+  it ships readers for and rejects the rest whole. `0.8.4-preview` took that step to
+  `listea.package/2` — `files`, `sections` and `structured` — and `0.8.5-preview` took it again to
+  `listea.package/3` — the part-level `when` and the media Prompt — while still reading v1 and v2
+  under their own grammars.
 - A new `kind` does not change the protocol. It needs a Viewer that declares support.
 - A new `response` contract is a protocol change, because it changes what a valid answer is.
 - A new optional field inside a description is a schema change for that `kind`; the Viewer

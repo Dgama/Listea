@@ -45,6 +45,7 @@ bytes. The generator is what explains the bytes; see the folder README before re
 | [`vocabulary/`](vocabulary/README.md) | four `vocabulary`/1 Prompts with non-alphabetical option orders, shared and per-Prompt pronunciation Resources, one without audio | vocabulary round, acceptances 1, 2, 5 |
 | [`mixed/`](mixed/README.md) | one Package holding one `profile` and one `vocabulary` Prompt | vocabulary round, acceptance 3 |
 | [`mixed-list/`](mixed-list/README.md) | media files for a mixed List: a single two-page PDF, and a PDF + PNG + MP4 Task | vocabulary round, acceptance 6 |
+| [`conditional-mixed/`](conditional-mixed/README.md) | one `listea.package/3` Package: a yes/no form gate that conditions a PDF, an image/video pair, a vocabulary card, a dating card and a second form, plus an unconditional receipt | v0.8.5 acceptance |
 
-The dating and media folders used elsewhere are indexed in their own READMEs; only the fixtures
-added by the vocabulary round are listed here.
+The dating and media folders used elsewhere are indexed in their own READMEs; the table lists the
+Package fixtures added by the vocabulary round and the conditional-mixed fixture added by v0.8.5.

@@ -1,0 +1,14 @@
+{
+  "stem": "Choose the meaning of the word.",
+  "word": "serendipity",
+  "phonetic": "/ˌserənˈdɪpɪti/",
+  "definition": "the occurrence of events by chance in a happy way",
+  "example": "a fortunate stroke of serendipity",
+  "audio": "word-audio",
+  "answer": "b",
+  "options": [
+    { "id": "c", "label": "a formal apology" },
+    { "id": "b", "label": "a happy accident" },
+    { "id": "a", "label": "a long journey" }
+  ]
+}

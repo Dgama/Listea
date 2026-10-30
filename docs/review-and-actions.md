@@ -204,8 +204,8 @@ The checkbox still belongs to the Task, and what fills it depends on the Task Re
 | Completion policy | The Task completes when… |
 |---|---|
 | **single part** | the template's commit says the response completed the Task — the rule every pre-v0.8.4 template keeps |
-| **all required parts** | every required part is answered and no required part is unavailable |
-| **any part** | the first required part is answered |
+| **all required parts** | every required **active** part is answered and not stale, and no active required part is unavailable; with no active required parts it is vacuously satisfied |
+| **any part** | the first required **active** part is answered and not stale |
 | **explicit only** | a person checks the box; answers never complete it |
 
 A detached part — one the Package's latest revision no longer names — does not hold the Task open.
@@ -213,6 +213,34 @@ A required part this build cannot present still does: not being able to draw a q
 Package withdrawing it. An explicit check is a person's fact and survives later part answers; an
 automatic completion is recomputed when a commit, a reset or a re-import changes the parts. Checking
 the box while required parts are open asks first and names how many are pending.
+
+### Conditional parts and masked pages
+
+Since `0.8.5-preview` a part may apply only when an earlier part's answer says so. Its page is then
+**masked**: it keeps its place in the page list, is non-interactive, and shows an explanation card
+instead of its body. The card names the earlier question, the answer given and the answers that
+would make this part apply, with a control that jumps to that earlier page. **The page count never
+moves** — a Task of eight questions shows eight pages whether two of them apply or not — and the
+Task count never moves either: a conditional part is never a queue entry.
+
+- **Masked pages are not hidden pages.** The inner arrows and a swipe walk them; the file name and
+  the reason stay on screen; the outer `x(m/n)/y` counter keeps its denominator.
+- **An answer whose branch closed is stale, not deleted.** It is kept, shown as the previous answer,
+  and exported with `stale: true`; completion stops counting it. When the branch reopens the answer
+  stays stale until the person submits that part again — a fresh commit is what makes it current.
+- **A non-revisable part may still be reconfirmed once** after its branch reopens. Non-revisability
+  forbids a second answer to a question that is still current; it cannot forbid the one
+  reconfirmation the branch change requires.
+- **A completed Task reopens** when a required part becomes active again, whether the completion was
+  automatic or explicit. The reopen is recorded in `task_state.completionSource = 'reopened'` and
+  appends no submission event. Shrinking the active set never reopens.
+- **A part's Done** (a media part, or a file/folder part inside a multi-part Task) commits the part
+  with an answered-empty result; the files, their marks and their actions are the record. The
+  commit advances to the **next part's first page**, skipping the committed part's remaining Asset
+  pages — they were judged under the part, and walking past them is not required.
+- **Each part may have its own answer sheet.** The Task's template governs completion; the part's
+  own **part judgment** governs its buttons, revisability and answer sheet. The app calls the sheet
+  an *answer sheet*; the docs keep **review** for the Task-level meaning.
 
 ## The file's controls
 
@@ -459,6 +487,14 @@ the Todo preview modelled a Task as *Prompt plus files* only, so the same Task h
 round and another in a preview, and an add-on could not be reached from a look at all. A separate
 file opened from a folder is not a Task: the File Viewer keeps its flat file-to-file pager and grows
 no add-on page.
+
+**A read-only preview draws the Prompt's content, not its recorded answer.** In the Todo preview a
+`form`, `profile` or `vocabulary` page shows the question as the Package wrote it, so a gate already
+answered **Yes** can still look unanswered there; Quick Review, which can write, draws the stored
+choice. The answer is not lost — the device's state, the export and Quick Review read it — but the
+preview is a look at the question, not at the answer sheet. This is recorded as a known
+presentation difference in the [v0.8.5 acceptance
+record](iterations/v0.8.5.md#deviations-and-decisions-taken-during-implementation).
 
 **A swipe turns a page inside the Task, and crosses at its edges.** A Prompt's Content page is a
 vertically scrolling card rather than a picture, so it never went through the media swipe; on the

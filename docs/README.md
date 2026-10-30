@@ -11,7 +11,7 @@ where the other pages link to rather than repeat.
 | Page | What it covers |
 |---|---|
 | [Getting started](getting-started.md) | Prerequisites, building, installing, adding an Upstream, and running a first review end to end. |
-| [Core concepts](core-concepts.md) | The vocabulary: Upstream, Todo, Task, Asset, add-on, folder, List, catalog, Quick Review, round, checked state, action, content policy, dissolution, and where a decision is stored — plus the v0.8.4 question/part model. |
+| [Core concepts](core-concepts.md) | The vocabulary: Upstream, Todo, Task, Asset, add-on, folder, List, catalog, Quick Review, round, checked state, action, content policy, dissolution, and where a decision is stored — plus the v0.8.4 question/part model and v0.8.5's conditional parts. |
 | [The two vocabularies](vocabulary.md) | The canonical words for a question and a decision: Prompt, TaskPart, Task, Asset, Resource, Section, Composition, Package — with equalities, examples and the words that are deliberately not used. |
 
 ## Using it
@@ -21,7 +21,7 @@ where the other pages link to rather than repeat.
 | [Review and actions](review-and-actions.md) | The Review screen in full: the frame and what belongs to which level, gestures, zoom, video transport, the PDF reader and its passage marks, the Info sheet, rounds, resuming, and how filtering and sorting shape a queue. |
 | [Templates](templates.md) | What a template is: its name, its scope, its buttons, the frame-versus-components boundary, PDF passage tools, why editing appends a version, how a Todo attaches one — and **add-ons**, the Task-level questionnaire that is neither a template nor an Asset. |
 | [Exports](exports.md) | What an export is, the two methods (Webhook and Txt), where a Todo's and a List's choices live, how a round resolves into one payload or several, and the export history. |
-| [Webhooks](webhooks.md) | The webhook method in full: the destination, the four events, the exact JSON payload including version 3's `marks` and version 4's `addOn`, the txt body, item ids, resending and failures. |
+| [Webhooks](webhooks.md) | The webhook method in full: the destination, the four events, the exact JSON payload through version 7 — `marks`, `addOn`, `content`, `parts[]`, and the per-part `judgment`/`when`/`applicability`/`stale` — the txt body, item ids, resending and failures. |
 | [File management](file-management.md) | Everything that touches storage: deleting checked files, the post-webhook delete offer, saving to a gallery album, sharing, permissions, and what an Upstream's grant bounds. |
 | [Settings](settings.md) | Every switch and field on the Settings screen, with links to the page that explains what each one does. |
 
@@ -31,10 +31,12 @@ where the other pages link to rather than repeat.
 |---|---|
 | [Architecture](ARCHITECTURE.md) | The normative boundaries: what a Task, Asset, Upstream and List are, what Core does and does not own, identity rules, and the invariants implementations must preserve. Source code cites this document by name. |
 | [v0.8 — framework (draft)](iterations/v0.8.md) | The v0.8.x arc: Package protocol, Prompt payloads, Resources, Structured Viewer and Headless Review Template, the typed page model, ReviewSubmission, and ExportMapping. |
-| [Package protocol](package-protocol.md) | `listea.package/1`: the Prompt vocabulary, manifest and member layout, response contracts, commit/revisability, reconciliation rules, limits, and the dating example. Also [`listea.package/2`](package-protocol.md#v2-implemented-for-v084), shipped in `0.8.4-preview`, with `files`, Sections and `structured`. |
+| [Package protocol](package-protocol.md) | `listea.package/1`: the Prompt vocabulary, manifest and member layout, response contracts, commit/revisability, reconciliation rules, limits, and the dating example. Also [`listea.package/2`](package-protocol.md#v2-implemented-for-v084), shipped in `0.8.4-preview`, with `files`, Sections and `structured`, and [`listea.package/3`](package-protocol.md#v3-implemented-for-v085), shipped in `0.8.5-preview`, with `when`. |
 | [v0.8.4 design](iterations/v0.8.4.md) | The framework round: Task = 1..N TaskParts, Section as a tag, the taker's Composition, part-level state and Task-level completion, protocol v2, schema 33 and export v6 — delivered as `0.8.4-preview`. |
 | [v0.8.4 plan](iterations/v0.8.4-plan.md) | The implementation plan for v0.8.4: phases, the schema-33 DDL and 32→33 migration, import composition, page model, completion policy, export v6, tests and device acceptance. |
 | [v0.8.4 design check](iterations/v0.8.4-design-check.md) | The gate before code — vocabulary, scenario walks, invariants, compatibility matrix, adversarial cases and the sign-off table — and Gate 7, the implementation acceptance recorded after the device walk. |
+| [v0.8.5 design](iterations/v0.8.5.md) | The conditional-parts round: a `when` between TaskParts, applicability (pending/active/inactive), stable masked pages, stale answers and reopening, a per-part judgment, a media part, a mixed Task, protocol v3, schema 34 and export v7. |
+| [v0.8.5 plan](iterations/v0.8.5-plan.md) | The implementation plan for v0.8.5: phases, the schema-34 DDL and 33→34 migration, protocol v3 grammar, judgment resolution, the applicability evaluator, the read/write model, export v7, dissolution v2, the conditional-mixed fixture and device acceptance. |
 | [v0.8.2 plan](iterations/v0.8.2-plan.md) | The v0.8.2 implementation plan: schema 32, Package import, the typed content page, the first Structured Viewer and Headless Template, and the dating acceptance walk. |
 | [v0.8.2f fixes](iterations/v0.8.2f.md) | The six issues the v0.8.2 acceptance found — Todo rename, card-level add-on edit, the one Templates list with nothing required, format-matched import, Prompt Tasks exporting no templates, and the stuck page swipe — plus the seventh found while verifying them: a judgment no longer skips the add-on page. The eighth makes every Task surface show the same pages: the read-only previews gain the add-on page, and one shared page model governs the count, the swipe and the guide. Its fixes ship in the `0.8.3-preview` build. |
 | [Vocabulary round plan](iterations/v0.8.0-vocabulary-plan.md) | The vocabulary round, delivered as the unreleased `0.8.3-preview`: a `vocabulary`/1 Viewer behind the same Package protocol, page model, single-choice template, add-on and v5 export, plus the fixtures for the mixed-List acceptance walk and the follow-up fixes the walk produced. |
@@ -49,7 +51,8 @@ Documentation images live under [`assets/`](assets):
 - `assets/demos/` — animated demos. Empty for now; see [its README](assets/demos/README.md) for
   the naming convention.
 - `assets/fixtures/` — acceptance fixtures with their generators and READMEs, including the
-  sampled-point image and the [dating Package](assets/fixtures/dating/README.md).
+  sampled-point image, the [dating Package](assets/fixtures/dating/README.md) and the
+  [conditional-mixed Package](assets/fixtures/conditional-mixed/README.md).
 
 ### Screenshots still to take
 
@@ -89,18 +92,23 @@ device-verified in [v0.8.2f](iterations/v0.8.2f.md). Its grammar is in
 [Architecture](ARCHITECTURE.md#framework-evolution--v08x) and
 [v0.8 (draft)](iterations/v0.8.md).
 
-The current build is **`0.8.4-preview`** (versionCode 804, unreleased):
-[v0.8.4](iterations/v0.8.4.md) on top of the `0.8.3-preview` line. It makes a Task 1..N
-**TaskParts**, adds the taker's Composition, protocol `listea.package/2` with `files`, `sections`
-and `structured`, schema 33 and export v6 (v5 kept for compatible single-part bodies), and the
-conditional `form` Viewer with its two Task Reviews. It is device-verified through 2026-10-27.
+The current build is **`0.8.5-preview`** (versionCode 805, unreleased):
+[v0.8.5](iterations/v0.8.5.md) on top of the `0.8.4-preview` line, which is accepted and pushed. It
+lets a TaskPart depend on an earlier part's answer — a **conditional part** with `when`, derived
+**applicability** (`pending` / `active` / `inactive`), stable **masked pages** and **stale**
+answers — and gives a part its own **judgment**. It adds protocol `listea.package/3` with `when`,
+schema 34 and export v7 (v5 and v6 kept for bodies with no branch). It is device-accepted through
+2026-10-29.
 
-Neither preview closes its release. `0.8.3-preview` remains a preview of the vocabulary round, and
-`0.8.4-preview` of the TaskParts round; the payload-revision policy, the independent-Todo proof and
-the protocol/capability freeze are carried forward rather than dropped. See
+None of the previews closes its release. `0.8.3-preview` remains a preview of the vocabulary round,
+`0.8.4-preview` of the TaskParts round, and `0.8.5-preview` of the conditional-parts round; the
+payload-revision policy, the independent-Todo proof and the protocol/capability freeze are carried
+forward rather than dropped, and v0.8.5 adds its own open items — cross-Task and compound
+conditions, optional condition sources, media-as-source and a per-part template picker. See
 [v0.8 (draft)](iterations/v0.8.md#v083--shared-resources-and-the-reveal-card-proof),
-[v0.8.4 design](iterations/v0.8.4.md#inherited-v083-open-items) and
-[the implementation acceptance](iterations/v0.8.4-design-check.md#gate-7--implementation-acceptance).
+[v0.8.4 design](iterations/v0.8.4.md#inherited-v083-open-items),
+[the implementation acceptance](iterations/v0.8.4-design-check.md#gate-7--implementation-acceptance)
+and [v0.8.5 → Open items](iterations/v0.8.5.md#open-items).
 
 If a page disagrees with the app, the app is right and the page is a bug — please open an issue.
 

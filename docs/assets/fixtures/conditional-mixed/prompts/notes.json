@@ -1,0 +1,11 @@
+{
+  "title": "Notes",
+  "fields": [
+    {
+      "key": "note",
+      "type": "text",
+      "label": "Anything to note about this order?",
+      "required": true
+    }
+  ]
+}

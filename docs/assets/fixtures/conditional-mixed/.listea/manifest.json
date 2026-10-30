@@ -1,0 +1,99 @@
+{
+  "protocol": "listea.package/3",
+  "packageKey": "conditional-mixed",
+  "revision": 1,
+  "title": "Conditional mixed",
+  "sections": [
+    { "sectionKey": "main", "title": "Conditional", "order": 1 }
+  ],
+  "prompts": [
+    {
+      "promptKey": "gate",
+      "kind": "form",
+      "schema": 1,
+      "response": "structured",
+      "title": "Gate",
+      "description": "prompts/gate.json",
+      "section": "main"
+    },
+    {
+      "promptKey": "menu",
+      "kind": "media",
+      "schema": 1,
+      "response": "freeform",
+      "title": "Menu",
+      "description": "prompts/menu.json",
+      "section": "main",
+      "files": [
+        { "member": "media/menu.pdf", "name": "menu.pdf" }
+      ],
+      "when": { "prompt": "gate", "field": "choice", "equals": "yes" }
+    },
+    {
+      "promptKey": "photo",
+      "kind": "media",
+      "schema": 1,
+      "response": "freeform",
+      "title": "Photo",
+      "description": "prompts/photo.json",
+      "section": "main",
+      "files": [
+        { "member": "media/photo.png", "name": "photo.png" },
+        { "member": "media/clip.mp4", "name": "clip.mp4" }
+      ],
+      "when": { "prompt": "gate", "field": "choice", "equals": "yes" }
+    },
+    {
+      "promptKey": "word",
+      "kind": "vocabulary",
+      "schema": 1,
+      "response": "choice.single",
+      "title": "Word",
+      "description": "prompts/word.json",
+      "section": "main",
+      "resources": [
+        { "resourceKey": "word-audio", "required": true }
+      ],
+      "when": { "prompt": "gate", "field": "choice", "equals": "yes" }
+    },
+    {
+      "promptKey": "dating",
+      "kind": "profile",
+      "schema": 1,
+      "response": "choice.single",
+      "title": "Dating",
+      "description": "prompts/dating.json",
+      "section": "main",
+      "resources": [
+        { "resourceKey": "dating-photo", "required": true }
+      ],
+      "when": { "prompt": "gate", "field": "choice", "equals": "yes" }
+    },
+    {
+      "promptKey": "notes",
+      "kind": "form",
+      "schema": 1,
+      "response": "structured",
+      "title": "Notes",
+      "description": "prompts/notes.json",
+      "section": "main",
+      "when": { "prompt": "gate", "field": "choice", "equals": "yes" }
+    },
+    {
+      "promptKey": "receipt",
+      "kind": "media",
+      "schema": 1,
+      "response": "freeform",
+      "title": "Receipt",
+      "description": "prompts/receipt.json",
+      "section": "main",
+      "files": [
+        { "member": "media/receipt.pdf", "name": "receipt.pdf" }
+      ]
+    }
+  ],
+  "resources": [
+    { "resourceKey": "word-audio", "kind": "audio", "member": "media/word.m4a" },
+    { "resourceKey": "dating-photo", "kind": "image", "member": "media/dating.png" }
+  ]
+}

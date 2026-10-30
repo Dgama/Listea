@@ -120,7 +120,7 @@ Posted as `Content-Type: application/json; charset=utf-8`. Timestamps are epoch 
 2xx counts as success; every other status code and every network failure is a failure. The timeout
 is 10 seconds on both connect and read.
 
-**`version` is `2`, `3`, `4`, `5` or `6`, and the cut from the old body is hard.** The v0.1 body
+**`version` is `2`, `3`, `4`, `5`, `6` or `7`, and the cut from the old body is hard.** The v0.1 body
 had no version and no Tasks: it was one flat `items` array in which each entry was a file and the
 thing judged at the same time. A receiver built on it must be pointed at the new shape deliberately;
 a body never says `2` while meaning the old layout. **Version 3 adds only the `marks` array** — an
@@ -132,13 +132,18 @@ structured answer says `5`, and each of the older keys is still written under it
 **Version 6 replaces a Task's single decision with `parts[]`** — a new Task shape rather than a
 superset, so a receiver must branch on the version line; one Task that needs it puts every Task in
 the round into the v6 shape. Every image and video body with nothing to add is therefore byte for
-byte the one v0.6.2 sent, and a single-part body with no structured answer stays v5. Stored history
+byte the one v0.6.2 sent, and a single-part body with no structured answer stays v5. **Version 7
+adds four keys to every part** — `judgment`, `when`, `applicability` and `stale` — and is taken when
+a part is conditional, judged under its own answer sheet, or carries a branch this build cannot
+read; a body whose parts are all unconditional and Task-judged stays v5 or v6, byte for byte.
+Version 7 is a superset of 6, not a combination code: a round carrying marks, an add-on or
+structured content beside a branch says `7`, and every older key keeps its own rule. Stored history
 is not rewritten — [Resend](#results-and-notices) replays an old record's bytes exactly as they
 were.
 
 | Field | Meaning |
 |---|---|
-| `version` | `2`; `3` when the body carries at least one `marks` array; `4` when it carries at least one `addOn` object; `5` when it carries at least one `content` object; `6` when any Task carried more than one part or a structured answer. |
+| `version` | `2`; `3` when the body carries at least one `marks` array; `4` when it carries at least one `addOn` object; `5` when it carries at least one `content` object; `6` when any Task carried more than one part or a structured answer; `7` when any part carries a `judgment`, a `when`, or a branch this build cannot read. |
 | `event` | One of the four above. |
 | `list.id` | The List's id, or **`0`** for a round with no List — Quick Review, which stands the folder in as the subject. |
 | `list.title` | The List's title, or the **folder's name** for a Quick Review round. |
@@ -152,7 +157,7 @@ were.
 | `tasks[].content` | A structured Prompt's identity: `kind`, `schema`, `revision`, `promptKey`. Written **after `addOn`** and **only when the Task has a payload** (v5). In v6 the identity is per part. See [structured Prompts](#structured-prompts-and-why-they-are-version-5). |
 | `tasks[].result` | A structured Prompt's answer: `completed` and, for a choice, `choice` (`id`, `label`). Written **only with `content`** (v5). |
 | `tasks[].completed` | v6 only: whether the Task is complete, the same fact `isCompleted` carries. |
-| `tasks[].parts[]` | v6 only: the Task's present parts in composition order — `partKey`, `promptKey`, `kind`, `schema`, `revision`, `required`, `result`, `assets[]`. See [TaskParts](#taskparts-and-why-they-are-version-6). |
+| `tasks[].parts[]` | v6 and v7: the Task's present parts in composition order — `partKey`, `promptKey`, `kind`, `schema`, `revision`, `required`, then in v7 `judgment`, `when`, `applicability`, `stale`, then `result`, `assets[]`. See [TaskParts](#taskparts-and-why-they-are-version-6) and [Conditional parts](#conditional-parts-and-why-they-are-version-7). |
 | `assets[].id` | The Asset's [public id](#task-and-asset-ids). Stable, never the database row number. |
 | `assets[].title` | The file name. |
 | `assets[].relativePath` | The file's **folder**, relative to the Upstream's linked folder, without the file name. |
@@ -396,6 +401,62 @@ order, each with its own provenance, answer and files.
 - **A single-part Task with no structured answer still exports v5**, byte for byte. v6 appears only
   for a Task that holds more than one part or answers with a structured result.
 - **The txt method writes the same body**, so a v6 round is a v6 `.txt` file as well.
+
+### Conditional parts, and why they are version 7
+
+Since `0.8.5-preview` a part may be asked only when an earlier part's answer says so, and may be
+answered under a judgment of its own rather than its Task's template. Version 7 writes the four
+facts that describe **whether the part was asked at all** between `required` and `result`.
+
+```json
+{
+  "partKey": "menu",
+  "promptKey": "menu",
+  "kind": "media",
+  "schema": 1,
+  "revision": 1,
+  "required": true,
+  "judgment": { "id": "builtin.media.part", "version": 1 },
+  "when": { "prompt": "gate", "field": "choice", "equals": "yes" },
+  "applicability": "inactive",
+  "stale": true,
+  "result": "",
+  "assets": [ … ]
+}
+```
+
+- **`judgment`** is the template version that governs this part's buttons, revisability and answer
+  sheet — `{ "id", "version" }`, or `null` when the Task's own template governs it. It is a
+  reference, not a copy: a receiver that needs the template's contents asks Listea's history for
+  it the same way it would for an Asset's `templates[]`.
+- **`when`** is the part's condition, using **the same grammar the Package uses**: `prompt` is the
+  source part's `partKey`, `field` is the field the source's Viewer exposes (`choice` for every
+  option-tap Viewer; a form's own field key), and exactly one of `equals` (one value) or `in` (one
+  to fifty values) is the test. `null` means the part is asked unconditionally. A condition that
+  reads one way in a Package and another in an export would be two grammars for one fact.
+- **`applicability`** is `"pending"`, `"active"` or `"inactive"`, evaluated against the answers in
+  **this same body**, so a receiver can recompute it from what it holds. `pending` means the
+  source has not been answered yet; `active` means the condition holds now; `inactive` means it
+  does not, or the source is missing, detached, later in the composition, or inactive itself.
+- **`stale`** says the part's `result` was made before its branch last closed. The answer is kept
+  and exported — a decision was made and must not disappear from the record — but it is marked so
+  a receiver does not read it as the current answer. A fresh commit clears the flag.
+- **Every present part is exported, asked or not.** A masked part keeps its `result` (stale when
+  it has one) and its `assets`, with `applicability: "inactive"`. There is **no availability key**
+  at Task or Asset level: a part that could not be presented is drawn from the same facts, and a
+  receiver that only counts parts sees the same list the phone exported.
+- **A branch fact this build cannot read is not permission to call the part unconditional — but
+  v7 cannot spell it either.** A stored condition or judgment that fails to decode exports as
+  `null` in its key, and the version stays 7 because the part *had* a branch. Applicability is
+  still evaluated from what the body can read, so an unreadable condition exports
+  `applicability: "active"` — indistinguishable on the wire from an unconditional part. The phone
+  still refuses the page through its availability diagnostic (`condition-invalid` or
+  `unsupported-judgment`), which has no key in the body; the body says only what it can stand
+  behind.
+- **A body with no conditional part stays v5 or v6, byte for byte.** Version 7 is taken when any
+  Task carries a part with a `judgment` or a `when` — or a branch this build cannot read. A Task
+  that never uses either is what v0.8.4 sent.
+- **The txt method writes the same body**, so a v7 round is a v7 `.txt` file as well.
 
 **Keys are always present — except `marks`, `addOn`, `content` and `result`.** `completedAt`,
 `relativePath` and a template's `name` may be `null`, and `assets` or `templates` may be `[]`; none

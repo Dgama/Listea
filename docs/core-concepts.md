@@ -212,9 +212,11 @@ whatever has been decided about it.
 
 ## Questions and parts
 
-> **Since `0.8.4-preview`.** The app separates the words: the **TaskPart** is the decision unit,
-> the **Asset** is a presented file. The normative decisions are
-> [v0.8.4](iterations/v0.8.4.md); the words are [the two vocabularies](vocabulary.md). Older
+> **Since `0.8.4-preview`, extended by `0.8.5-preview`.** The app separates the words: the
+> **TaskPart** is the decision unit, the **Asset** is a presented file. Since v0.8.5 a part may be
+> **conditional** — it applies only when an earlier part's answer says so — and may carry its own
+> **part judgment**. The normative decisions are [v0.8.4](iterations/v0.8.4.md) and
+> [v0.8.5](iterations/v0.8.5.md); the words are [the two vocabularies](vocabulary.md). Older
 > sections of this page use *item* only in the legacy queue sense — a file in a queue.
 
 The question is simple: **can one Task hold more than one question?** Yes. A Task is **one sitting
@@ -252,11 +254,31 @@ did you eat? → Where?" — is one Prompt, one part, one decision. The branch's
 that part; they are not separate parts, Sections or Tasks. A later question that depends on an
 earlier *Task's* answer is outside this round: the producer emits a follow-up Task.
 
+**One part may depend on another part (v0.8.5).** A Package Prompt may declare `when`, a condition
+on one field of an **earlier** part in the same Task. The target part is then:
+
+| State | Meaning | Can it be answered? |
+|---|---|---|
+| `pending` | The earlier answer has not been given yet (or is itself undecided). | No; the page is masked. |
+| `active` | No condition, or the earlier answer satisfies it. | Yes, if otherwise available. |
+| `inactive` | The earlier answer does not satisfy it, or its own branch is closed. | No; the page is masked. |
+
+Applicability is **derived** from the parts' stored conditions and current answers; it is not a
+stored state. The page list never changes: an inactive or pending part keeps its pages, drawn
+**masked** with an explanation card, so the page count and the Task count stay stable. An answer
+whose branch closed is kept as a **stale answer** — shown as the previous answer, not counted until
+the person submits it again. A completed Task whose required part becomes active again
+**reopens**. A condition that the taker's grouping splits across Tasks cannot be honoured: the target
+imports unavailable and the report names it, which is why a Package with conditions recommends
+**one Task per Section**.
+
 **What stays the same.** A file or folder Task still has one part; its files are still Assets in the
 same order and the same page list. The Add-on is still one per Todo, Task-level, and after the last
 part. The page arrows keep their meaning: `<< >>` move between Tasks, `<>` between files; the part
 is a grouping and state unit, not a third arrow. The catalog shows the two counts distinctly
-(for example, *3 questions · 2 files*) instead of showing only the file count.
+(for example, *3 questions · 2 files*) instead of showing only the file count. Since v0.8.5 it
+counts **every present part**, including inactive ones — a conditional question is still a question
+the setter asked — and the page denominator counts masked pages too.
 
 **Re-import keeps the Task.** Adding a question to a Section Task adds a part; removing one detaches
 its part and keeps its answer and history; it does not delete the Task or rewrite what was
@@ -472,6 +494,13 @@ the new version no longer asks are kept but hidden. The same page is shown, read
 surface that browses a Task — the Todo preview and the List item viewer as well as Review — because
 a Task has one shape wherever it is looked at; a file that is not a Task has none.
 
+**Since v0.8.5 a part may carry its own template.** When a Task's parts need different answer tools
+— a form, a single-choice card and a media Done — each part is stamped with a **part judgment**: a
+template reference stored on the TaskPart (`task_parts.partJudgment`). A null column means inherit
+the Task-level definition, which is what every v0.8.4 and homogeneous Task does. The Task-level
+template keeps the **completion policy**; a part judgment's completion field is ignored. A mixed
+Task's Task-level template (`builtin.structured.mixed@1`) is a container, not a renderer.
+
 The three layers are deliberately separate: the **Task** (checked, and the add-on's answers), the
 **Task–Asset pair** (selections and PDF marks), and the **Asset** (the file itself). See
 [Templates → Add-ons](templates.md#add-ons) and
@@ -498,6 +527,14 @@ being asked.
 Task, and a Task may hold several parts. Completion stays on the Task (`task_state`); pair state and
 marks stay under the Asset. For a one-part Task — every pre-v0.8.4 Task — nothing user-visible
 moved, and the sentences above remain true.
+
+**Since `0.8.5-preview`:** `task_parts` also stores each part's `condition` and `partJudgment`, and
+`task_part_state` a `stale` flag. Applicability itself is not stored — it is derived from those
+conditions and the current responses, at read time and around every write, so there is no second
+truth to keep in step. A stale answer keeps its response and its events; only completion stops
+counting it. A reopen writes `task_state.completionSource = 'reopened'` and deliberately appends no
+`review_events` row, because that table is a log of submissions and its newest row is read as the
+Task's latest answer.
 
 The two levels are not a complication for its own sake. A Task holding three files is one thing to
 judge and three things to mark, and a mark made on the second of them has to be read back on the

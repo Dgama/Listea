@@ -2,16 +2,21 @@
 
 > **Status:** Normative architectural direction  
 > **Scope:** Long-lived product and domain boundaries  
-> **Last updated:** 2026-10-27 (the v0.8.2 Package protocol, the v0.8.2f acceptance fixes, the
-> vocabulary round delivered as `0.8.3-preview`, and the v0.8.4 TaskParts round delivered as
-> `0.8.4-preview` are recorded in [Framework evolution — v0.8.x](#framework-evolution--v08x), with
-> the **Prompt** vocabulary and the question-setter/decision-maker distinction in
-> [Prompt and Task](#prompt-and-task). The v0.8.4 implementation — a Task over 1..N **TaskParts**,
-> **Section** as a tag, and the taker's **Composition** — is recorded in
-> [TaskPart and Composition](#taskpart-and-composition-v084) and the v0.8.4 block of
-> [Framework evolution](#framework-evolution--v08x); it is implemented, device-verified on
-> 2026-10-27, and ships unreleased as `0.8.4-preview` (versionCode 804). The shipped v0.7.1 Add-on
-> model is retained unchanged. The pre-v0.8 revision is archived at
+> **Last updated:** 2026-10-29 (the v0.8.2 Package protocol, the v0.8.2f acceptance fixes, the
+> vocabulary round delivered as `0.8.3-preview`, the v0.8.4 TaskParts round delivered as
+> `0.8.4-preview`, and the v0.8.5 conditional-parts round delivered as `0.8.5-preview` are recorded
+> in [Framework evolution — v0.8.x](#framework-evolution--v08x), with the **Prompt** vocabulary and
+> the question-setter/decision-maker distinction in [Prompt and Task](#prompt-and-task). The
+> v0.8.4 implementation — a Task over 1..N **TaskParts**, **Section** as a tag, and the taker's
+> **Composition** — is recorded in [TaskPart and Composition](#taskpart-and-composition-v084) and
+> the v0.8.4 block of [Framework evolution](#framework-evolution--v08x); it is implemented,
+> device-verified on 2026-10-27, and is pushed as `0.8.4-preview` (versionCode 804). **v0.8.5** adds a
+> **Conditional part** (a `when` over an earlier part's answer), **part judgments**, derived
+> **applicability** and **stale answers** — architecture in [TaskPart and
+> Composition](#taskpart-and-composition-v084), protocol v3 in
+> [Package is a protocol](#package-is-a-protocol-not-an-owner), schema 34 and export v7 — and ships
+> unreleased as `0.8.5-preview` (versionCode 805). The shipped v0.7.1 Add-on model is retained
+> unchanged. The pre-v0.8 revision is archived at
 > [ARCHITECTURE-v0.7.1.md](ARCHITECTURE-v0.7.1.md).)
 > **Earlier revisions:** v0.7.0's PDF viewer, passage mark and renderer-neutral seam are recorded in
 > [Asset](#asset), [Asset Viewer Template](#asset-viewer-template) and
@@ -32,7 +37,7 @@ Iteration documents may narrow the work for a release, but they must not contrad
 The code and the architecture are not the same artefact. This table says where the implementation
 stands so a later reader does not mistake a planned boundary for a shipped one.
 
-| Release | State (2026-10-27) | Established |
+| Release | State (2026-10-29) | Established |
 |---|---|---|
 | v0.7.1 | shipped, not published | Add-ons as Task-owned current state; schema 29; export v4 |
 | v0.8.1 | implemented, unreleased | stored Task Reviews, viewer events (`ImagePoint`), primary response envelope; schema 30 and the derived `review_event_answers` table (schema 31); the position label opens a two-level queue guide |
@@ -40,8 +45,10 @@ stands so a later reader does not mistake a planned boundary for a shipped one.
 | v0.8.2f | implemented, device-verified, unreleased | Acceptance fixes: Todo rename, card-level add-on edit, one Templates list with nothing required, format-matched import, Prompt Tasks export no templates, page-detector fix. Schema 32 and export v5 unchanged |
 | `0.8.3-preview` | implemented, device-verified 2026-10-26; versionCode 803, unreleased | the vocabulary round carried with the v0.8.2f fixes: second structured Viewer (`vocabulary`/1) behind the same Package protocol, Template and page model; shared Prompt renderer and reveal card. Schema 32 and export v5 unchanged |
 | v0.8.3 | not closed; the reveal-card fixture is delivered in `0.8.3-preview` | shared-Resource and reveal-card fixtures. The revision policy, the independent-Todo proof and the contract freeze are carried into v0.8.4 |
-| `0.8.4-preview` | implemented, device-verified 2026-10-27; versionCode 804, unreleased | Task = 1..N TaskParts; Section as a declared tag; taker Composition (`prompt:` / `section:`); protocol v2 (`files`, `sections`, `structured`) with v1 compatibility; schema 33 and export v6 (v5 kept for single-part bodies) |
-| v0.8.4 | not closed; TaskParts, Composition and the v2 protocol ship in `0.8.4-preview` | the v0.8.3 close items carried forward, and this round's release decision, remain open |
+| `0.8.4-preview` | accepted and pushed 2026-10-28; versionCode 804, no release published | Task = 1..N TaskParts; Section as a declared tag; taker Composition (`prompt:` / `section:`); protocol v2 (`files`, `sections`, `structured`) with v1 compatibility; schema 33 and export v6 (v5 kept for single-part bodies) |
+| v0.8.4 | accepted via `0.8.4-preview`; not closed | the v0.8.3 close items carried forward, and this round's release decision, remain open |
+| `0.8.5-preview` | implemented, device acceptance completed 2026-10-29; versionCode 805, unreleased | Conditional parts (`when` over an earlier part's answer); part judgments; derived applicability and stale answers; protocol v3 (`when` on a Prompt); schema 34; export v7 (v5/v6 kept for bodies with no conditional part) |
+| v0.8.5 | not closed; conditional parts and the v3 protocol ship in `0.8.5-preview` | cross-Task and compound conditions, optional condition sources, media-as-source and a per-part template picker remain open |
 
 The unreleased v0.8.x rows describe code on `main`; the rows named for a release without the
 `-preview` suffix are commitments of direction, not descriptions of code. Each release's iteration
@@ -352,8 +359,59 @@ the user's explicit control, with provenance recorded. The Add-on remains Task-l
 after all parts, and does not become a part. Media Tasks keep their current page list and
 Task-level template behavior under `singlePart`.
 
-A cross-Prompt condition is **not** part of this model: a later Prompt depending on an earlier
-answer is a follow-up Task from the producer, not a reason to give the Task a condition graph.
+> **Amended by v0.8.5.** The v0.8.4 statement that "a cross-Prompt condition is not part of this
+> model" is superseded *inside one Task*: a present part may now depend on an earlier part's answer.
+> A condition **across Tasks** remains a follow-up Task from the producer, not a reason to give
+> Listea a condition graph.
+
+### Conditional parts (v0.8.5)
+
+> **Status:** implemented, device acceptance completed 2026-10-29; schema 34, protocol v3 and export
+> v7 ship in `0.8.5-preview` (versionCode 805), unreleased. The normative decisions are
+> [v0.8.5](iterations/v0.8.5.md); the plan is [v0.8.5-plan.md](iterations/v0.8.5-plan.md); the
+> vocabulary is [the two vocabularies](vocabulary.md#the-canonical-terms).
+
+A present TaskPart may carry a **condition**: `prompt` names an **earlier** part in the same Task,
+`field` names the field its Viewer exposes (`choice` for every option-tap Viewer, a form's own field
+key), and exactly one of `equals` or `in` is the test. A condition is a fact about **applicability**,
+not about existence: the part keeps its row, its answer, its Assets and its pages.
+
+**Applicability is derived, never stored.** Every read, write, import and export evaluates the
+present parts in composition order and reads each part as `pending`, `active` or `inactive` from its
+source's current answer. A source that is missing, detached, later in the composition, or inactive
+itself makes a part inactive — fail closed, because an orphaned condition is not permission to ask
+the question anyway. The same evaluator serves the page list, the completion policy and the export,
+so the phone and the wire cannot disagree about which part was asked.
+
+**Availability and applicability are orthogonal.** Availability is the import's "this part cannot be
+presented at all" (an unreadable Prompt, a condition source outside the chosen composition); a
+required unavailable part still blocks its Task, exactly as it did in v0.8.4. Applicability is "the
+branch does not ask for this part now"; an inactive required part does **not** block. Completion
+reads the **active** required parts, and with none active it is vacuously satisfied.
+
+**A masked page is drawn, not removed.** An inactive part's Content or Asset pages stay in the page
+list, keep their place and keep the page count stable; the page is non-interactive and shows an
+explanation card naming the source question, the answer given and the answers that would activate
+it. A conditional part is never a queue entry and never a counter level.
+
+**A stale answer is kept and not counted.** An answer made before its branch closed is kept on the
+part, exported with `stale: true`, and stops counting toward completion. Submitting the part again
+while the branch is open clears the flag; reopening never makes an old answer current by itself. A
+completed Task **reopens** when a required part becomes active again — automatic or explicit
+completion alike — recorded as `completionSource = 'reopened'` with no submission event.
+
+**A part may carry its own judgment.** `judgment` names a template version governing that part's
+buttons, commit control, revisability and answer sheet, while completion stays one Task-level fact.
+A homogeneous Task writes no judgment and keeps v0.8.4's shape; a Task that needs two sheets is
+stamped with the code-only mixed container. See [Templates → Part
+judgments](templates.md#part-judgments-and-the-mixed-container).
+
+**Protocol v3 declares `when` on a Prompt** with the same grammar, and an earlier, required source
+within the same composition. A source outside the composition the taker chose
+(`condition-source-outside-task`) or one the Package no longer contains
+(`condition-source-detached`) makes the part **unavailable**, not conditional-on-nothing. The
+condition object is part of the Package fingerprint. Export v7 adds `judgment`, `when`,
+`applicability` and `stale` to every part; a body with no conditional part stays v5/v6.
 
 ### Asset
 
@@ -699,6 +757,9 @@ Review, Quick Review, the List item viewer and the Todo preview all read it; non
 independent arithmetic. The Asset index it hands `AssetRun` is the number of Asset pages before the
 current page (`-1` on a content page, `assets.size` on the add-on page), not a boolean read from
 "has a content page"; a surface that derived the index itself would land on the wrong Asset.
+Since v0.8.5 an **inactive conditional part still contributes its pages** to this list — the page
+count is stable whether the branch asks for the part or not — and renders as a masked page with the
+explanation card; a conditional part adds no page of its own and no counter level.
 
 A TaskPart is an explicit **decision target** of its own; its content page is the surface where that
 decision is made. Opening it, selecting in it, showing its Info, navigating to it, and exporting it
@@ -852,8 +913,11 @@ may select, rename, group, or restructure fields, but it may not redefine review
 stored responses. Existing v2/v3/v4 bodies remain byte-compatible for equivalent snapshots. Export
 **v5** is introduced only for rounds containing new structured content/results, with its schema
 documented before the first structured fixture; a mixed round uses the new envelope while preserving
-the media and Add-on field semantics. Saved history is resent from its original bytes, never
-remapped, and a resend never gains a later contract version.
+the media and Add-on field semantics. Export **v6** (v0.8.4) replaces a Task's single decision with
+`parts[]`; **v7** (v0.8.5) adds `judgment`, `when`, `applicability` and `stale` to every part, and is
+taken only when a part carries a branch — a body with no conditional part keeps the version it had.
+Saved history is resent from its original bytes, never remapped, and a resend never gains a later
+contract version.
 
 ## Source material, import, and review selection
 
@@ -1058,7 +1122,7 @@ And for reconciliation: a locator held by another Todo is not a collision, so a 
 
 ### Package reconciliation and checkpoints (v0.8.x)
 
-> **Status:** implemented for the v1 and v2 protocols in `0.8.4-preview` (schema 33). The
+> **Status:** implemented for the v1, v2 and v3 protocols in `0.8.5-preview` (schema 34). The
 > `custom:<userKey>` composition remains representable but unshipped.
 
 Protocol-declared Prompts reconcile on `(todoId, packageKey, promptKey)`; Resources on
@@ -1123,17 +1187,20 @@ Resource-role changes are never manufactured into Asset-set changes to trigger i
 
 ## Framework evolution — v0.8.x
 
-> **Status:** Implemented through `0.8.4-preview`, unreleased. v0.8.1 and v0.8.2 are implemented on
+> **Status:** Implemented through `0.8.5-preview`, unreleased. v0.8.1 and v0.8.2 are implemented on
 > `main` and unreleased (schema 31 and 32; export v5 for structured rounds); the released baseline
 > is v0.7.1 (schema 29, export v4). v0.8.2 passed its device acceptance on 2026-10-24, and the
 > issues it found are implemented and device-verified in the v0.8.2f fix round. The vocabulary
 > round is implemented and device-verified through 2026-10-26, and ships unreleased as
 > `0.8.3-preview` (versionCode 803) together with those fixes — a preview, not the close of
-> v0.8.3. **v0.8.4 is implemented and device-verified on 2026-10-27** and ships unreleased as
-> `0.8.4-preview` (versionCode 804): TaskParts, the taker Composition, protocol v2, schema 33 and
-> export v6 are code, and the v1 protocol and v5 export stay for compatible bodies. The release
-> sequence at the end of this section is a set of bounded proposals; each iteration document
-> remains the authority for what a release actually does.
+> v0.8.3. **v0.8.4 is implemented, device-verified on 2026-10-27, and accepted on 2026-10-28**;
+> its commits are pushed as `0.8.4-preview` (versionCode 804): TaskParts, the taker Composition,
+> protocol v2, schema 33 and export v6 are code, and the v1 protocol and v5 export stay for
+> compatible bodies. **v0.8.5 is implemented and device-accepted on 2026-10-29** and ships
+> unreleased as `0.8.5-preview` (versionCode 805): conditional parts, part judgments, derived
+> applicability and stale answers, protocol v3, schema 34 and export v7, with v2 and v6 kept for
+> bodies that carry no branch. The release sequence at the end of this section is a set of bounded
+> proposals; each iteration document remains the authority for what a release actually does.
 
 v0.8.x prepares the framework for v0.9.x vocabulary and primary-questionnaire work. It does not ship
 those products. Its job is to let structured content reach the same review engine as media without
@@ -1302,8 +1369,9 @@ ships unreleased as `0.8.4-preview` (versionCode 804). The architecture-level po
   file or folder Task is one degenerate part; a vocabulary Task is one part and zero Assets. A
   TaskPart is never an Asset, and an Asset is never the decision.
 - **A Prompt may contain internal steps, fields and conditions.** A conditional chain is one Prompt
-  and therefore one TaskPart. Cross-Prompt conditions are out of scope; a later question depending
-  on an earlier answer is a producer follow-up Task.
+  and therefore one TaskPart. Cross-Prompt conditions were out of scope in v0.8.4 — superseded
+  inside one Task by v0.8.5, where a part may depend on an earlier part's answer; a condition
+  across Tasks is still a producer follow-up Task.
 - **Section is a tag, Composition is the taker's rule.** The protocol may declare a
   `sections` registry; it never declares Task boundaries. The Composition records
   `prompt:<key>`, `section:<key>` or (future) `custom:<key>`.
@@ -1329,6 +1397,41 @@ ships unreleased as `0.8.4-preview` (versionCode 804). The architecture-level po
 
 The v0.8.4 scope decision keeps the structured Viewers to a minimal conditional `form` Viewer for
 the questionnaire scenario, isolated so it can be cut without touching the TaskPart framework.
+
+### v0.8.5 — Conditional parts
+
+v0.8.5 answers the question v0.8.4 left open: can a part depend on another part's answer inside the
+same Task? Yes — as a **Conditional part**, with the condition confined to one Task and evaluated by
+the taker. The full design is [v0.8.5](iterations/v0.8.5.md), the plan is
+[v0.8.5-plan.md](iterations/v0.8.5-plan.md), and the vocabulary is
+[the two vocabularies](vocabulary.md). It is implemented and device-accepted on 2026-10-29 and
+ships unreleased as `0.8.5-preview` (versionCode 805). The architecture-level points:
+
+- **A condition is applicability, not existence.** `when` names an earlier part and one of its
+  Viewer fields; the dependent part keeps its row, answer, Assets and pages. Applicability
+  (`pending` / `active` / `inactive`) is **derived** at read, write, import and export time by one
+  evaluator, never stored — so the page list, the completion policy and the wire cannot disagree.
+- **Availability stays orthogonal.** A part this build cannot present is still *unavailable* and a
+  required one still blocks. An inactive branch does not block, and an inactive part's pages are
+  drawn as **masked** pages with an explanation card, keeping the page count stable.
+- **A stale answer is kept, marked and not counted.** Branch closure does not erase what was
+  answered; reopening requires a fresh submit before the answer is current again. A completed Task
+  reopens when a required part reactivates.
+- **A part may carry its own judgment.** `judgment` governs that part's buttons, commit,
+  revisability and answer sheet; completion stays one Task fact. A mixed Task uses the code-only
+  `builtin.structured.mixed` container; a media part uses `builtin.media.part`, which names the
+  payload's media Viewer rather than the asset viewer.
+- **Protocol v3** is `listea.package/3`: `prompts[].when` with `prompt`, `field`, and one of
+  `equals` or `in`. The source must be an earlier, required part in the same composition; a source
+  outside the composition or detached makes the part unavailable rather than conditional-on-nothing.
+  v1 and v2 Packages import unchanged; an older reader rejects v3 whole.
+- **Schema 34 and export v7 ship in this round.** Schema 34 adds `task_parts.condition`,
+  `task_parts.partJudgment` and `task_part_state.stale`, additively. Export v7 adds `judgment`,
+  `when`, `applicability` and `stale` to every part and is taken only when a part carries a branch;
+  v5 and v6 remain byte-compatible for bodies with no conditional part. There is no availability key
+  on the wire.
+- **The build is `0.8.5-preview` (805).** The version-history line keeps `0.8.4-preview` (804) as
+  the accepted predecessor; this round's changes are carried in 805.
 
 ### Validation and input limits
 
@@ -1378,7 +1481,11 @@ composition provenance, `assets.partKey`, `review_events.partKey`, structured fi
 `dissolved_task_state.partRecords` and `sources.composition`. It is additive in meaning but rebuilds
 the tables whose primary key must change (per-part payloads, per-part Resource uses, composition
 links); every existing Task gains one part, and the migration is tested on a schema-32 fixture for
-row counts, ids, page lists and the v5 export bytes. Follow
+row counts, ids, page lists and the v5 export bytes. v0.8.5 (schema 34, shipped in
+`0.8.5-preview`) adds `task_parts.condition`, `task_parts.partJudgment` and
+`task_part_state.stale` — additive, nullable columns whose absence means *unconditional, judged by
+the Task, current* — and is tested on a schema-33 fixture for unchanged rows and v6 export bytes.
+Follow
 the minSdk 24 conventions: additive tables/nullable fields where possible, no dependence on
 `ALTER TABLE … DROP COLUMN`, no table rebuild solely for terminology cleanup. A schema-only
 migration must preserve populated state byte-for-byte where no conversion is specified. Add-on
@@ -1413,6 +1520,8 @@ Existing module/package conventions are kept where they already satisfy this bou
 | **v0.8.3** | Second fixture: prompt/reveal, declared grades, shared pronunciation Resource; optional/required diagnostics, compatible payload revisions, independent Todo identities; freeze protocol/capability contracts. The reveal-card fixture is delivered in `0.8.3-preview`; the revision policy, the independent-Todo proof and the freeze remain open | v5 fixture; migration/regression docs |
 | **`0.8.4-preview`** | TaskParts round on the v2 protocol: Task = 1..N TaskParts; Section tag and taker Composition; per-part page/state/events and per-version completion policies; protocol v2 (`files`, `sections`, `structured`) with v1 compatibility retained; composition choice in import; the conditional `form` Viewer and its two Task Reviews; export v6 for multi-part or structured Tasks. Not the close of v0.8.4 | Schema 33; export v6, v5 kept for compatible single-part bodies |
 | **v0.8.4** | Close of the line: the v0.8.3 items carried forward (revision policy, independent-Todo proof, contract freeze) and the release decision | Migration/regression docs for schema 33 |
+| **`0.8.5-preview`** | Conditional-parts round on the v3 protocol: `when` over an earlier part; derived applicability and stale answers; masked pages with the explanation card; per-part judgments and the code-only mixed container and media-part judgment; import diagnostics for a condition source outside the composition or detached; export v7. Not the close of v0.8.5 | Schema 34; export v7, v5/v6 kept for bodies with no branch |
+| **v0.8.5** | Close of the line: cross-Task and compound conditions, optional condition sources, media-as-source and a per-part template picker remain open | Migration/regression docs for schema 34 |
 
 These are framework proofs, not the v0.9 product. Add-on restructuring is assigned to none of them.
 

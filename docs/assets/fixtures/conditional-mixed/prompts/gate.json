@@ -1,0 +1,15 @@
+{
+  "title": "Gate",
+  "fields": [
+    {
+      "key": "choice",
+      "type": "choice.single",
+      "label": "Show the rest of this Task?",
+      "required": true,
+      "options": [
+        { "id": "yes", "label": "Yes" },
+        { "id": "no", "label": "No" }
+      ]
+    }
+  ]
+}

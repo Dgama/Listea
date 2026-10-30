@@ -1,17 +1,18 @@
 # The two vocabularies — setter and taker
 
-> **Status:** v0.8.4, implemented 2026-10-27 in `0.8.4-preview` (804). This page is the canonical
-> reference for the words the v0.8.4 documentation uses; the terms are now code — TaskPart is the
-> decision unit in the schema and the UI, Composition is the import's `compositionKey`, and
-> ImportPlan is the shared importer output. The open items at the end remain deliberately
-> unaligned. The [architecture](ARCHITECTURE.md) remains the one normative page;
-> this one fixes the naming it relies on.
+> **Status:** v0.8.5, implemented 2026-10-28 in `0.8.5-preview` (805). This page is the canonical
+> reference for the words the current documentation uses; the terms are now code — TaskPart is the
+> decision unit in the schema and the UI, Composition is the import's `compositionKey`, ImportPlan
+> is the shared importer output, and a part's applicability, judgment and stale flag are stored or
+> derived exactly as this page says. The open items at the end remain deliberately unaligned. The
+> [architecture](ARCHITECTURE.md) remains the one normative page; this one fixes the naming it
+> relies on.
 > **Why this page exists:** Listea began as a file-review app with one vocabulary. A Package makes
 > the question **setter** a second speaker: the setter declares questions and material, the
 > decision-maker takes them on, and the app is the boundary between the two. The file-era words —
 > especially *item* and *asset* — now point at two different things. This page separates the two
 > vocabularies, states the equalities where they overlap, and marks what has not been aligned yet.
-> **Related:** [v0.8.4 design](iterations/v0.8.4.md),
+> **Related:** [v0.8.5 design](iterations/v0.8.5.md),
 > [architecture](ARCHITECTURE.md#prompt-and-task),
 > [Package protocol](package-protocol.md).
 
@@ -26,8 +27,8 @@ Three rules decide a word:
    file-flow and Package-flow examples side by side. *Task*, *Asset*, *Resource*, *Todo*,
    *Upstream*, *Template*, *Viewer* and *Add-on* survive this test.
 3. **A word that cannot yet be aligned is marked open**, with the reason and the intended
-   direction. `files` versus `materials`, custom compositions, cross-Prompt conditions and per-part
-   revisability are in that list.
+   direction. `files` versus `materials`, custom compositions, cross-Task conditions and a
+   per-part template picker are in that list.
 
 A fourth rule follows from the first three: **one word, one meaning.** If a sentence needs two
 senses, it needs two words. The section [Words not to use](#words-not-to-use) is the enforcement
@@ -59,7 +60,12 @@ nor **Asset** (the presented file/page).
 | Term | Meaning | Not |
 |---|---|---|
 | **Prompt** | The question setter's smallest declared decision unit. It has a response contract, may present files, and may declare internal steps/fields/conditions in its body. A Prompt is content; it is never stored as a Task. | A Task, a TaskPart, an Asset, a List membership |
-| **TaskPart** *(new)* | One Prompt instantiated in one Task: the decision-maker's unit of judgment. It owns its current response(s), its part-level events, its completion contribution and its pages. A media Task has one **degenerate** TaskPart with no Prompt payload. | An Asset, a Prompt, a second Task |
+| **TaskPart** *(new)* | One Prompt instantiated in one Task: the decision-maker's unit of judgment. It owns its current response(s), its part-level events, its applicability, its judgment, its completion contribution and its pages. A media Task has one **degenerate** TaskPart with no Prompt payload. | An Asset, a Prompt, a second Task |
+| **Conditional part** *(v0.8.5)* | A TaskPart whose applicability is declared by a `when` condition on one field of an **earlier** part of the same Task. The condition is the setter's declaration of applicability; it is never a Task boundary. | A cross-Task dependency, a form-internal field, an `if` in a Prompt body |
+| **Applicability** *(v0.8.5)* | A part's derived state — `pending`, `active` or `inactive` — computed from the parts' conditions and current answers. Not stored; the answer is the truth and a stored copy would be a second truth. | Answered/unanswered (that is the response), available/unavailable (that is the import diagnostic) |
+| **Part judgment** *(v0.8.5)* | The Template reference that governs **one part's** commit, revisability and answer sheet, stored in `task_parts.partJudgment`. Null inherits the Task-level definition. The Task keeps exactly one completion policy. | A second Task Review, a Task-level template, a Viewer |
+| **Stale answer** *(v0.8.5)* | An answer kept in history and state but not counted, because its part became inactive, or became active again and has not been reconfirmed. | A deleted answer, a pending answer, an unavailable part |
+| **Masked page** *(v0.8.5)* | A page that stays in the page list but is non-interactive and shows an explanation card instead of its body. Masking is not hiding: the page, its file name and the reason remain on screen. | A removed page, an unavailable part, a queue entry |
 | **Task** | The decision-maker's undertaking. It contains **1..N TaskParts** and remains the durable object for identity, List membership, Task completion, the Add-on and the export envelope. | A Prompt, a Package, a file, a List membership |
 | **Asset** | A file **presented as a page** within a TaskPart. It is material, not the decision unit. | A TaskPart, a Resource, a judgment target |
 | **Resource** | A file a TaskPart **depends on** but does not present as a page: pronunciation audio, a prompt illustration, a reference image. | An Asset, a page, a decision unit |
@@ -212,6 +218,34 @@ Task ─── TaskPart (one decision) ─── Prompt payload
 - This is the answer to "is a decision one answer?" — no. A decision is one **judgment**; it may
   contain several answers along one branch.
 
+### 5b. A gate whose later decisions are other kinds of work
+
+```text
+Package
+└── Prompt: ate     form, field ate = yes | no
+    Prompt: menu    media, stem "Choose the dishes", file menu.pdf   when ate.ate = yes
+    Prompt: words   vocabulary card                                   when ate.ate = yes
+    Prompt: alice   dating card                                      when ate.ate = yes
+        │
+        │ composition: section:meal
+        v
+Task ─── TaskPart ate    active    judgment: form
+     ├── TaskPart menu   active?   judgment: media part (Done)
+     ├── TaskPart words  active?   judgment: single choice
+     └── TaskPart alice  active?   judgment: single choice
+```
+
+- **Task**: 1. **TaskParts**: 4. **Parts are conditional**: three of them are `pending` until the
+  gate is answered and `inactive` when it is answered "no". **Pages**: all of them, every time;
+  the closed ones are **masked**.
+- The condition is between **parts**, not inside one form body. That is the v0.8.5 step beyond
+  scenario 5: the later decisions may be a PDF, a video, a vocabulary card or a dating card, and
+  each keeps its own **part judgment**.
+- An answer to a part that later closes is **stale**: kept, shown as the previous answer, not
+  counted. The Task has one completion policy over its **active required** parts.
+- A condition that the taker's composition would split across Tasks cannot be honoured; the
+  target imports unavailable and the report names it.
+
 ### 6. A Section of 20, with one conditional pair
 
 ```text
@@ -275,6 +309,14 @@ These keep their meaning and need no new word:
   `compositionKey`.
 - **ImportPlan** — the normalized output both importers produce; the unification point.
 
+### New in v0.8.5
+
+- **Conditional part** — a part whose applicability an earlier part's answer decides.
+- **Applicability** — `pending` / `active` / `inactive`, derived from conditions and answers.
+- **Part judgment** — one part's Template reference; the Task keeps the completion policy.
+- **Stale answer** — kept and shown, not counted until reconfirmed.
+- **Masked page** — present, non-interactive, explained; the page count does not move.
+
 ### Narrowed or corrected
 
 - **Prompt** — still the setter's unit, but no longer "one question that a Task answers one-to-one."
@@ -285,6 +327,9 @@ These keep their meaning and need no new word:
 - **Asset** — still the presented file/page, but no longer a candidate name for the decision unit.
   The 2026-10-26 note that called a virtual Task's decision unit an Asset is corrected to
   **TaskPart**; the count it described is a part count, not an Asset count.
+- **Review** *(since v0.8.5)* — reserved for the Task-level template and its history. The per-part
+  column is a **part judgment**; only the user-facing prose may call its sheet an **answer sheet**.
+  A Task with several parts still has one review and one completion.
 
 ### Open — not yet aligned
 
@@ -292,9 +337,11 @@ These keep their meaning and need no new word:
 |---|---|---|
 | `files` vs `materials` / `presentations` | `files` names the storage form; a future Prompt may present a generated or embedded thing that is not a file. | v0.8.4 uses `files` as the short-term v2 manifest field. Revisit when a non-file presentation exists. |
 | Custom composition | A user could pick any five Prompts into one Task; this is representable by a `custom:<key>` composition with a stored member list, but the UI and reconciliation are not in v0.8.4. | Scope control, not a model limitation. Add when a real workflow needs it. |
-| Cross-Prompt conditions | A later Prompt depending on an earlier Prompt's answer is not represented in v0.8.4. | Out of the v0.8.4 Core. The producer may emit a follow-up Prompt/Task after observing the result. This is a boundary, not a claim that such workflows are wrong. |
-| Per-part revisability | v0.8.4 keeps revisability a Template-level policy applied to each part. | A later version may allow different parts of one Task to have different policies. |
-| Mixed-contract parts | A Task whose parts need different response contracts needs a composite Template; v0.8.4 scopes a Task to parts the chosen Template can answer. | Diagnose or split the composition; add composite templates when a fixture demands them. |
+| Cross-Task conditions | A later **Task** depending on an earlier Task's answer is still not represented. v0.8.5 answers the same question inside one Task only. | Out of the Core; a producer follow-up Task or a future List-level rule. |
+| Compound conditions | One source field with `equals`/`in`, chains compose; no AND/OR over several sources. | A later expression language, if a setter needs it. |
+| Optional condition sources | A source must be a required part; an optional source could never be answered and would leave its targets `pending` forever. | Diagnose at import (`condition-source-optional`). |
+| A media part as a condition source | Freeform has no named scalar; the media part can be a target but not a source. | Keep the boundary; do not invent a decision field from marks. |
+| A per-part template picker | v0.8.5 resolves each part's judgment from built-ins; a person cannot override one part in the import dialog. The column and export are ready. | A dialog control over `task_parts.partJudgment`. |
 | UI label for TaskPart | "Part", "question" and "题目" are all natural in different surfaces. | Canonical in code/docs: **TaskPart**. User-facing: **question/题目** when it is a question; **part** in a multi-question Task. Never "item". |
 | Package archive (`.listea` zip) | v1/v2 use a directory; an archive is a packaging change, not a semantic one. | Later, with extraction and selection rules. |
 

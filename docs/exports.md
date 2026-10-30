@@ -114,6 +114,18 @@ whose Tasks each have one part and no structured form still exports v5, byte for
 only when a Task has several parts or a form's field record. The full shape:
 [Webhooks → TaskParts, and why they are version 6](webhooks.md#taskparts-and-why-they-are-version-6).
 
+**Since `0.8.5-preview` a part may be asked only when an earlier part's answer says so, or judged
+under an answer sheet of its own, and the body says so with version 7.** Each TaskPart gains four
+keys — `judgment`, `when`, `applicability` and `stale` — written on every part in a v7 body, `null`
+and `false` included. The version is taken when any Task carries a part with a condition, a part
+judgment, or a branch fact this build cannot read; a body whose parts are all unconditional and
+judged by the Task's own template is byte for byte what v0.8.4 sent (v5 or v6). Version 7 is a
+superset of 6, not a combination code: a round that carries marks, an add-on or structured content
+and a branch says `7`, and each older key still follows its own rule. There is **no availability
+key** at Task or Asset level: a part that is not asked is still exported, with `applicability`
+saying so. The full shape:
+[Webhooks → Conditional parts, and why they are version 7](webhooks.md#conditional-parts-and-why-they-are-version-7).
+
 ## Where the choice lives
 
 **A Todo picks one method when it is created. A List can override it for everything it holds.** Both
